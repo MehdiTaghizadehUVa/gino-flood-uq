@@ -1,4 +1,5 @@
-from typing import Dict
+from pathlib import Path
+from typing import Dict, Union
 
 from ...utils import count_tensor_params
 from .base_transforms import Transform, DictTransform
@@ -168,6 +169,42 @@ class UnitGaussianNormalizer(Transform):
         self.std = self.std.to(device)
         return self
 
+    def state_dict(self):
+        """Return a serializable state dict (mean, std, eps, dim, mask) for persistence."""
+        if self.mean is None or self.std is None:
+            return None
+        return {
+            "mean": self.mean.cpu().clone(),
+            "std": self.std.cpu().clone(),
+            "eps": self.eps,
+            "dim": self.dim,
+            "mask": self.mask.cpu().clone() if self.mask is not None else None,
+        }
+
+    @classmethod
+    def from_state_dict(cls, state_dict, device=None):
+        """
+        Build a UnitGaussianNormalizer from a state dict saved by state_dict().
+        If device is set, move mean/std/mask to that device.
+        """
+        if state_dict is None:
+            return None
+        mean = state_dict["mean"]
+        std = state_dict["std"]
+        mask = state_dict.get("mask")
+        if device is not None:
+            mean = mean.to(device)
+            std = std.to(device)
+            if mask is not None:
+                mask = mask.to(device)
+        return cls(
+            mean=mean,
+            std=std,
+            eps=state_dict.get("eps", 1e-7),
+            dim=state_dict.get("dim"),
+            mask=mask,
+        )
+
     @classmethod
     def from_dataset(cls, dataset, dim=None, keys=None, mask=None):
         """Return a dictionary of normalizer instances, fitted on the given dataset
@@ -193,6 +230,7 @@ class UnitGaussianNormalizer(Transform):
                 if key in keys:
                     instances[key].partial_fit(sample.unsqueeze(0))
         return instances
+
 
 class DictUnitGaussianNormalizer(DictTransform):
     """DictUnitGaussianNormalizer composes
@@ -247,3 +285,99 @@ class DictUnitGaussianNormalizer(DictTransform):
                 if key in keys:
                     instances[key].partial_fit(sample.unsqueeze(0))
         return instances
+
+
+# ---------------------------------------------------------------------------
+# Persistence: save/load dict of UnitGaussianNormalizer to disk
+# ---------------------------------------------------------------------------
+NORMALIZER_STATE_VERSION = 1
+
+
+def save_normalizers(
+    normalizers: Dict[str, UnitGaussianNormalizer],
+    path: Union[str, Path],
+    keys_to_save: tuple = ("geometry", "static", "boundary", "target"),
+) -> Path:
+    """
+    Save a dict of UnitGaussianNormalizers to a single file.
+    Only the given keys are persisted; typically omit "dynamic" (alias of "target").
+
+    Parameters
+    ----------
+    normalizers : dict[str, UnitGaussianNormalizer]
+        Dict keyed by name (e.g. geometry, static, boundary, target).
+    path : str | Path
+        Output file path (e.g. .pt or .pth).
+    keys_to_save : tuple
+        Keys to include; default matches flood script (geometry, static, boundary, target).
+
+    Returns
+    -------
+    Path
+        Resolved path where state was written.
+    """
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    state = {}
+    for key in keys_to_save:
+        if key not in normalizers:
+            continue
+        norm = normalizers[key]
+        sd = norm.state_dict() if hasattr(norm, "state_dict") else None
+        if sd is not None:
+            state[key] = sd
+    payload = {"version": NORMALIZER_STATE_VERSION, "normalizers": state}
+    torch.save(payload, path)
+    return path.resolve()
+
+
+def load_normalizers(
+    path: Union[str, Path],
+    device: Union[str, torch.device, None] = None,
+    keys_expected: tuple = ("geometry", "static", "boundary", "target"),
+    dynamic_alias: str = "target",
+) -> Dict[str, UnitGaussianNormalizer]:
+    """
+    Load a dict of UnitGaussianNormalizers from a file saved by save_normalizers.
+    Rebuilds UnitGaussianNormalizer via from_state_dict for each key.
+    Optionally adds an alias (e.g. "dynamic" -> "target") so both keys point to the same normalizer.
+
+    Parameters
+    ----------
+    path : str | Path
+        Input file path.
+    device : str | torch.device | None
+        If set, move mean/std to this device; default None (leave on CPU).
+    keys_expected : tuple
+        Keys that should be present; used for validation. Missing keys are skipped with a warning.
+    dynamic_alias : str
+        If not None, after loading, normalizers["dynamic"] = normalizers[this_key].
+        Set to None to disable. Default "target" for flood script compatibility.
+
+    Returns
+    -------
+    dict[str, UnitGaussianNormalizer]
+        Dict keyed by name; includes alias if dynamic_alias is set.
+    """
+    path = Path(path)
+    if not path.exists():
+        raise FileNotFoundError(f"Normalizer state file not found: {path}")
+    try:
+        payload = torch.load(path, map_location="cpu", weights_only=False)
+    except TypeError:
+        payload = torch.load(path, map_location="cpu")
+    version = payload.get("version", 0)
+    if version != NORMALIZER_STATE_VERSION:
+        raise ValueError(
+            f"Normalizer state version mismatch: file has {version}, "
+            f"expected {NORMALIZER_STATE_VERSION}. Refit and save again."
+        )
+    state = payload.get("normalizers", payload)
+    out = {}
+    for key in keys_expected:
+        if key not in state:
+            continue
+        out[key] = UnitGaussianNormalizer.from_state_dict(state[key], device=device)
+    if dynamic_alias and dynamic_alias in out:
+        out["dynamic"] = out[dynamic_alias]
+    return out

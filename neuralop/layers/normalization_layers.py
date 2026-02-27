@@ -22,12 +22,19 @@ class AdaIN(nn.Module):
     def set_embedding(self, x):
         self.embedding = x.reshape(self.embed_dim,)
 
-    def forward(self, x):
-        assert self.embedding is not None, "AdaIN: update embeddding before running forward"
-
-        weight, bias = torch.split(self.mlp(self.embedding), self.in_channels, dim=0)
-
-        return nn.functional.group_norm(x, self.in_channels, weight, bias, eps=self.eps)
+    def forward(self, x, embedding=None):
+        """Forward with optional embedding. If embedding is passed, it is used (and kept in the
+        computation graph). Otherwise use self.embedding (set via set_embedding)."""
+        if embedding is not None:
+            e = embedding.reshape(self.embed_dim,)
+        else:
+            e = self.embedding
+            if e is None:
+                raise RuntimeError("AdaIN: pass embedding or call set_embedding before forward")
+            e = e.reshape(self.embed_dim,)
+        weight, bias = torch.split(self.mlp(e), self.in_channels, dim=0)
+        out = nn.functional.group_norm(x, self.in_channels, weight, bias, eps=self.eps)
+        return out
 
 class InstanceNorm(nn.Module):
     def __init__(self, **kwargs):

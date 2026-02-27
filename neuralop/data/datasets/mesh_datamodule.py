@@ -90,7 +90,7 @@ class MeshDataModule:
         # remove trailing newlines from train and test indices
         mesh_ind = [x.rstrip() for x in mesh_ind]
 
-        data_dir = root_dir / "data"
+        data_dir = root_dir / "data/data"
 
         # Load all meshes
 

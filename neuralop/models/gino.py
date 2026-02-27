@@ -1,10 +1,12 @@
 from functools import partial
+
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
-import time
 
+# Import your base classes & layers from wherever they reside.
+# For example:
 from .base_model import BaseModel
-
 from ..layers.channel_mlp import ChannelMLP
 from ..layers.embeddings import SinusoidalEmbedding
 from ..layers.fno_block import FNOBlocks
@@ -12,134 +14,153 @@ from ..layers.spectral_convolution import SpectralConv
 from ..layers.gno_block import GNOBlock
 
 class GINO(BaseModel):
-    """GINO: Geometry-informed Neural Operator. Learns a mapping between
-       functions presented over arbitrary coordinate meshes. The model carries
-       global integration through spectral convolution layers in an intermediate
-       latent space, as described in [1]_.
+    """
+    GINO: Geometry-Informed Neural Operator, with an optional autoregressive
+    residual connection for PDE time-stepping.
 
-        Parameters
-        ----------
-        in_channels : int
-            feature dimension of input points
-        out_channels : int
-            feature dimension of output points
-        latent_feature_channels : int, optional
-            number of channels in optional latent feature map
-            to concatenate onto latent embeddings before 
-            the FNO's forward pass, default None
-        projection_channels : int, optional
-            number of channels in FNO pointwise projection
-        gno_coord_dim : int, optional
-            geometric dimension of input/output queries, by default 3
-        gno_radius : float, optional
-            radius in input/output space for GNO neighbor search, by default 0.033
-        in_gno_transform_type : str, optional
-            transform type parameter for input GNO, by default 'linear'
-            see neuralop.layers.gno_block for more details
-        out_gno_transform_type : str, optional
-            transform type parameter for output GNO, by default 'linear'
-            see neuralop.layers.gno_block for more details
-        gno_pos_embed_type : literal `{'transformer', 'nerf'}` | None
-            type of optional sinusoidal positional embedding to use in GNOBlock,
-            by default `'transformer'`
-        fno_in_channels : int, optional
-            number of input channels for FNO, by default 26
-        fno_n_modes : tuple, optional
-            number of modes along each dimension 
-            to use in FNO, by default (16, 16, 16)
-        fno_hidden_channels : int, optional
-            hidden channels for use in FNO, by default 64
-        lifting_channel_ratio : int, optional
-            ratio of lifting channels to `fno_hidden_channels`, by default 2
-            The number of liting channels in the lifting block of the FNO is
-            lifting_channel_ratio * hidden_channels (e.g. default 512)
-        fno_n_layers : int, optional
-            number of layers in FNO, by default 4
-        
-        Other Parameters
-        ----------------
-        gno_embed_channels: int
-            dimension of optional per-channel embedding to use in GNOBlock,
-            by default 32
-        gno_embed_max_positions: int
-            max positions of optional per-channel embedding to use in GNOBlock,
-            by default 10000. If `gno_pos_embed_type != 'transformer'`, value is unused.
-        in_gno_channel_mlp_hidden_layers : list, optional
-            widths of hidden layers in input GNO, by default [80, 80, 80]
-        out_gno_channel_mlp_hidden_layers : list, optional
-            widths of hidden layers in output GNO, by default [512, 256]
-        gno_channel_mlp_non_linearity : nn.Module, optional
-            nonlinearity to use in gno ChannelMLP, by default F.gelu
-        gno_use_open3d : bool, optional
-            whether to use open3d neighbor search, by default True
-            if False, uses pure-PyTorch fallback neighbor search
-        gno_use_torch_scatter : bool, optional
-            whether to use torch_scatter's neighborhood reduction function
-            or the native PyTorch implementation in IntegralTransform layers.
-            If False, uses the fallback PyTorch version.
-        out_gno_tanh : bool, optional
-            whether to use tanh to stabilize outputs of the output GNO, by default False
-        fno_resolution_scaling_factor : float | None, optional
-            factor by which to scale output of FNO, by default None
-        fno_incremental_n_modes : list[int] | None, defaults to None
-        if passed, sets n_modes separately for each FNO layer.
-        fno_block_precision : str, defaults to 'full'
-            data precision to compute within fno block
-        fno_use_channel_mlp : bool, defaults to True
-            Whether to use a ChannelMLP layer after each FNO block.
-        fno_channel_mlp_dropout : float, defaults to 0
-            dropout parameter of above ChannelMLP.
-        fno_channel_mlp_expansion : float, defaults to 0.5
-            expansion parameter of above ChannelMLP.
-        fno_non_linearity : nn.Module, defaults to F.gelu
-            nonlinear activation function between each FNO layer.
-        fno_stabilizer : nn.Module | None, defaults to None
-            By default None, otherwise tanh is used before FFT in the FNO block.
-        fno_norm : nn.Module | None, defaults to None
-            normalization layer to use in FNO.
-        fno_ada_in_features : int | None, defaults to 4
-            if an adaptive mesh is used, number of channels of its positional embedding.
-            If None, adaptive mesh embedding is not used.
-        fno_ada_in_dim : int, defaults to 1
-            dimensions of above FNO adaptive mesh.
-        fno_preactivation : bool, defaults to False
-            whether to use Resnet-style preactivation.
-        fno_skip : str, defaults to 'linear'
-            type of skip connection to use.
-        fno_channel_mlp_skip : str, defaults to 'soft-gating'
-            type of skip connection to use in the FNO
-            'linear': conv layer
-            'soft-gating': weights the channels of the input
-            'identity': nn.Identity
-        fno_separable : bool, defaults to False
-            if True, use a depthwise separable spectral convolution.
-        fno_factorization : str {'tucker', 'tt', 'cp'} |  None, defaults to None
-            Tensor factorization of the parameters weight to use
-        fno_rank : float, defaults to 1.0
-            Rank of the tensor factorization of the Fourier weights.
-        fno_joint_factorization : bool, defaults to False
-            Whether all the Fourier layers should be parameterized by a single tensor (vs one per layer).
-        fno_fixed_rank_modes : bool, defaults to False
-            Modes to not factorize.
-        fno_implementation : str {'factorized', 'reconstructed'} | None, defaults to 'factorized'
-            If factorization is not None, forward mode to use::
-            * `reconstructed` : the full weight tensor is reconstructed from the factorization and used for the forward pass
-            * `factorized` : the input is directly contracted with the factors of the decomposition
-        fno_decomposition_kwargs : dict, defaults to dict()
-            Optionaly additional parameters to pass to the tensor decomposition.
-        fno_conv_module : nn.Module, defaults to SpectralConv
-            Spectral Convolution module to use.
-        
-            
-        References
-        -----------
-        .. _[1] : 
-        
-        Li, Z., Kovachki, N., Choy, C., Li, B., Kossaifi, J., Otta, S., 
-            Nabian, M., Stadler, M., Hundt, C., Azizzadenesheli, K., Anandkumar, A. (2023)
-            Geometry-Informed Neural Operator for Large-Scale 3D PDEs. NeurIPS 2023,
-            https://proceedings.neurips.cc/paper_files/paper/2023/hash/70518ea42831f02afc3a2828993935ad-Abstract-Conference.html
-        """
+    By default, GINO uses:
+      1) An input GNOBlock (self.gno_in)
+      2) A lifting MLP
+      3) A series of FNO blocks in a latent 2D/3D domain
+      4) An output GNOBlock (self.gno_out)
+      5) A final projection MLP to the desired output dimension
+      6) (Optionally) a skip connection from x[..., :out_channels] to the output
+
+    Parameters
+    ----------
+    in_channels : int
+        Number of input channels (e.g., WD, VX, VY, plus optionally more).
+    out_channels : int
+        Number of output channels to predict (e.g. 3 for WD, VX, VY).
+    latent_feature_channels : int, optional
+        If not None, additional channels appended before FNO blocks.
+    projection_channels : int, optional
+        Number of hidden channels in the final projection MLP, default=256.
+    gno_coord_dim : int, optional
+        The dimension of coordinates that the GNO blocks expect, default=3.
+        E.g. 2D geometry => set gno_coord_dim=2. If open3d is used, it expects 3D.
+    gno_radius : float, optional
+        Neighborhood search radius for GNO blocks, default=0.033.
+    in_gno_transform_type : {'linear','nonlinear','residual',...}, optional
+        The transform type for the input GNO block, default='linear'.
+    out_gno_transform_type : str, optional
+        The transform type for the output GNO block, default='linear'.
+    gno_pos_embed_type : {'transformer','nerf'} or None, optional
+        The positional embedding style used within the GNO blocks, default='transformer'.
+    fno_in_channels : int, optional
+        The channel dimension that the FNO expects *after* the input GNO, default=3.
+    fno_n_modes : tuple, optional
+        The number of Fourier modes along each dimension, default=(16,16,16).
+    fno_hidden_channels : int, optional
+        The hidden channel size in each FNO layer, default=64.
+    fno_lifting_channel_ratio : int, optional
+        Multiplier to define how many channels to use in the MLP-lifting layer, default=2.
+    fno_n_layers : int, optional
+        Number of FNO layers, default=4.
+
+    # GNO details
+    gno_embed_channels : int, default=32
+        Dim of the optional positional embedding in GNO.
+    gno_embed_max_positions : int, default=10000
+        Max positions for the sinusoidal embedding if pos_embed_type='transformer'.
+    in_gno_channel_mlp_hidden_layers : list, default=[80,80,80]
+        Widths of hidden layers in the input GNO block’s channel MLP.
+    out_gno_channel_mlp_hidden_layers : list, default=[512,256]
+        Widths of hidden layers in the output GNO block’s channel MLP.
+    gno_channel_mlp_non_linearity : callable, default=F.gelu
+        Nonlinear function used in the GNO channel MLP.
+    gno_use_open3d : bool, default=True
+        Whether to use open3d’s neighbor search if available (3D only).
+    gno_use_torch_scatter : bool, default=True
+        Whether to use torch_scatter-based integral transform ops in GNO.
+    out_gno_tanh : str or None, default=None
+        If 'latent_embed', 'both', etc., applies tanh after GNO out. By default, no tanh.
+
+    # NEW weighting function arguments
+    gno_in_weighting_fn : Optional[str], default=None
+        Name of the weighting function for the input GNO block (e.g. "linear", "bump", etc.).
+    gno_in_wt_fn_scale : float, default=1.0
+        Scale factor for the input GNO weighting function.
+    gno_out_weighting_fn : Optional[str], default=None
+        Name of the weighting function for the output GNO block.
+    gno_out_wt_fn_scale : float, default=1.0
+        Scale factor for the output GNO weighting function.
+
+    # FNO details
+    fno_resolution_scaling_factor : float or None, default=None
+        If not None, up/down scale the size of the latent grid for the FNO.
+    fno_incremental_n_modes : list[int] or None, default=None
+        If provided, changes n_modes layer by layer in the FNO.
+    fno_block_precision : {'full','half','amp'}, default='full'
+        Controls precision in the FNO blocks.
+    fno_use_channel_mlp : bool, default=True
+        Whether to insert a channel MLP after each FNO layer.
+    fno_channel_mlp_dropout : float, default=0
+        Dropout probability in the channel MLP.
+    fno_channel_mlp_expansion : float, default=0.5
+        Expansion ratio in the channel MLP.
+    fno_non_linearity : callable, default=F.gelu
+        Activation function in the FNO layers.
+    fno_stabilizer : callable or None, default=None
+        If not None, an activation to apply before FFT in the FNO.
+    fno_norm : str or None, default=None
+        Type of normalization to use inside the FNO blocks. E.g., 'instance', 'ada_in'.
+    fno_ada_in_features : int or None, default=4
+        If using 'ada_in' normalization, how many features to embed for AdaIN.
+    fno_ada_in_dim : int, default=1
+        The dimension used for AdaIN features if fno_ada_in_features is not None.
+    use_fgn_noise : bool, default=False
+        If True and fno_norm=='ada_in', use FGN-style noise: z ~ N(0,I) encoded
+        by a learned linear map (no sinusoidal embed). For probabilistic ensembles.
+    fgn_noise_dim : int, default=32
+        Dimension of the FGN noise vector z when use_fgn_noise=True.
+    fno_preactivation : bool, default=False
+        If True, use a pre-act style in the FNO blocks (like a pre-activation ResNet).
+    fno_skip : str, default='linear'
+        The skip connection style in each FNO layer.
+    fno_channel_mlp_skip : str, default='soft-gating'
+        Type of skip connection in the channel MLP inside the FNO blocks.
+    fno_separable : bool, default=False
+        If True, use depthwise separable spectral convolutions in the FNO.
+    fno_factorization : {'tucker','tt','cp'} or None, default=None
+        If not None, factorize the spectral convolution weight.
+    fno_rank : float, default=1.0
+        Rank ratio if factorizing the spectral convolution.
+    fno_joint_factorization : bool, default=False
+        If True, share one factorization among all FNO layers.
+    fno_fixed_rank_modes : bool, default=False
+        If True, do not factorize certain low-frequency modes.
+    fno_implementation : {'factorized','reconstructed'} or None, default='factorized'
+        If factorization is used, how to apply it at forward time.
+    fno_decomposition_kwargs : dict, default={}
+        Additional parameters for the decomposition.
+    fno_conv_module : nn.Module, default=SpectralConv
+        Which spectral convolution module to use in the FNO.
+
+    autoregressive : bool, default=False
+        If True, the final output is added to x[..., :out_channels] to form
+        the final prediction (residual skip). This is useful for PDE time-stepping
+        where x is the previous state and out is the predicted delta.
+
+    Returns
+    -------
+    out : torch.Tensor, shape (B, n_out, out_channels)
+        The predicted output field on `output_queries`.
+        If `autoregressive=True`, it becomes x[..., :out_channels] + model_prediction.
+
+    Example
+    -------
+    >>> model = GINO(in_channels=3, out_channels=3, gno_coord_dim=2, autoregressive=True)
+    >>> # Suppose:
+    >>> #   input_geom => (1, N_in, 2)
+    >>> #   latent_queries => (1, H, W, 2)
+    >>> #   output_queries => (1, N_out, 2)
+    >>> #   x => (batch_size, N_in, 3)    # WD, VX, VY at previous time
+    >>> y_next = model(input_geom, latent_queries, output_queries, x)
+    >>> # shape => (batch_size, N_out, 3)
+    >>> #  y_next = x[..., :3] + predicted_delta if autoregressive=True
+    """
+
     def __init__(
         self,
         in_channels,
@@ -152,100 +173,133 @@ class GINO(BaseModel):
         out_gno_transform_type='linear',
         gno_pos_embed_type='transformer',
         fno_in_channels=3,
-        fno_n_modes=(16, 16, 16), 
+        fno_n_modes=(16, 16, 16),
         fno_hidden_channels=64,
         fno_lifting_channel_ratio=2,
         fno_n_layers=4,
-        # Other GNO Params
         gno_embed_channels=32,
         gno_embed_max_positions=10000,
         in_gno_channel_mlp_hidden_layers=[80, 80, 80],
         out_gno_channel_mlp_hidden_layers=[512, 256],
-        gno_channel_mlp_non_linearity=F.gelu, 
+        gno_channel_mlp_non_linearity=F.gelu,
         gno_use_open3d=True,
         gno_use_torch_scatter=True,
         out_gno_tanh=None,
-        # Other FNO Params
+        # NEW weighting parameters for GNO
+        gno_in_weighting_fn=None,
+        gno_in_wt_fn_scale=1.0,
+        gno_out_weighting_fn=None,
+        gno_out_wt_fn_scale=1.0,
+        # FNO extras
         fno_resolution_scaling_factor=None,
         fno_incremental_n_modes=None,
         fno_block_precision='full',
-        fno_use_channel_mlp=True, 
+        fno_use_channel_mlp=True,
         fno_channel_mlp_dropout=0,
         fno_channel_mlp_expansion=0.5,
         fno_non_linearity=F.gelu,
-        fno_stabilizer=None, 
+        fno_stabilizer=None,
         fno_norm=None,
         fno_ada_in_features=4,
         fno_ada_in_dim=1,
+        use_fgn_noise=False,
+        fgn_noise_dim=32,
         fno_preactivation=False,
         fno_skip='linear',
         fno_channel_mlp_skip='soft-gating',
         fno_separable=False,
         fno_factorization=None,
         fno_rank=1.0,
-        fno_joint_factorization=False, 
+        fno_joint_factorization=False,
         fno_fixed_rank_modes=False,
         fno_implementation='factorized',
         fno_decomposition_kwargs=dict(),
-        fno_conv_module=SpectralConv,
+        fno_conv_module=None,  # e.g. SpectralConv
+        # NEW ARG
+        autoregressive=False,
+        alpha: float = 1.0,
+        beta:  float = 1.0,
         **kwargs
-        ):
-        
+    ):
         super().__init__()
         self.in_channels = in_channels
         self.out_channels = out_channels
         self.latent_feature_channels = latent_feature_channels
         self.gno_coord_dim = gno_coord_dim
         self.fno_hidden_channels = fno_hidden_channels
-
         self.lifting_channels = fno_lifting_channel_ratio * fno_hidden_channels
 
-        # TODO: make sure this makes sense in all contexts
-        if in_gno_transform_type in ["nonlinear", "nonlinear_kernelonly"]:
+        self.autoregressive = autoregressive  # controls residual skip
+        self.alpha = alpha
+        self.beta  = beta
+
+        # if in_gno_transform_type is 'linear' or 'nonlinear',
+        # we assume out_channels = in_channels
+        if in_gno_transform_type in ["linear", "nonlinear"]:
             in_gno_out_channels = self.in_channels
         else:
             in_gno_out_channels = fno_in_channels
 
         self.fno_in_channels = in_gno_out_channels
-
         if latent_feature_channels is not None:
             self.fno_in_channels += latent_feature_channels
 
         if self.gno_coord_dim != 3 and gno_use_open3d:
-            print(f'Warning: GNO expects {self.gno_coord_dim}-d data but Open3d expects 3-d data')
+            print(
+                f'Warning: GNO expects {self.gno_coord_dim}-d data but Open3D expects 3-d data'
+            )
             gno_use_open3d = False
 
         self.in_coord_dim = len(fno_n_modes)
-        self.gno_out_coord_dim = len(fno_n_modes) # gno output and fno will use same dimensions
+        self.gno_out_coord_dim = len(fno_n_modes)
         if self.in_coord_dim != self.gno_coord_dim:
-            print(f'Warning: FNO expects {self.in_coord_dim}-d data while input GNO expects {self.gno_coord_dim}-d data')
+            print(
+                f'Warning: FNO expects {self.in_coord_dim}-d data while input GNO expects {self.gno_coord_dim}-d data'
+            )
 
         self.in_coord_dim_forward_order = list(range(self.in_coord_dim))
-        # channels starting at 2 to permute everything after channel and batch dims
         self.in_coord_dim_reverse_order = [j + 2 for j in self.in_coord_dim_forward_order]
 
         self.fno_norm = fno_norm
+        self.use_fgn_noise = use_fgn_noise
+        self.fgn_noise_dim = fgn_noise_dim
+
+        if use_fgn_noise and fno_norm != "ada_in":
+            raise ValueError(
+                "FGN (use_fgn_noise=True) requires fno_norm='ada_in'. "
+                f"Got fno_norm={fno_norm!r}. Set fno_norm: 'ada_in' in config when using FGN."
+            )
+
+        # If we have "ada_in" normalization in FNO
         if self.fno_norm == "ada_in":
-            if fno_ada_in_features is not None and gno_pos_embed_type is not None:
-                self.adain_pos_embed = SinusoidalEmbedding(in_channels=fno_ada_in_dim,
-                                                        num_frequencies=fno_ada_in_features, 
-                                                        max_positions=10000,
-                                                        embedding_type=gno_pos_embed_type)                    
+            if use_fgn_noise:
+                # FGN: low-dim noise z encoded by learned linear map (arXiv:2506.10772)
+                self.fgn_noise_encoder = nn.Linear(fgn_noise_dim, fgn_noise_dim)
+                self.adain_pos_embed = None
+                self.ada_in_dim = fgn_noise_dim
+            elif fno_ada_in_features is not None and gno_pos_embed_type is not None:
+                # E.g. a sinusoidal embedding (e.g. diffusion noise level)
+                self.fgn_noise_encoder = None
+                self.adain_pos_embed = SinusoidalEmbedding(
+                    in_channels=fno_ada_in_dim,
+                    num_frequencies=fno_ada_in_features,
+                    max_positions=10000,
+                    embedding_type=gno_pos_embed_type
+                )
                 self.ada_in_dim = self.adain_pos_embed.out_channels
             else:
-                self.ada_in_dim = fno_ada_in_dim
+                self.fgn_noise_encoder = None
                 self.adain_pos_embed = None
+                self.ada_in_dim = fno_ada_in_dim
         else:
+            self.fgn_noise_encoder = None
             self.adain_pos_embed = None
             self.ada_in_dim = None
-        
+
         self.gno_radius = gno_radius
         self.out_gno_tanh = out_gno_tanh
 
-        ### input GNO
-        # input to the first GNO ChannelMLP: `x` pos encoding,
-        # `y` (integrand) pos encoding, potentially `f_y`
-
+        # 1) Input GNO
         self.gno_in = GNOBlock(
             in_channels=in_channels,
             out_channels=in_gno_out_channels,
@@ -259,54 +313,60 @@ class GINO(BaseModel):
             transform_type=in_gno_transform_type,
             use_open3d_neighbor_search=gno_use_open3d,
             use_torch_scatter_reduce=gno_use_torch_scatter,
+            # NEW weighting arguments
+            gno_weighting_fn=gno_in_weighting_fn,
+            gno_wt_fn_scale=gno_in_wt_fn_scale
         )
 
-        ### Lifting layer before FNOBlocks
-        self.lifting = ChannelMLP(in_channels=self.fno_in_channels,
-                                  hidden_channels=self.lifting_channels,
-                                  out_channels=fno_hidden_channels,
-                                  n_layers=3)
-        
-        ### FNOBlocks in latent space
-        # input: `in_p` intermediate embeddings,
-        # possibly concatenated feature channels `latent_features` 
+        # 2) Lifting MLP
+        self.lifting = ChannelMLP(
+            in_channels=self.fno_in_channels,
+            hidden_channels=self.lifting_channels,
+            out_channels=fno_hidden_channels,
+            n_layers=3
+        )
+
+        # 3) FNO Blocks
+        if fno_conv_module is None:
+            # fallback to default spectral conv if none provided
+            fno_conv_module = SpectralConv
+
         self.fno_blocks = FNOBlocks(
-                n_modes=fno_n_modes,
-                hidden_channels=fno_hidden_channels,
-                in_channels=fno_hidden_channels,
-                out_channels=fno_hidden_channels,
-                positional_embedding=None,
-                n_layers=fno_n_layers,
-                resolution_scaling_factor=fno_resolution_scaling_factor,
-                incremental_n_modes=fno_incremental_n_modes,
-                fno_block_precision=fno_block_precision,
-                use_channel_mlp=fno_use_channel_mlp,
-                channel_mlp_expansion=fno_channel_mlp_expansion,
-                channel_mlp_dropout=fno_channel_mlp_dropout,
-                non_linearity=fno_non_linearity,
-                stabilizer=fno_stabilizer, 
-                norm=fno_norm,
-                ada_in_features=self.ada_in_dim,
-                preactivation=fno_preactivation,
-                fno_skip=fno_skip,
-                channel_mlp_skip=fno_channel_mlp_skip,
-                separable=fno_separable,
-                factorization=fno_factorization,
-                rank=fno_rank,
-                joint_factorization=fno_joint_factorization, 
-                fixed_rank_modes=fno_fixed_rank_modes,
-                implementation=fno_implementation,
-                decomposition_kwargs=fno_decomposition_kwargs,
-                domain_padding=None,
-                domain_padding_mode=None,
-                conv_module=fno_conv_module,
-                **kwargs
+            n_modes=fno_n_modes,
+            hidden_channels=fno_hidden_channels,
+            in_channels=fno_hidden_channels,
+            out_channels=fno_hidden_channels,
+            positional_embedding=None,
+            n_layers=fno_n_layers,
+            resolution_scaling_factor=fno_resolution_scaling_factor,
+            incremental_n_modes=fno_incremental_n_modes,
+            fno_block_precision=fno_block_precision,
+            use_channel_mlp=fno_use_channel_mlp,
+            channel_mlp_expansion=fno_channel_mlp_expansion,
+            channel_mlp_dropout=fno_channel_mlp_dropout,
+            non_linearity=fno_non_linearity,
+            stabilizer=fno_stabilizer,
+            norm=fno_norm,
+            ada_in_features=self.ada_in_dim,
+            preactivation=fno_preactivation,
+            fno_skip=fno_skip,
+            channel_mlp_skip=fno_channel_mlp_skip,
+            separable=fno_separable,
+            factorization=fno_factorization,
+            rank=fno_rank,
+            joint_factorization=fno_joint_factorization,
+            fixed_rank_modes=fno_fixed_rank_modes,
+            implementation=fno_implementation,
+            decomposition_kwargs=fno_decomposition_kwargs,
+            domain_padding=None,
+            domain_padding_mode=None,
+            conv_module=fno_conv_module,
+            **kwargs
         )
 
-        ### output GNO
-
+        # 4) Output GNO
         self.gno_out = GNOBlock(
-            in_channels=fno_hidden_channels, # number of channels in f_y
+            in_channels=fno_hidden_channels,
             out_channels=fno_hidden_channels,
             coord_dim=self.gno_coord_dim,
             radius=self.gno_radius,
@@ -317,132 +377,177 @@ class GINO(BaseModel):
             channel_mlp_non_linearity=gno_channel_mlp_non_linearity,
             transform_type=out_gno_transform_type,
             use_open3d_neighbor_search=gno_use_open3d,
-            use_torch_scatter_reduce=gno_use_torch_scatter
+            use_torch_scatter_reduce=gno_use_torch_scatter,
+            # NEW weighting arguments
+            gno_weighting_fn=gno_out_weighting_fn,
+            gno_wt_fn_scale=gno_out_wt_fn_scale
         )
 
-        self.projection = ChannelMLP(in_channels=fno_hidden_channels, 
-                              out_channels=self.out_channels, 
-                              hidden_channels=projection_channels, 
-                              n_layers=2, 
-                              n_dim=1, 
-                              non_linearity=fno_non_linearity) 
+        # 5) Final projection => out_channels
+        self.projection = ChannelMLP(
+            in_channels=fno_hidden_channels,
+            out_channels=self.out_channels,
+            hidden_channels=projection_channels,
+            n_layers=2,
+            n_dim=1,
+            non_linearity=fno_non_linearity
+        )
 
-    #returns: (fno_hidden_channels, n_1, n_2, ...)
     def latent_embedding(self, in_p, ada_in=None):
+        """
+        Internal helper: pass through self.lifting -> self.fno_blocks.
 
-        # in_p : (batch, n_1 , ... , n_k, in_channels + k)
-        # ada_in : (fno_ada_in_dim, )
+        in_p shape: (batch, d_1, d_2,..., d_k, channels)
+        Returns: (batch, fno_hidden_channels, d_1, d_2,..., d_k)
+        """
+        # Permute channel to second dimension => (b,c,d_1,d_2,...)
+        in_p = in_p.permute(0, in_p.ndim-1, *range(1, in_p.ndim-1))
 
-        # permute (b, n_1, ..., n_k, c) -> (b,c, n_1,...n_k)
-        in_p = in_p.permute(0, len(in_p.shape)-1, *list(range(1,len(in_p.shape)-1)))
-        #Update Ada IN embedding    
+        # AdaIN embedding: when ada_in is provided, pass it through forward for gradient flow
+        ada_in_embed = None
         if ada_in is not None:
             if ada_in.ndim == 2:
                 ada_in = ada_in.squeeze(0)
-            if self.adain_pos_embed is not None:
+            if self.use_fgn_noise and self.fgn_noise_encoder is not None:
+                ada_in_embed = self.fgn_noise_encoder(ada_in.unsqueeze(0)).squeeze(0)
+            elif self.adain_pos_embed is not None:
                 ada_in_embed = self.adain_pos_embed(ada_in.unsqueeze(0)).squeeze(0)
             else:
                 ada_in_embed = ada_in
-            if self.fno_norm == "ada_in":
-                self.fno_blocks.set_ada_in_embeddings(ada_in_embed)
+        elif self.use_fgn_noise and self.fgn_noise_encoder is not None and self.fno_norm == "ada_in":
+            device = in_p.device
+            z_zero = torch.zeros(self.fgn_noise_dim, device=device, dtype=in_p.dtype)
+            ada_in_embed_zero = self.fgn_noise_encoder(z_zero.unsqueeze(0)).squeeze(0)
+            self.fno_blocks.set_ada_in_embeddings(ada_in_embed_zero)
 
-        #Apply FNO blocks
+        # Lifting
         in_p = self.lifting(in_p)
-
         for idx in range(self.fno_blocks.n_layers):
-            in_p = self.fno_blocks(in_p, idx)
+            in_p = self.fno_blocks(in_p, idx, ada_in_embed=ada_in_embed)
 
-        return in_p 
-    
-    def forward(self, input_geom, latent_queries, output_queries, x=None, latent_features=None, ada_in=None, **kwargs):
-        """The GINO's forward call:
-        Input GNO --> FNOBlocks --> output GNO + projection to output queries.
+        return in_p
 
-        .. note ::
-            GINO currently supports batching **only in cases where the geometry of
-            inputs and outputs is shared across the entire batch**. Inputs can have a batch dim
-            in ``x`` and ``latent_features``, but it must be shared for both. 
+    def forward(
+        self,
+        input_geom,
+        latent_queries,
+        output_queries,
+        x=None,
+        latent_features=None,
+        ada_in=None,
+        **kwargs
+    ):
+        """
+        Forward pass of GINO. If autoregressive=True, a skip connection is applied
+        so the final output = x[..., :out_channels] + predicted_delta.
 
         Parameters
         ----------
-        input_geom : torch.Tensor
-            input domain coordinate mesh
-            shape (1, n_in, gno_coord_dim)
-        latent_queries : torch.Tensor
-            latent geometry on which to compute FNO latent embeddings
-            a grid on [0,1] x [0,1] x ....
-            shape (1, n_gridpts_1, .... n_gridpts_n, gno_coord_dim)
-        output_queries : torch.Tensor
-            points at which to query the final GNO layer to get output
-            shape (n_out, gno_coord_dim)
-        x : torch.Tensor, optional
-            input function a defined on the input domain `input_geom`
-            shape (batch, n_in, in_channels). Default None
+        input_geom : torch.Tensor, shape (1, n_in, gno_coord_dim)
+            Coordinates for the input domain.
+        latent_queries : torch.Tensor, shape (1, d_1, ..., d_k, gno_coord_dim)
+            The intermediate "latent domain" grid for the FNO.
+        output_queries : torch.Tensor, shape (1, n_out, gno_coord_dim)
+            Coordinates at which we want final predictions.
+        x : torch.Tensor, shape (batch, n_in, in_channels), optional
+            Input field(s) on input_geom. If None, batch=1 is assumed.
+            If autoregressive=True, x[..., :out_channels] will be used for skip.
         latent_features : torch.Tensor, optional
-            optional feature map to concatenate onto latent embedding
-            before being passed into the latent FNO, default None
-            if `latent_feature_channels` is set, must be passed
+            Additional channels for the latent domain, shape (b, d_1,..., d_k, C).
         ada_in : torch.Tensor, optional
-            adaptive scalar instance parameter, defaults to None
-        """
+            If using AdaIN in the FNO, pass the embedding here.
 
-        # Ensure input functions on the input geom and latent geom
-        # have compatible batch sizes
+        Returns
+        -------
+        out : torch.Tensor, shape (batch, n_out, out_channels)
+        If self.autoregressive, out = x[..., :out_channels] + predicted_delta.
+        """
         if x is None:
             batch_size = 1
         else:
             batch_size = x.shape[0]
-        
-        if latent_features is not None:
-            assert self.latent_feature_channels is not None,\
-                  "if passing latent features, latent_feature_channels must be set."
-            assert latent_features.shape[-1] == self.latent_feature_channels
 
-            # batch, n_gridpts_1, .... n_gridpts_n, gno_coord_dim
-            assert latent_features.ndim == self.gno_coord_dim + 2,\
-                f"Latent features must be of shape (batch, n_gridpts_1, ...n_gridpts_n, gno_coord_dim), got {latent_features.shape}"
-            # latent features must have the same shape (except channels) as latent_queries 
+        # Possibly broadcast latent_features if batch=1
+        if latent_features is not None:
+            assert self.latent_feature_channels is not None, (
+                "Must set latent_feature_channels if passing latent_features."
+            )
             if latent_features.shape[0] != batch_size:
                 if latent_features.shape[0] == 1:
-                    latent_features = latent_features.repeat(batch_size, *[1]*(latent_features.ndim-1))
+                    latent_features = latent_features.repeat(
+                        batch_size, *([1]*(latent_features.ndim-1))
+                    )
 
-        input_geom = input_geom.squeeze(0) 
-        latent_queries = latent_queries.squeeze(0)
+        # Squeeze leading dimension from geometry & queries => remove the (1, ...)
+        input_geom = input_geom.squeeze(0)         # (n_in, gno_coord_dim)
+        latent_queries = latent_queries.squeeze(0) # (d_1,...,d_k, gno_coord_dim)
+        output_queries = output_queries.squeeze(0) # (n_out, gno_coord_dim)
+        # 1) Input GNO: merges geometry + x
+        # Flatten latent_queries => (d_1*d_2*..., gno_coord_dim)
+        in_p = self.gno_in(
+            y=input_geom,
+            x=latent_queries.reshape(-1, latent_queries.shape[-1]),
+            f_y=x
+        )
+        # => shape (batch, d_1*d_2*..., in_gno_out_channels)
+        # => reshape => (batch, d_1, d_2,..., in_gno_out_channels)
+        grid_shape = latent_queries.shape[:-1]
+        in_p = in_p.view(batch_size, *grid_shape, -1)
 
-        # Pass through input GNOBlock 
-        in_p = self.gno_in(y=input_geom,
-                           x=latent_queries.view((-1, latent_queries.shape[-1])),
-                           f_y=x)
-        
-        grid_shape = latent_queries.shape[:-1] # disregard positional encoding dim
-        
-        # shape (batch_size, grid1, ...gridn, -1)
-        in_p = in_p.view((batch_size, *grid_shape, -1))
-        
+        # 2) Concatenate latent_features if present
         if latent_features is not None:
             in_p = torch.cat((in_p, latent_features), dim=-1)
-        # take apply fno in latent space
-        latent_embed = self.latent_embedding(in_p=in_p, 
-                                             ada_in=ada_in)
 
-        # Integrate latent space to output queries
-        #latent_embed shape (b, c, n_1, n_2, ..., n_k)
-        batch_size = latent_embed.shape[0]
-        # permute to (b, n_1, n_2, ...n_k, c)
-        # then reshape to (b, n_1 * n_2 * ...n_k, out_channels)
-        latent_embed = latent_embed.permute(0, *self.in_coord_dim_reverse_order, 1).reshape(batch_size, -1, self.fno_hidden_channels)
-        
+        # 3) FNO embedding
+        latent_embed = self.latent_embedding(in_p, ada_in=ada_in)
+
+        # Possibly apply tanh if out_gno_tanh in ['latent_embed','both']
         if self.out_gno_tanh in ['latent_embed', 'both']:
             latent_embed = torch.tanh(latent_embed)
-        
-        # latent queries is of shape (d_1 x d_2 x... d_n x n), reshape to n_out x n
-        out = self.gno_out(y=latent_queries.reshape((-1, latent_queries.shape[-1])), 
-                    x=output_queries,
-                    f_y=latent_embed,)
+
+        # latent_embed => (b, c, d_1, d_2,...)
+        # permute => (b, d_1*d_2..., c)
+        latent_embed = latent_embed.permute(
+            0, *self.in_coord_dim_reverse_order, 1
+        ).reshape(batch_size, -1, self.fno_hidden_channels)
+
+        # 4) Output GNO => merges latent_queries & output_queries
+        out = self.gno_out(
+            y=latent_queries.reshape(-1, latent_queries.shape[-1]),
+            x=output_queries,
+            f_y=latent_embed
+        )
+        # => shape (b, c, n_out) => permute => (b, n_out, c)
         out = out.permute(0, 2, 1)
 
-        # Project pointwise to out channels
-        #(b, n_in, out_channels)
-        out = self.projection(out).permute(0, 2, 1)  
-        
+        # 5) final projection => (b, n_out, out_channels)
+        out = self.projection(out).permute(0, 2, 1)
+
+        # Possibly apply tanh if out_gno_tanh == 'both'
+        if self.out_gno_tanh == 'both':
+            out = torch.tanh(out)
+
+        # 6) Autoregressive skip: out = previous + delta
+        if self.autoregressive and (x is not None):
+            if out.shape[1] != x.shape[1]:
+                raise ValueError(
+                    f"Autoregressive skip requires out.shape[1] == x.shape[1], "
+                    f"got {out.shape[1]} vs {x.shape[1]}."
+                )
+            if self.out_channels > x.shape[2]:
+                raise ValueError(
+                    f"Cannot skip-add: out_channels {self.out_channels} > in_channels {x.shape[2]}."
+                )
+            # skip with the final out_channels in x
+            prev_step = x[..., -self.out_channels:]  # shape (b, n_in, out_channels)
+            delta = out
+            out   = self.alpha * prev_step + self.beta * delta
+
         return out
+
+    def reset_verifications(self):
+        """
+        Reset the internal verification flags (or states) of the GNO blocks.
+        """
+        self.gno_in.reset_verification()
+        self.gno_out.reset_verification()

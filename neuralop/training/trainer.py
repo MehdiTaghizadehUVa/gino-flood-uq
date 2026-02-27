@@ -1,8 +1,8 @@
 from timeit import default_timer
 from pathlib import Path
-from typing import Union
+from typing import Union, Optional
+import logging
 import sys
-import warnings
 
 import torch
 from torch.cuda import amp
@@ -20,6 +20,11 @@ except ModuleNotFoundError:
 import neuralop.mpu.comm as comm
 from neuralop.losses import LpLoss
 from .training_state import load_training_state, save_training_state
+
+try:
+    from tqdm import tqdm
+except ImportError:
+    tqdm = None
 
 
 class Trainer:
@@ -39,6 +44,9 @@ class Trainer:
         log_output: bool=False,
         use_distributed: bool=False,
         verbose: bool=False,
+        logger: Optional[logging.Logger]=None,
+        use_progress_bar: bool=True,
+        scheduler_monitor: str="train_err",
     ):
         """
         Parameters
@@ -60,6 +68,10 @@ class Trainer:
         use_distributed : bool, default is False
             whether to use DDP
         verbose : bool, default is False
+        logger : logging.Logger, optional
+            if set, log messages go to this logger instead of print
+        use_progress_bar : bool, default is True
+            if True and verbose, show tqdm progress bar over training batches
         """
 
         self.model = model
@@ -71,6 +83,9 @@ class Trainer:
         self.eval_interval = eval_interval
         self.log_output = log_output
         self.verbose = verbose
+        self.logger = logger
+        self.use_progress_bar = use_progress_bar
+        self.scheduler_monitor = str(scheduler_monitor).strip().lower()
         self.use_distributed = use_distributed
         self.device = device
         # handle autocast device
@@ -83,7 +98,7 @@ class Trainer:
                 self.autocast_device_type = "cpu"
         self.mixed_precision = mixed_precision
         self.data_processor = data_processor
-    
+
         # Track starting epoch for checkpointing/resuming
         self.start_epoch = 0
 
@@ -151,13 +166,6 @@ class Trainer:
         if training_loss is None:
             training_loss = LpLoss(d=2)
         
-        # Warn the user if training loss is reducing across the batch
-        if hasattr(training_loss, 'reduction'):
-            if training_loss.reduction == "mean":
-                warnings.warn(f"{training_loss.reduction=}. This means that the loss is "
-                              "initialized to average across the batch dim. The Trainer "
-                              "expects losses to sum across the batch dim.")
-
         if eval_losses is None:  # By default just evaluate on the training loss
             eval_losses = dict(l2=training_loss)
         
@@ -193,11 +201,18 @@ class Trainer:
             self.save_every = None
 
         if self.verbose:
-            print(f'Training on {len(train_loader.dataset)} samples')
-            print(f'Testing on {[len(loader.dataset) for loader in test_loaders.values()]} samples'
-                  f'         on resolutions {[name for name in test_loaders]}.')
-            sys.stdout.flush()
+            msg = (
+                f"Training on {len(train_loader.dataset)} samples. "
+                f"Testing on {[len(loader.dataset) for loader in test_loaders.values()]} samples "
+                f"on resolutions {[name for name in test_loaders]}."
+            )
+            if self.logger:
+                self.logger.info(msg)
+            else:
+                print(msg)
+                sys.stdout.flush()
         
+        epoch_metrics = dict()
         for epoch in range(self.start_epoch, self.n_epochs):
             train_err, avg_loss, avg_lasso_loss, epoch_train_time =\
                   self.train_one_epoch(epoch, train_loader, training_loss)
@@ -258,31 +273,76 @@ class Trainer:
         # track number of training examples in batch
         self.n_samples = 0
 
-        for idx, sample in enumerate(train_loader):
-            
-            loss = self.train_one_batch(idx, sample, training_loss)
+        use_pbar = (
+            self.verbose
+            and self.use_progress_bar
+            and tqdm is not None
+            and (not self.use_distributed or (hasattr(dist, "get_rank") and dist.get_rank() == 0))
+        )
+        batch_iter = train_loader
+        if use_pbar:
+            batch_iter = tqdm(
+                train_loader,
+                desc=f"Epoch {epoch}/{self.n_epochs}",
+                unit="batch",
+                leave=True,
+                dynamic_ncols=True,
+                ncols=100,
+            )
+
+        for idx, sample in enumerate(batch_iter):
+            result = self.train_one_batch(idx, sample, training_loss)
+            if isinstance(result, tuple) and len(result) == 2:
+                loss, metrics = result
+            else:
+                loss, metrics = result, {}
+
             loss.backward()
             self.optimizer.step()
 
-            train_err += loss.item()
+            # train_err: use relative L2 when provided, else training loss
+            err_val = metrics.get("rel_l2", loss)
+            train_err += err_val.item() if hasattr(err_val, "item") else err_val
             with torch.no_grad():
                 avg_loss += loss.item()
                 if self.regularizer:
                     avg_lasso_loss += self.regularizer.loss
 
-        if isinstance(self.scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
-            self.scheduler.step(train_err)
-        else:
-            self.scheduler.step()
+            if use_pbar and hasattr(batch_iter, "set_postfix"):
+                err_scalar = err_val.item() if hasattr(err_val, "item") else err_val
+                loss_scalar = loss.item() if hasattr(loss, "item") else loss
+                batch_size = None
+                if isinstance(sample, dict):
+                    if "y" in sample and torch.is_tensor(sample["y"]):
+                        batch_size = sample["y"].shape[0]
+                    elif "target" in sample and torch.is_tensor(sample["target"]):
+                        batch_size = sample["target"].shape[0]
+                # Display per-sample batch error so pbar train_err is comparable to epoch-end train_err.
+                err_display = (err_scalar / batch_size) if (batch_size is not None and batch_size > 0) else err_scalar
+                # Display per-sample batch loss so pbar loss is comparable to epoch-end avg_loss.
+                loss_display = (loss_scalar / batch_size) if (batch_size is not None and batch_size > 0) else loss_scalar
+                batch_iter.set_postfix(
+                    loss=f"{loss_display:.8f}",
+                    train_err=f"{err_display:.6f}",
+                    refresh=False,
+                )
 
         epoch_train_time = default_timer() - t1
 
-        train_err /= len(train_loader)
+        # train_err = mean per sample (same scale as eval); err_val must be sum over batch (loss or metrics["rel_l2"])
+        if self.n_samples > 0:
+            train_err /= self.n_samples
         avg_loss /= self.n_samples
         if self.regularizer:
             avg_lasso_loss /= self.n_samples
         else:
             avg_lasso_loss = None
+
+        if isinstance(self.scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
+            monitored = avg_loss if self.scheduler_monitor == "avg_loss" else train_err
+            self.scheduler.step(monitored)
+        else:
+            self.scheduler.step()
         
         lr = None
         for pg in self.optimizer.param_groups:
@@ -342,14 +402,6 @@ class Trainer:
 
         errors = {f"{log_prefix}_{loss_name}": 0 for loss_name in loss_dict.keys()}
 
-        # Warn the user if any of the eval losses is reducing across the batch
-        for _, eval_loss in loss_dict.items():
-            if hasattr(eval_loss, 'reduction'):
-                if eval_loss.reduction == "mean":
-                    warnings.warn(f"{eval_loss.reduction=}. This means that the loss is "
-                                "initialized to average across the batch dim. The Trainer "
-                                "expects losses to sum across the batch dim.")
-
         self.n_samples = 0
         with torch.no_grad():
             for idx, sample in enumerate(data_loader):
@@ -357,12 +409,21 @@ class Trainer:
                 if idx == len(data_loader) - 1:
                     return_output = True
                 eval_step_losses, outs = self.eval_one_batch(sample, loss_dict, return_output=return_output)
+                batch_size = sample["y"].size(0)
 
                 for loss_name, val_loss in eval_step_losses.items():
-                    errors[f"{log_prefix}_{loss_name}"] += val_loss
-            
+                    v = val_loss.item() if hasattr(val_loss, "item") else val_loss
+                    # When loss has reduction='mean', val is mean over batch; weight by batch size so sum/n_samples = true mean
+                    loss_fn = loss_dict.get(loss_name)
+                    if hasattr(loss_fn, "reduction") and getattr(loss_fn, "reduction", None) == "mean":
+                        errors[f"{log_prefix}_{loss_name}"] += v * batch_size
+                    else:
+                        errors[f"{log_prefix}_{loss_name}"] += v
+
+        # n_samples is cumulative from eval_one_batch
         for key in errors.keys():
-            errors[key] /= self.n_samples
+            if self.n_samples > 0:
+                errors[key] /= self.n_samples
 
         # on last batch, log model outputs
         if self.log_output:
@@ -442,8 +503,8 @@ class Trainer:
         if self.regularizer:
             loss += self.regularizer.loss
         
-        return loss
-    
+        return loss, {}
+
     def eval_one_batch(self,
                        sample: dict,
                        eval_losses: dict,
@@ -530,15 +591,21 @@ class Trainer:
                 avg_lasso_loss=avg_lasso_loss,
                 lr=lr)
 
-        msg = f"[{epoch}] time={time:.2f}, "
-        msg += f"avg_loss={avg_loss:.4f}, "
-        msg += f"train_err={train_err:.4f}"
+        msg = (
+            f"Epoch {epoch} | time={time:.2f}s | "
+            f"avg_loss={avg_loss:.8f} | train_err={train_err:.6f}"
+        )
         if avg_lasso_loss is not None:
-            msg += f", avg_lasso={avg_lasso_loss:.4f}"
+            msg += f" | avg_lasso={avg_lasso_loss:.6f}"
+        if lr is not None:
+            msg += f" | lr={lr:.2e}"
 
-        print(msg)
-        sys.stdout.flush()
-        
+        if self.logger:
+            self.logger.info(msg)
+        else:
+            print(msg)
+            sys.stdout.flush()
+
         if self.wandb_log:
             wandb.log(data=values_to_log,
                       step=epoch+1,
@@ -563,15 +630,19 @@ class Trainer:
         msg = ""
         for metric, value in eval_metrics.items():
             if isinstance(value, float) or isinstance(value, torch.Tensor):
-                msg += f"{metric}={value:.4f}, "
+                v = value.item() if hasattr(value, "item") else value
+                msg += f"{metric}={v:.3e}, "
             if self.wandb_log:
                 values_to_log[metric] = value       
         
-        msg = f"Eval: " + msg[:-2] # cut off last comma+space
-        print(msg)
-        sys.stdout.flush()
+        msg = "Eval: " + msg[:-2]  # cut off last comma+space
+        if self.logger:
+            self.logger.info(msg)
+        else:
+            print(msg)
+            sys.stdout.flush()
 
-        if self.wandb_log:
+        if self.wandb_log and wandb_available:
             wandb.log(data=values_to_log,
                       step=epoch+1,
                       commit=True)
@@ -603,13 +674,17 @@ class Trainer:
                                                 model=self.model,
                                                 optimizer=self.optimizer,
                                                 regularizer=self.regularizer,
-                                                scheduler=self.scheduler)
+                                                scheduler=self.scheduler,
+                                                map_location={'cpu': self.device})
 
         if resume_epoch is not None:
             if resume_epoch > self.start_epoch:
                 self.start_epoch = resume_epoch
                 if self.verbose:
-                    print(f"Trainer resuming from epoch {resume_epoch}")
+                    if self.logger:
+                        self.logger.info("Trainer resuming from epoch %s", resume_epoch)
+                    else:
+                        print(f"Trainer resuming from epoch {resume_epoch}")
 
 
     def checkpoint(self, save_dir):
@@ -637,6 +712,7 @@ class Trainer:
                                 epoch=self.epoch
                                 )
             if self.verbose:
-                print(f"[Rank 0]: saved training state to {save_dir}")
-
-       
+                if self.logger:
+                    self.logger.info("Saved training state to %s", save_dir)
+                else:
+                    print(f"[Rank 0]: saved training state to {save_dir}")

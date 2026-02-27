@@ -270,13 +270,18 @@ class FNOBlocks(nn.Module):
             for norm, embedding in zip(self.norm, embeddings):
                 norm.set_embedding(embedding)
 
-    def forward(self, x, index=0, output_shape=None):
+    def forward(self, x, index=0, output_shape=None, ada_in_embed=None):
         if self.preactivation:
-            return self.forward_with_preactivation(x, index, output_shape)
+            return self.forward_with_preactivation(x, index, output_shape, ada_in_embed=ada_in_embed)
         else:
-            return self.forward_with_postactivation(x, index, output_shape)
+            return self.forward_with_postactivation(x, index, output_shape, ada_in_embed=ada_in_embed)
 
-    def forward_with_postactivation(self, x, index=0, output_shape=None):
+    def _norm_forward(self, norm_layer, x, ada_in_embed=None):
+        if ada_in_embed is not None and isinstance(norm_layer, AdaIN):
+            return norm_layer(x, embedding=ada_in_embed)
+        return norm_layer(x)
+
+    def forward_with_postactivation(self, x, index=0, output_shape=None, ada_in_embed=None):
         x_skip_fno = self.fno_skips[index](x)
         x_skip_fno = self.convs[index].transform(x_skip_fno, output_shape=output_shape)
 
@@ -293,7 +298,7 @@ class FNOBlocks(nn.Module):
         #self.convs(x, index, output_shape=output_shape)
 
         if self.norm is not None:
-            x_fno = self.norm[self.n_norms * index](x_fno)
+            x_fno = self._norm_forward(self.norm[self.n_norms * index], x_fno, ada_in_embed=ada_in_embed)
 
         x = x_fno + x_skip_fno
 
@@ -303,20 +308,20 @@ class FNOBlocks(nn.Module):
         x = self.channel_mlp[index](x) + x_skip_channel_mlp
 
         if self.norm is not None:
-            x = self.norm[self.n_norms * index + 1](x)
+            x = self._norm_forward(self.norm[self.n_norms * index + 1], x, ada_in_embed=ada_in_embed)
 
         if index < (self.n_layers - 1):
             x = self.non_linearity(x)
 
         return x
 
-    def forward_with_preactivation(self, x, index=0, output_shape=None):
+    def forward_with_preactivation(self, x, index=0, output_shape=None, ada_in_embed=None):
         # Apply non-linear activation (and norm)
         # before this block's convolution/forward pass:
         x = self.non_linearity(x)
 
         if self.norm is not None:
-            x = self.norm[self.n_norms * index](x)
+            x = self._norm_forward(self.norm[self.n_norms * index], x, ada_in_embed=ada_in_embed)
 
         x_skip_fno = self.fno_skips[index](x)
         x_skip_fno = self.convs[index].transform(x_skip_fno, output_shape=output_shape)
@@ -338,7 +343,7 @@ class FNOBlocks(nn.Module):
             x = self.non_linearity(x)
 
         if self.norm is not None:
-            x = self.norm[self.n_norms * index + 1](x)
+            x = self._norm_forward(self.norm[self.n_norms * index + 1], x, ada_in_embed=ada_in_embed)
 
         x = self.channel_mlp[index](x) + x_skip_channel_mlp
 

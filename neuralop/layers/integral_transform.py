@@ -21,7 +21,7 @@ class IntegralTransform(nn.Module):
         each x) over which to integrate
 
     k : A kernel parametrized as a MLP (LinearChannelMLP)
-    
+
     f : Input function to integrate against given\
         on the points y
 
@@ -36,7 +36,7 @@ class IntegralTransform(nn.Module):
         MLP parametrizing the kernel k. Input dimension
         should be dim x + dim y or dim x + dim y + dim f.
         MLP should not be pointwise and should only operate across
-        channels to preserve the discretization-invariance of the 
+        channels to preserve the discretization-invariance of the
         kernel integral.
     channel_mlp_layers : list, default None
         List of layers sizes speficing a MLP which
@@ -55,20 +55,20 @@ class IntegralTransform(nn.Module):
         If the input f is not given then (a) is computed
         by default independently of this parameter.
     use_torch_scatter : bool, default 'True'
-        Whether to use torch_scatter's implementation of 
-        segment_csr or our native PyTorch version. torch_scatter 
+        Whether to use torch_scatter's implementation of
+        segment_csr or our native PyTorch version. torch_scatter
         should be installed by default, but there are known versioning
         issues on some linux builds of CPU-only PyTorch. Try setting
         to False if you experience an error from torch_scatter.
     """
 
     def __init__(
-        self,
-        channel_mlp=None,
-        channel_mlp_layers=None,
-        channel_mlp_non_linearity=F.gelu,
-        transform_type="linear",
-        use_torch_scatter=True,
+            self,
+            channel_mlp=None,
+            channel_mlp_layers=None,
+            channel_mlp_non_linearity=F.gelu,
+            transform_type="linear",
+            use_torch_scatter=True,
     ):
         super().__init__()
 
@@ -78,10 +78,12 @@ class IntegralTransform(nn.Module):
         self.use_torch_scatter = use_torch_scatter
 
         if (
-            self.transform_type != "linear_kernelonly"
-            and self.transform_type != "linear"
-            and self.transform_type != "nonlinear_kernelonly"
-            and self.transform_type != "nonlinear"
+                self.transform_type not in [
+            "linear_kernelonly",
+            "linear",
+            "nonlinear_kernelonly",
+            "nonlinear",
+        ]
         ):
             raise ValueError(
                 f"Got transform_type={transform_type} but expected one of "
@@ -89,22 +91,30 @@ class IntegralTransform(nn.Module):
             )
 
         if channel_mlp is None:
-            self.channel_mlp = LinearChannelMLP(layers=channel_mlp_layers, non_linearity=channel_mlp_non_linearity)
+            self.channel_mlp = LinearChannelMLP(
+                layers=channel_mlp_layers,
+                non_linearity=channel_mlp_non_linearity
+            )
         else:
             self.channel_mlp = channel_mlp
-            
 
-    """"
-    
-
-    Assumes x=y if not specified
-    Integral is taken w.r.t. the neighbors
-    If no weights are given, a Monte-Carlo approximation is made
+    """
+    Assumes x=y if not specified.
+    Integral is taken w.r.t. the neighbors.
+    If no weights are given, a Monte-Carlo approximation is made.
     NOTE: For transforms of type 0 or 2, out channels must be
-    the same as the channels of f
+    the same as the channels of f.
     """
 
-    def forward(self, y, neighbors, x=None, f_y=None, weights=None):
+    def forward(
+            self,
+            y,
+            neighbors,
+            x=None,
+            f_y=None,
+            weights=None,
+            weighting_fn=None
+    ):
         """Compute a kernel integral transform
 
         Parameters
@@ -112,15 +122,11 @@ class IntegralTransform(nn.Module):
         y : torch.Tensor of shape [n, d1]
             n points of dimension d1 specifying
             the space to integrate over.
-            If batched, these must remain constant
-            over the whole batch so no batch dim is needed.
         neighbors : dict
             The sets A(x) given in CRS format. The
             dict must contain the keys "neighbors_index"
             and "neighbors_row_splits." For descriptions
             of the two, see NeighborSearch.
-            If batch > 1, the neighbors must be constant
-            across the entire batch.
         x : torch.Tensor of shape [m, d2], default None
             m points of dimension d2 over which the
             output function is defined. If None,
@@ -131,12 +137,13 @@ class IntegralTransform(nn.Module):
             hence its output shape must be d3 for the transforms
             (b) or (d). If None, (a) is computed.
         weights : torch.Tensor of shape [n,], default None
-            Weights for each point y proprtional to the
-            volume around f(y) being integrated. For example,
-            suppose d1=1 and let y_1 < y_2 < ... < y_{n+1}
-            be some points. Then, for a Riemann sum,
-            the weights are y_{j+1} - y_j. If None,
-            1/|A(x)| is used.
+            Weights for each point y proportional to the
+            volume around f(y) being integrated.
+        weighting_fn : callable, default None
+            If provided, used to compute pointwise weights
+            from additional neighbor data (e.g., norms).
+            Must return a tensor broadcastable to
+            `rep_features.shape[0]`.
 
         Output
         ----------
@@ -148,61 +155,113 @@ class IntegralTransform(nn.Module):
         if x is None:
             x = y
 
+        # For each row in x, we gather its neighbors in y
         rep_features = y[neighbors["neighbors_index"]]
 
-        # batching only matters if f_y (latent embedding) values are provided
+        # Determine if we have a batch dimension in f_y
         batched = False
-        # f_y has a batch dim IFF batched=True
         if f_y is not None:
             if f_y.ndim == 3:
                 batched = True
                 batch_size = f_y.shape[0]
                 in_features = f_y[:, neighbors["neighbors_index"], :]
             elif f_y.ndim == 2:
-                batched = False
                 in_features = f_y[neighbors["neighbors_index"]]
 
+        # number of neighbors for each row in x
         num_reps = (
-            neighbors["neighbors_row_splits"][1:]
-            - neighbors["neighbors_row_splits"][:-1]
+                neighbors["neighbors_row_splits"][1:]
+                - neighbors["neighbors_row_splits"][:-1]
         )
 
+        # Repeat each x[i, :] for however many neighbors that row has
         self_features = torch.repeat_interleave(x, num_reps, dim=0)
 
+        # Concatenate x and y to form MLP input
         agg_features = torch.cat([rep_features, self_features], dim=-1)
+
+        # If we have a nonlinear kernel dependency on f(y)
         if f_y is not None and (
-            self.transform_type == "nonlinear_kernelonly"
-            or self.transform_type == "nonlinear"
+                self.transform_type == "nonlinear_kernelonly"
+                or self.transform_type == "nonlinear"
         ):
             if batched:
-                # repeat agg features for every example in the batch
+                # replicate the (x,y) features for each example in the batch
                 agg_features = agg_features.repeat(
                     [batch_size] + [1] * agg_features.ndim
                 )
+            # Add the f(y) features
             agg_features = torch.cat([agg_features, in_features], dim=-1)
 
+        # Pass through MLP
         rep_features = self.channel_mlp(agg_features)
 
+        # If transform type is not 'nonlinear_kernelonly',
+        # multiply by input features (to get (b) or (d))
         if f_y is not None and self.transform_type != "nonlinear_kernelonly":
             rep_features = rep_features * in_features
 
+        # Apply weighting
         if weights is not None:
-            assert weights.ndim == 1, "Weights must be of dimension 1 in all cases"
+            # Use provided explicit weights
+            assert weights.ndim == 1, "Weights must be a 1D tensor."
             nbr_weights = weights[neighbors["neighbors_index"]]
-            # repeat weights along batch dim if batched
             if batched:
-                nbr_weights = nbr_weights.repeat(
-                    [batch_size] + [1] * nbr_weights.ndim
-                )
+                nbr_weights = nbr_weights.repeat([batch_size] + [1] * nbr_weights.ndim)
             rep_features = nbr_weights * rep_features
             reduction = "sum"
+
+
+        elif weighting_fn is not None:
+
+            # Instead of using 'neighbors["norm"]', recompute distances:
+
+            # Determine number of neighbors for each query:
+
+            num_reps = neighbors["neighbors_row_splits"][1:] - neighbors["neighbors_row_splits"][:-1]
+
+            # Expand x (the query coordinates) so that each neighbor gets its corresponding x:
+
+            if x is None:
+                raise ValueError("x must be provided for differentiable weighting.")
+
+            self_features = torch.repeat_interleave(x, num_reps, dim=0)
+
+            # Get neighbor positions from y (using the cached indices):
+
+            rep_data = y[neighbors["neighbors_index"]]
+
+            # Compute the Euclidean distances (this operation is differentiable):
+
+            d = torch.norm(self_features - rep_data, dim=-1)
+
+            # Apply the (differentiable) weighting function:
+
+            rep_weights = weighting_fn(d).unsqueeze(-1)
+
+            if batched:
+                rep_weights = rep_weights.repeat([batch_size] + [1] * rep_weights.ndim)
+
+            rep_features = rep_features * rep_weights
+
+            reduction = "sum"
+
         else:
+            # Default to mean
             reduction = "mean"
 
+        # If batching, replicate the row_splits across the batch
         splits = neighbors["neighbors_row_splits"]
         if batched:
             splits = splits.repeat([batch_size] + [1] * splits.ndim)
 
-        out_features = segment_csr(rep_features, splits, reduce=reduction, use_scatter=self.use_torch_scatter)
+        # Finally, segment_csr to aggregate results
+        out_features = segment_csr(
+            rep_features,
+            splits,
+            reduce=reduction,
+            use_scatter=self.use_torch_scatter
+        )
+
 
         return out_features

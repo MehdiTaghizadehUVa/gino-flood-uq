@@ -79,3 +79,11 @@ target/
 
 #Ipython Notebook
 .ipynb_checkpoints
+
+# Local experiment artifacts
+checkpoints_*/
+rollout_gifs*/
+single_step_maps*/
+test-output.xml
+diagnose_single_step_depth.png
+hdf_geometry_cell_points_vs_centers.png

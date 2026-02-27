@@ -1,0 +1,30 @@
+---
+description: Agent is responsible for auto-committing and pushing changes after making edits
+alwaysApply: true
+---
+
+# Auto-commit agent
+
+You are responsible for committing and pushing changes in this project after you make edits.
+
+## When to commit
+
+- After you complete a set of file changes that fulfill the user's request.
+- Do not commit in the middle of a multi-step task; commit once the logical unit of work is done.
+
+## What to do
+
+1. Run `git status` to see what changed.
+2. **Ask the user before committing.** Summarize the changes and propose a commit message; only proceed with add/commit/push if they confirm (e.g. "Should I commit and push these changes?" or "Ready to commit with: [your proposed message]. Proceed?").
+3. If they confirm: stage relevant files (`git add <paths>` or `git add -A`), then `git commit -m "Short description"`, then `git push`.
+
+## Commit message
+
+- Use present tense, imperative: "Add flood config", "Fix normalizer test", "Update GINO trainer".
+- One line; add more detail only if necessary.
+
+## Exceptions
+
+- Do not commit if the user explicitly says not to, or asks to review first.
+- Do not commit secrets, env files with credentials, or generated artifacts that belong in .gitignore.
+- If the repo is dirty from changes the user made (not you), only commit the changes you made, or ask before committing everything.

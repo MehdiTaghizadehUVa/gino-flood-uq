@@ -1,0 +1,68 @@
+---
+description: Guidelines for clean, maintainable, and human-readable code. Apply when writing or reviewing code.
+alwaysApply: true
+---
+
+# Clean Code Guidelines
+
+## Constants Over Magic Numbers
+
+- Replace hard-coded values with named constants.
+- Use descriptive names that explain purpose (e.g. `MAX_SEQUENCE_LENGTH`, `DEFAULT_BATCH_SIZE`).
+- Keep constants at the top of the file or in a dedicated module; in classes, use class attributes or module-level constants.
+
+```python
+# Prefer
+DEFAULT_N_MODES = 12
+PADDING_MODE = "constant"
+
+# Avoid
+x = model(n_modes=12)
+pad(mode="constant")
+```
+
+## Meaningful Names
+
+- Variables, functions, and classes should reveal purpose and usage.
+- Prefer clarity over brevity; avoid abbreviations unless universal (e.g. `num`, `idx`, `config`).
+- Follow project conventions: `snake_case` for functions/variables, `PascalCase` for classes, `UPPER_SNAKE` for constants.
+
+## Comments
+
+- Don't comment what the code does—make the code self-documenting.
+- Comment *why*: non-obvious decisions, workarounds, and non-obvious side effects.
+- Document public APIs (docstrings), complex algorithms, and invariants.
+
+## Single Responsibility
+
+- Each function does one thing; keep functions small and focused.
+- If you need a comment to explain what a function does, consider splitting or renaming.
+- Extract complex conditionals or loops into well-named helper functions.
+
+## DRY (Don't Repeat Yourself)
+
+- Extract repeated logic into reusable functions or small utilities.
+- Share common behavior via abstraction; maintain a single source of truth for key concepts.
+
+## Structure and Encapsulation
+
+- Keep related code together; organize in a logical hierarchy (e.g. imports, constants, helpers, public API).
+- Use consistent file and folder naming (e.g. `snake_case` for modules).
+- Hide implementation details behind clear interfaces; expose only what callers need.
+
+## Quality and Refactoring
+
+- Refactor as you go; fix technical debt when touching the area.
+- Leave code in better shape than you found it (e.g. rename one unclear name, remove one dead path).
+
+## Testing
+
+- Prefer tests for bug fixes (reproduce then fix).
+- Keep tests readable and maintainable; name tests to describe the scenario.
+- Cover edge cases and error paths where behavior matters.
+
+## Version Control
+
+- Write clear, present-tense imperative commit messages (e.g. "Add FNO config", "Fix normalizer for empty batch").
+- Prefer small, focused commits over large mixed changes.
+- Use meaningful branch names that reflect the work (e.g. `fix/flood-config`, `feature/pluvial-wv`).

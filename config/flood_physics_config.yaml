@@ -1,0 +1,104 @@
+# Configuration file for flood simulation with physics loss
+# This demonstrates how to configure physics loss parameters
+
+# Model configuration
+model:
+  name: "GINO"
+  in_channels: 4  # water_depth, velocity_x, velocity_y, volume
+  out_channels: 2  # water_depth_diff, volume_diff
+  hidden_channels: 64
+  modes: 16
+  n_layers: 4
+  lifting_channels: 256
+  projection_channels: 256
+  preactivation: false
+  use_mlp: true
+  mlp:
+    expansion: 0.5
+    dropout: 0.0
+
+# Data configuration
+data:
+  root: "./data/flood_data"  # Path to your flood data
+  n_history: 10  # Number of history time steps
+  batch_size: 8
+  resolution: 64
+  query_res: [64, 64]
+  
+  # File patterns for dynamic data
+  dynamic_patterns:
+    water_depth: "*_WD_*.txt"
+    velocity_x: "*_VX_*.txt"
+    velocity_y: "*_VY_*.txt"
+    volume: "*_V_*.txt"
+    inflow: "*_InF_*.txt"
+    precipitation: "*_Pr_*.txt"
+  
+  # Static files
+  static_files:
+    - "*_XY.txt"  # Coordinates
+    - "*_CA.txt"  # Area
+    - "*_CE.txt"  # Elevation
+    - "*_CS.txt"  # Slope
+    - "*_A.txt"   # Aspect
+    - "*_CU.txt"  # Curvature
+    - "*_N.txt"   # Manning coefficient
+    - "*_FA.txt"  # Flow accumulation
+    - "*_IP.txt"  # Infiltration
+  
+  # Noise configuration
+  noise_type: "none"  # "none", "gaussian", "uniform"
+  noise_std: 0.01
+  skip_before_timestep: 0
+
+# Optimization configuration
+opt:
+  learning_rate: 0.001
+  weight_decay: 1e-4
+  n_epochs: 100
+  
+  # Scheduler configuration
+  scheduler: "ReduceLROnPlateau"  # "ReduceLROnPlateau", "CosineAnnealingLR", "StepLR"
+  gamma: 0.5
+  scheduler_patience: 10
+  scheduler_T_max: 100
+  step_size: 30
+  
+  # Loss configuration
+  training_loss: "l2"
+  testing_loss: "l2"
+  
+  # Physics loss configuration
+  physics_loss_weight: 1.0  # Weight for physics loss component
+  delta_t: 1200.0  # Time step size in seconds
+  
+  # Save configuration
+  save_every: 10
+  save_best: 5
+  save_dir: "./checkpoints/flood_physics"
+
+# GINO-specific configuration
+gino:
+  fno_n_modes: [16, 16]
+  fno_n_layers: 4
+  fno_hidden_channels: 64
+  fno_lifting_channels: 256
+  fno_projection_channels: 256
+  fno_preactivation: false
+  fno_use_mlp: true
+  fno_mlp:
+    expansion: 0.5
+    dropout: 0.0
+
+# Wandb configuration
+wandb:
+  log: true
+  name: "flood-physics-experiment"
+  group: "flood-physics"
+  project: "neural-operator-flood"
+  entity: "your-entity"
+  sweep: false
+
+# Device configuration
+device: "cuda"  # "cuda", "cpu"
+mixed_precision: false 
