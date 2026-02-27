@@ -15,6 +15,7 @@ Example:
 """
 
 import argparse
+import copy
 import logging
 import os
 import re
@@ -54,6 +55,7 @@ from train_gino_flood_train_rollout_animation_WV import (  # noqa: E402
     parse_target_variables,
 )
 from neuralop import get_model  # noqa: E402
+from neuralop.models.base_model import BaseModel  # noqa: E402
 from neuralop.losses.data_losses import LpLoss  # noqa: E402
 from neuralop.losses.probabilistic_losses import CRPSLoss  # noqa: E402
 from neuralop.data.transforms.normalizers import load_normalizers, save_normalizers  # noqa: E402
@@ -89,12 +91,24 @@ UQ_EXCEEDANCE_THRESHOLD = 0.05
 
 def _opt(config: Any, section: Optional[str], key: str, default: Any) -> Any:
     """Get config.section.key with default. Use section=None for top-level config keys."""
+    def _safe_get(obj: Any, name: str, dflt: Any) -> Any:
+        try:
+            return getattr(obj, name)
+        except (AttributeError, KeyError, TypeError):
+            pass
+        if isinstance(obj, dict):
+            return obj.get(name, dflt)
+        try:
+            return obj[name]
+        except Exception:
+            return dflt
+
     if section is None:
-        return getattr(config, key, default)
-    obj = getattr(config, section, None)
+        return _safe_get(config, key, default)
+    obj = _safe_get(config, section, None)
     if obj is None:
         return default
-    return getattr(obj, key, default)
+    return _safe_get(obj, key, default)
 
 
 def parse_hydrograph_run_id(run_id: str) -> Tuple[str, Optional[int]]:
@@ -125,7 +139,7 @@ class _PhaseTimer:
         self.phase_name = phase_name
         self._t0 = 0.0
 
-    def __enter__(self) -> _PhaseTimer:
+    def __enter__(self) -> "_PhaseTimer":
         self._t0 = time.perf_counter()
         self.logger.info(">>> %s", self.phase_name)
         return self
@@ -190,9 +204,9 @@ def _save_generic_rollout_visuals(
     x, y = _geometry_xy(geometry)
     rid = run_id or "unknown"
     n_steps = next(iter(gt_by_channel.values())).shape[0]
-    steps = [s for s in PUBLICATION_TIMESTEPS if 0 <= s < n_steps] or (
-        [min(n_steps - 1, 0)] if n_steps > 0 else []
-    )
+    steps = [s for s in PUBLICATION_TIMESTEPS if 0 <= s < n_steps] or [
+        min(n_steps - 1, 0)
+    ]
     n_rows = len(target_variables)
 
     for t in steps:
@@ -314,6 +328,21 @@ def _crps_ensemble_vs_reference(
     return term_1 - term_2
 
 
+def _build_member_model_indices(n_models: int, n_members: int) -> List[int]:
+    """Allocate ensemble members to models as evenly as possible."""
+    if n_models <= 0:
+        raise ValueError("n_models must be >= 1")
+    if n_members <= 0:
+        raise ValueError("n_members must be >= 1")
+    base = n_members // n_models
+    rem = n_members % n_models
+    out: List[int] = []
+    for model_idx in range(n_models):
+        count = base + (1 if model_idx < rem else 0)
+        out.extend([model_idx] * count)
+    return out
+
+
 def _save_hydrograph_uq_figures_and_animation(
     geometry: Any,
     pred_mean_by_channel: Dict[str, np.ndarray],
@@ -339,9 +368,7 @@ def _save_hydrograph_uq_figures_and_animation(
     uq_dir = os.path.join(out_dir, "uq_figures_per_hydrograph")
     os.makedirs(uq_dir, exist_ok=True)
     n_steps = next(iter(pred_mean_by_channel.values())).shape[0]
-    steps = [s for s in PUBLICATION_TIMESTEPS if 0 <= s < n_steps] or (
-        [0] if n_steps > 0 else []
-    )
+    steps = [s for s in PUBLICATION_TIMESTEPS if 0 <= s < n_steps] or [0]
 
     for t in steps:
         for ch in target_variables:
@@ -515,7 +542,7 @@ def _save_hydrograph_uq_figures_and_animation(
 
 
 def _rollout_prediction_per_hydrograph(
-    trainer: Any,
+    models: List[Any],
     hydrograph_samples: List[Dict[str, Any]],
     rollout_length: int,
     history_steps: int,
@@ -536,18 +563,33 @@ def _rollout_prediction_per_hydrograph(
     Ground-truth uncertainty: variability across reference simulations (Manning's n).
     Prediction uncertainty: variability across stochastic ensemble rollouts.
     """
-    model = trainer.model
-    model.eval()
+    if not models:
+        raise ValueError("No models provided for rollout evaluation.")
+    for model in models:
+        model.eval()
     dynamic_norm.to(device)
     target_norm.to(device)
     os.makedirs(out_dir, exist_ok=True)
 
+    n_models = len(models)
     n_ens = max(1, int(n_ensemble_samples))
-    use_ensemble = fgn_noise_dim is not None and n_ens > 1
+    if n_models > 1 and n_ens < n_models:
+        logger.warning(
+            "n_ensemble_samples=%d is smaller than number of models=%d. "
+            "Raising n_ensemble_samples to %d for paper-style equal model usage.",
+            n_ens, n_models, n_models,
+        )
+        n_ens = n_models
+    use_ensemble = n_ens > 1 or n_models > 1
+    member_model_indices = _build_member_model_indices(n_models, n_ens)
+    model_counts = [member_model_indices.count(i) for i in range(n_models)]
+    logger.info(
+        "Hydrograph rollout ensemble members=%d across models=%d with per-model counts=%s",
+        n_ens, n_models, model_counts,
+    )
     if not use_ensemble:
         logger.warning(
-            "Per-hydrograph UQ run without stochastic ensemble. "
-            "Set gino.use_fgn_noise=true and rollout.n_ensemble_samples>1 for predictive uncertainty."
+            "Per-hydrograph UQ run without ensemble spread (single model, single member)."
         )
 
     start_pred_t = skip_before_timestep + history_steps
@@ -604,21 +646,34 @@ def _rollout_prediction_per_hydrograph(
                     pred_members: List[torch.Tensor] = []
                     for ens_idx in range(n_ens):
                         dyn_hist = current_dynamics[ens_idx]
+                        model_idx = member_model_indices[ens_idx]
+                        model = models[model_idx]
                         dyn_flat = dyn_hist.permute(1, 0, 2).reshape(1, dyn_hist.shape[1], -1)
                         bc_flat = current_boundary.permute(1, 0, 2).reshape(1, current_boundary.shape[1], -1)
                         x = torch.cat([static_0, bc_flat, dyn_flat], dim=2)
-                        z = torch.randn(fgn_noise_dim, device=device, dtype=x.dtype)
-                        pred_members.append(
-                            model(
-                                input_geom=geom_0,
-                                latent_queries=query_0,
-                                output_queries=geom_0,
-                                x=x,
-                                ada_in=z,
+                        if fgn_noise_dim is not None:
+                            z = torch.randn(fgn_noise_dim, device=device, dtype=x.dtype)
+                            pred_members.append(
+                                model(
+                                    input_geom=geom_0,
+                                    latent_queries=query_0,
+                                    output_queries=geom_0,
+                                    x=x,
+                                    ada_in=z,
+                                )
                             )
-                        )
+                        else:
+                            pred_members.append(
+                                model(
+                                    input_geom=geom_0,
+                                    latent_queries=query_0,
+                                    output_queries=geom_0,
+                                    x=x,
+                                )
+                            )
                     pred_stack = torch.stack(pred_members, dim=0)  # [n_ens, 1, n_cells, n_target]
                 else:
+                    model = models[0]
                     dyn_flat = current_dynamic.permute(1, 0, 2).reshape(
                         1, current_dynamic.shape[1], -1
                     )
@@ -626,12 +681,22 @@ def _rollout_prediction_per_hydrograph(
                         1, current_boundary.shape[1], -1
                     )
                     x = torch.cat([static_0, bc_flat, dyn_flat], dim=2)
-                    pred = model(
-                        input_geom=geom_0,
-                        latent_queries=query_0,
-                        output_queries=geom_0,
-                        x=x,
-                    )
+                    if fgn_noise_dim is not None:
+                        z = torch.randn(fgn_noise_dim, device=device, dtype=x.dtype)
+                        pred = model(
+                            input_geom=geom_0,
+                            latent_queries=query_0,
+                            output_queries=geom_0,
+                            x=x,
+                            ada_in=z,
+                        )
+                    else:
+                        pred = model(
+                            input_geom=geom_0,
+                            latent_queries=query_0,
+                            output_queries=geom_0,
+                            x=x,
+                        )
                     pred_stack = pred.unsqueeze(0)
 
             inv_pred_ens = target_norm.inverse_transform(pred_stack.squeeze(1))
@@ -802,7 +867,7 @@ def _rollout_prediction_per_hydrograph(
 
 
 def _rollout_prediction_generic(
-    trainer: Any,
+    models: List[Any],
     rollout_dataset: Any,
     rollout_length: int,
     history_steps: int,
@@ -822,14 +887,30 @@ def _rollout_prediction_generic(
 
     Ensemble mode follows paper-style AR updates: each member keeps its own state.
     """
-    model = trainer.model
-    model.eval()
+    if not models:
+        raise ValueError("No models provided for rollout evaluation.")
+    for model in models:
+        model.eval()
     dynamic_norm.to(device)
     target_norm.to(device)
     os.makedirs(out_dir, exist_ok=True)
 
+    n_models = len(models)
     n_ens = max(1, int(n_ensemble_samples))
-    use_ensemble = fgn_noise_dim is not None and n_ens > 1
+    if n_models > 1 and n_ens < n_models:
+        logger.warning(
+            "n_ensemble_samples=%d is smaller than number of models=%d. "
+            "Raising n_ensemble_samples to %d for paper-style equal model usage.",
+            n_ens, n_models, n_models,
+        )
+        n_ens = n_models
+    use_ensemble = n_ens > 1 or n_models > 1
+    member_model_indices = _build_member_model_indices(n_models, n_ens)
+    model_counts = [member_model_indices.count(i) for i in range(n_models)]
+    logger.info(
+        "Generic rollout ensemble members=%d across models=%d with per-model counts=%s",
+        n_ens, n_models, model_counts,
+    )
 
     per_channel_rmse: Dict[str, List[np.ndarray]] = {name: [] for name in target_variables}
     per_channel_spread: Dict[str, List[np.ndarray]] = {name: [] for name in target_variables}
@@ -873,22 +954,35 @@ def _rollout_prediction_generic(
                     pred_members: List[torch.Tensor] = []
                     for ens_idx in range(n_ens):
                         dyn_hist = current_dynamics[ens_idx]
+                        model_idx = member_model_indices[ens_idx]
+                        model = models[model_idx]
                         dyn_flat = dyn_hist.permute(1, 0, 2).reshape(1, dyn_hist.shape[1], -1)
                         bc_flat = current_boundary.permute(1, 0, 2).reshape(1, current_boundary.shape[1], -1)
                         x = torch.cat([static_0, bc_flat, dyn_flat], dim=2)
-                        z = torch.randn(fgn_noise_dim, device=device, dtype=x.dtype)
-                        pred_members.append(
-                            model(
-                                input_geom=geom_0,
-                                latent_queries=query_0,
-                                output_queries=geom_0,
-                                x=x,
-                                ada_in=z,
+                        if fgn_noise_dim is not None:
+                            z = torch.randn(fgn_noise_dim, device=device, dtype=x.dtype)
+                            pred_members.append(
+                                model(
+                                    input_geom=geom_0,
+                                    latent_queries=query_0,
+                                    output_queries=geom_0,
+                                    x=x,
+                                    ada_in=z,
+                                )
                             )
-                        )
+                        else:
+                            pred_members.append(
+                                model(
+                                    input_geom=geom_0,
+                                    latent_queries=query_0,
+                                    output_queries=geom_0,
+                                    x=x,
+                                )
+                            )
                     pred_stack = torch.stack(pred_members, dim=0)
                     pred = pred_stack.mean(dim=0)
                 else:
+                    model = models[0]
                     dyn_flat = current_dynamic.permute(1, 0, 2).reshape(
                         1, current_dynamic.shape[1], -1
                     )
@@ -896,12 +990,22 @@ def _rollout_prediction_generic(
                         1, current_boundary.shape[1], -1
                     )
                     x = torch.cat([static_0, bc_flat, dyn_flat], dim=2)
-                    pred = model(
-                        input_geom=geom_0,
-                        latent_queries=query_0,
-                        output_queries=geom_0,
-                        x=x,
-                    )
+                    if fgn_noise_dim is not None:
+                        z = torch.randn(fgn_noise_dim, device=device, dtype=x.dtype)
+                        pred = model(
+                            input_geom=geom_0,
+                            latent_queries=query_0,
+                            output_queries=geom_0,
+                            x=x,
+                            ada_in=z,
+                        )
+                    else:
+                        pred = model(
+                            input_geom=geom_0,
+                            latent_queries=query_0,
+                            output_queries=geom_0,
+                            x=x,
+                        )
                     pred_stack = pred.unsqueeze(0)
 
             inv_pred = target_norm.inverse_transform(pred)
@@ -1114,18 +1218,182 @@ def _resolve_device(device: Union[str, torch.device]) -> torch.device:
     return torch.device(device)
 
 
-def _resolve_checkpoint(save_dir: Path) -> Tuple[Path, str]:
-    """Return (save_dir, checkpoint_name). Raises FileNotFoundError if no checkpoint."""
-    if not save_dir.exists():
-        raise FileNotFoundError(f"Checkpoint directory not found: {save_dir}")
+def _resolve_checkpoint_in_dir(save_dir: Path) -> Tuple[Path, str]:
+    """Return (dir, alias) for a single checkpoint directory."""
     if (save_dir / "best_model_state_dict.pt").exists():
         return save_dir, CHECKPOINT_BEST
     if (save_dir / "model_state_dict.pt").exists():
         return save_dir, CHECKPOINT_LAST
-    found = [p.name for p in save_dir.iterdir()]
+    found = [p.name for p in save_dir.iterdir()] if save_dir.exists() else []
     raise FileNotFoundError(
         f"No checkpoint in {save_dir}. Expected one of {CHECKPOINT_FILES}. Found: {found}"
     )
+
+
+def _discover_checkpoint_runs(checkpoint_path: Path) -> List[Tuple[Path, str, str]]:
+    """
+    Discover checkpoint runs.
+
+    Returns
+    -------
+    list of (checkpoint_dir, alias, label)
+    """
+    if not checkpoint_path.exists():
+        raise FileNotFoundError(f"Checkpoint path not found: {checkpoint_path}")
+
+    runs: List[Tuple[Path, str, str]] = []
+    try:
+        run_dir, alias = _resolve_checkpoint_in_dir(checkpoint_path)
+        runs.append((run_dir, alias, checkpoint_path.name or "model0"))
+        return runs
+    except FileNotFoundError:
+        pass
+
+    child_dirs = sorted([p for p in checkpoint_path.iterdir() if p.is_dir()])
+    for child in child_dirs:
+        try:
+            run_dir, alias = _resolve_checkpoint_in_dir(child)
+            runs.append((run_dir, alias, child.name))
+        except FileNotFoundError:
+            continue
+
+    if not runs:
+        found = [p.name for p in checkpoint_path.iterdir()]
+        raise FileNotFoundError(
+            "No valid checkpoints found in "
+            f"{checkpoint_path}. Expected checkpoint files in this directory or immediate subdirectories. "
+            f"Found entries: {found}"
+        )
+    return runs
+
+
+def _checkpoint_metadata_candidates(run_dir: Path, alias: str) -> List[Path]:
+    """Candidate metadata files storing the exact model init kwargs used at training."""
+    candidates = [
+        run_dir / f"{alias}_metadata.pkl",
+        run_dir / "model_metadata.pkl",
+        run_dir / "best_model_metadata.pkl",
+    ]
+    seen: set = set()
+    unique: List[Path] = []
+    for p in candidates:
+        key = str(p)
+        if key not in seen:
+            seen.add(key)
+            unique.append(p)
+    return unique
+
+
+def _instantiate_model_from_metadata(metadata: Dict[str, Any]) -> Any:
+    """
+    Build model directly from checkpoint metadata.
+
+    This reproduces the exact init kwargs used when the checkpoint was trained.
+    """
+    arch_name = str(metadata.get("_name", "")).strip().lower()
+    if not arch_name:
+        raise KeyError("Missing '_name' in checkpoint metadata.")
+    model_cls = BaseModel._models.get(arch_name)
+    if model_cls is None:
+        raise KeyError(
+            f"Unknown model name '{arch_name}' in checkpoint metadata. "
+            f"Known models: {list(BaseModel._models.keys())}"
+        )
+    init_kwargs = dict(metadata)
+    init_args = init_kwargs.pop("args", ())
+    init_kwargs.pop("_version", None)
+    init_kwargs.pop("_name", None)
+    if not isinstance(init_args, (list, tuple)):
+        init_args = (init_args,)
+    return model_cls(*init_args, **init_kwargs)
+
+
+def _build_model_for_run(
+    config: Any,
+    run_dir: Path,
+    alias: str,
+    label: str,
+    logger: logging.Logger,
+) -> Any:
+    """
+    Build model for a checkpoint run.
+
+    Priority:
+      1) checkpoint metadata (exact training init kwargs)
+      2) deep-copied config fallback (avoids in-place config mutation in get_model)
+    """
+    for meta_path in _checkpoint_metadata_candidates(run_dir, alias):
+        if not meta_path.exists():
+            continue
+        try:
+            metadata = torch.load(meta_path, map_location="cpu")
+            if isinstance(metadata, dict):
+                model = _instantiate_model_from_metadata(metadata)
+                logger.info(
+                    "Model '%s': initialized from checkpoint metadata %s",
+                    label,
+                    meta_path,
+                )
+                return model
+            logger.warning(
+                "Model '%s': metadata file %s is not a dict (type=%s); falling back to config.",
+                label,
+                meta_path,
+                type(metadata).__name__,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Model '%s': failed loading metadata %s (%s); falling back to config.",
+                label,
+                meta_path,
+                exc,
+            )
+
+    model_cfg = copy.deepcopy(config)
+    logger.info(
+        "Model '%s': metadata not used; initializing from evaluation config snapshot.",
+        label,
+    )
+    return get_model(model_cfg)
+
+
+def _load_models_from_runs(
+    config: Any,
+    device: torch.device,
+    checkpoint_runs: List[Tuple[Path, str, str]],
+    logger: logging.Logger,
+) -> List[Any]:
+    """Load all models from discovered checkpoints."""
+    models: List[Any] = []
+    for run_dir, alias, label in checkpoint_runs:
+        model = _build_model_for_run(config, run_dir, alias, label, logger)
+        load_training_state(save_dir=run_dir, save_name=alias, model=model)
+        model = model.to(device).eval()
+        models.append(model)
+        logger.info("Loaded model '%s' from %s (%s)", label, run_dir, alias)
+    return models
+
+
+def _get_cli_arg_value(flag: str) -> Optional[str]:
+    """Return CLI value for '--flag value' or '--flag=value', without consuming argv."""
+    argv = sys.argv[1:]
+    for i, token in enumerate(argv):
+        if token == flag and i + 1 < len(argv):
+            return argv[i + 1]
+        prefix = f"{flag}="
+        if token.startswith(prefix):
+            return token[len(prefix):]
+    return None
+
+
+def _resolve_cli_config_path(cli_value: Optional[str]) -> Optional[Path]:
+    """Resolve --config_path value using the same relative-path logic as training script."""
+    if not cli_value:
+        return None
+    cfg = Path(cli_value)
+    if not cfg.is_absolute():
+        cfg = _REPO_ROOT / cfg
+    return cfg.resolve()
 
 
 def _move_normalizers_to_device(normalizers: Dict[str, Any]) -> torch.device:
@@ -1389,19 +1657,21 @@ def main() -> int:
     """Run post-training one-step and/or rollout evaluation."""
     args = _parse_args()
     _validate_args(args)
+    cli_config_path = _resolve_cli_config_path(_get_cli_arg_value("--config_path"))
     config, device, is_logger = load_config_and_setup()
     device = _resolve_device(device)
     seed = _opt(config, "distributed", "seed", 123)
     deterministic = _opt(config, None, "deterministic", True)
     set_seed(seed, deterministic=deterministic)
 
-    save_dir = Path(_opt(config, "checkpoint", "save_dir", "."))
-    if not save_dir.is_absolute():
-        save_dir = save_dir.resolve()
-    save_dir, save_name = _resolve_checkpoint(save_dir)
+    checkpoint_path = Path(_opt(config, "checkpoint", "save_dir", "."))
+    if not checkpoint_path.is_absolute():
+        checkpoint_path = checkpoint_path.resolve()
+    checkpoint_runs = _discover_checkpoint_runs(checkpoint_path)
+    primary_dir, primary_alias, _ = checkpoint_runs[0]
     eval_log = Path(args.eval_log_file)
     if not eval_log.is_absolute():
-        eval_log = save_dir / eval_log
+        eval_log = primary_dir / eval_log
     logger = setup_logging(
         log_level=_opt(config, None, "log_level", "INFO"),
         log_file=str(eval_log),
@@ -1410,7 +1680,17 @@ def main() -> int:
     if is_logger:
         logger.info("Post-training evaluation started")
         logger.info("Device=%s | Seed=%s | Deterministic=%s", device, seed, deterministic)
-        logger.info("Checkpoint dir=%s | alias=%s", save_dir, save_name)
+        if cli_config_path is not None:
+            logger.info("Config source (--config_path): %s", cli_config_path)
+        else:
+            logger.warning(
+                "No --config_path provided. Evaluator is using the training script default config path."
+            )
+        logger.info(
+            "Checkpoint path=%s | discovered models=%d",
+            checkpoint_path,
+            len(checkpoint_runs),
+        )
         logger.info("data.root=%s", _opt(config, "data", "root", "N/A"))
 
     if _opt(config, "data", "write_train_txt", False):
@@ -1425,7 +1705,7 @@ def main() -> int:
     train_raw, test_raw, target_variables = _build_one_step_datasets(
         config, seed, logger
     )
-    normalizers = _load_or_fit_normalizers(config, train_raw, save_dir, logger)
+    normalizers = _load_or_fit_normalizers(config, train_raw, primary_dir, logger)
     with _PhaseTimer(logger, "Wrapping normalized datasets"):
         train_norm = NormalizedDatasetOnTheFly(
             train_raw, normalizers, query_res=config.data.query_res
@@ -1439,37 +1719,50 @@ def main() -> int:
         config.data.batch_size, len(test_loader),
     )
 
-    with _PhaseTimer(logger, "Loading model and checkpoint"):
-        model = get_model(config)
-        load_training_state(save_dir=save_dir, save_name=save_name, model=model)
-        model = model.to(device).eval()
+    with _PhaseTimer(logger, "Loading model checkpoint(s)"):
+        models = _load_models_from_runs(config, device, checkpoint_runs, logger)
     inverse_test = _opt(config, None, "inverse_test", True)
     if normalizers.get("target") is not None:
         normalizers["target"] = normalizers["target"].to(device)
-    data_processor = FloodGINODataProcessor(
-        device=device,
-        target_norm=normalizers.get("target"),
-        inverse_test=inverse_test,
-    )
-    data_processor.wrap(model)
-    trainer = _make_trainer(config, model, data_processor, device, logger)
     use_fgn = _opt(config, "gino", "use_fgn_noise", False)
     eval_losses = _build_eval_losses(config, use_fgn)
-    logger.info("Eval losses=%s inverse_test=%s", list(eval_losses.keys()), inverse_test)
+    logger.info(
+        "Eval losses=%s inverse_test=%s n_models=%d",
+        list(eval_losses.keys()),
+        inverse_test,
+        len(models),
+    )
 
     run_single = args.run_single_step and not args.skip_single_step
     if run_single:
-        with _PhaseTimer(logger, "One-step evaluation"):
-            metrics = trainer.evaluate(eval_losses, test_loader, log_prefix="test")
-        clean = {
-            k: (v.item() if hasattr(v, "item") else v)
-            for k, v in metrics.items()
-            if not k.endswith("_outputs")
-        }
-        logger.info("One-step TEST metrics:")
-        for k, v in clean.items():
-            logger.info("  %s: %.6e", k, v)
-            print(f"  {k}: {v:.6e}")
+        model_metrics: List[Dict[str, float]] = []
+        with _PhaseTimer(logger, "One-step evaluation (all models)"):
+            for model_idx, model in enumerate(models):
+                data_processor = FloodGINODataProcessor(
+                    device=device,
+                    target_norm=normalizers.get("target"),
+                    inverse_test=inverse_test,
+                )
+                data_processor.wrap(model)
+                trainer = _make_trainer(config, model, data_processor, device, logger)
+                metrics = trainer.evaluate(
+                    eval_losses, test_loader, log_prefix=f"test_m{model_idx}"
+                )
+                clean = {
+                    k: float(v.item() if hasattr(v, "item") else v)
+                    for k, v in metrics.items()
+                    if not k.endswith("_outputs")
+                }
+                model_metrics.append(clean)
+                logger.info("One-step metrics model[%d]: %s", model_idx, clean)
+        logger.info("One-step TEST metrics summary across %d models:", len(model_metrics))
+        common_keys = sorted(set().union(*[m.keys() for m in model_metrics]))
+        for key in common_keys:
+            vals = [m[key] for m in model_metrics if key in m]
+            mean_v = float(np.mean(vals))
+            std_v = float(np.std(vals))
+            logger.info("  %s: mean=%.6e std=%.6e", key, mean_v, std_v)
+            print(f"  {key}: mean={mean_v:.6e} std={std_v:.6e}")
 
     run_rollout_cfg = bool(_opt(config, "rollout", "run_after_training", False))
     run_rollout = (run_rollout_cfg or args.run_rollout) and not args.skip_rollout
@@ -1478,6 +1771,29 @@ def main() -> int:
             "Skipping rollout (run_after_training=false and --run_rollout not set)."
         )
         return 0
+
+    rollout_n_ensemble = int(_opt(config, "rollout", "n_ensemble_samples", 1))
+    ens_per_model = _opt(config, "rollout", "n_ensemble_samples_per_model", None)
+    if ens_per_model is not None:
+        ens_per_model_int = int(ens_per_model)
+        if ens_per_model_int < 1:
+            raise ValueError(
+                "rollout.n_ensemble_samples_per_model must be >= 1 "
+                f"(got {ens_per_model_int})."
+            )
+        rollout_n_ensemble = ens_per_model_int * max(1, len(models))
+        logger.info(
+            "Using rollout.n_ensemble_samples_per_model=%d with n_models=%d => total ensemble members=%d",
+            ens_per_model_int,
+            len(models),
+            rollout_n_ensemble,
+        )
+    else:
+        logger.info(
+            "Using rollout.n_ensemble_samples=%d total members across %d model(s).",
+            rollout_n_ensemble,
+            len(models),
+        )
 
     rollout_norm_ds, hydrograph_samples = _build_rollout_normalized_dataset(
         config, normalizers, target_variables, logger
@@ -1491,7 +1807,7 @@ def main() -> int:
     with _PhaseTimer(logger, "Rollout evaluation + plotting"):
         if hydrograph_samples:
             _rollout_prediction_per_hydrograph(
-                trainer=trainer,
+                models=models,
                 hydrograph_samples=hydrograph_samples,
                 rollout_length=config.data.rollout_length,
                 history_steps=config.data.n_history,
@@ -1504,11 +1820,11 @@ def main() -> int:
                 target_variables=target_variables,
                 logger=logger,
                 fgn_noise_dim=_opt(config, "gino", "fgn_noise_dim", 32) if use_fgn else None,
-                n_ensemble_samples=_opt(config, "rollout", "n_ensemble_samples", 1),
+                n_ensemble_samples=rollout_n_ensemble,
             )
         else:
             _rollout_prediction_generic(
-                trainer=trainer,
+                models=models,
                 rollout_dataset=rollout_norm_ds,
                 rollout_length=config.data.rollout_length,
                 history_steps=config.data.n_history,
@@ -1521,7 +1837,7 @@ def main() -> int:
                 target_variables=target_variables,
                 logger=logger,
                 fgn_noise_dim=_opt(config, "gino", "fgn_noise_dim", 32) if use_fgn else None,
-                n_ensemble_samples=_opt(config, "rollout", "n_ensemble_samples", 1),
+                n_ensemble_samples=rollout_n_ensemble,
             )
     logger.info("Evaluation finished successfully.")
     return 0
