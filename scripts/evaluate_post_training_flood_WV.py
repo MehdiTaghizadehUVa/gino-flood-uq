@@ -26,7 +26,9 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import matplotlib.animation as animation
+from matplotlib import colors as mcolors
 import matplotlib.pyplot as plt
+import matplotlib.tri as mtri
 import numpy as np
 import torch
 from torch.utils.data import DataLoader, random_split, Subset
@@ -85,12 +87,14 @@ ROLLOUT_METRICS_NPZ = "rollout_metrics_data.npz"
 ROLLOUT_SUMMARY_PNG = "rollout_metrics_summary.png"
 ROLLOUT_METRICS_HYDRO_NPZ = "rollout_metrics_per_hydrograph.npz"
 ROLLOUT_SUMMARY_HYDRO_PNG = "rollout_metrics_per_hydrograph.png"
+ROLLOUT_SUMMARY_HYDRO_FULL_PNG = "rollout_metrics_per_hydrograph_full.png"
 UQ_OVERALL_JSON = "uq_overall_metrics.json"
 UQ_RELIABILITY_PNG = "uq_reliability_wd_exceedance.png"
 UQ_PIT_RANK_PNG = "uq_pit_rank_histograms.png"
 UQ_SPREAD_SKILL_PNG = "uq_spread_skill_scatter.png"
 UQ_INTERVAL_COVERAGE_PNG = "uq_interval_coverage.png"
 UQ_BOXPLOT_PNG = "uq_metric_boxplots.png"
+UQ_VAR_DECOMP_PNG = "uq_variance_decomposition_wd.png"
 DEFAULT_EVAL_LOG = "eval_post_training.log"
 HYDROGRAPH_SIM_PATTERN = re.compile(r"^(.+)_sim(\d+)$")
 UQ_EXCEEDANCE_THRESHOLD = 0.05
@@ -350,6 +354,91 @@ def _build_member_model_indices(n_models: int, n_members: int) -> List[int]:
     return out
 
 
+def _variance_decomposition_by_model(
+    pred_ens: np.ndarray, member_model_indices: List[int], n_models: int
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Decompose predictive variance into within-model and between-model components.
+
+    Parameters
+    ----------
+    pred_ens: [n_ens, n_locations]
+    member_model_indices: model index for each ensemble member
+    n_models: number of trained models
+    """
+    if pred_ens.ndim != 2:
+        raise ValueError("pred_ens must be 2D [n_ens, n_locations]")
+    n_ens = pred_ens.shape[0]
+    if n_ens != len(member_model_indices):
+        raise ValueError("member_model_indices length must match n_ens")
+    n_loc = pred_ens.shape[1]
+    if n_models <= 0:
+        z = np.zeros(n_loc, dtype=np.float64)
+        return z, z, z
+
+    member_idx = np.asarray(member_model_indices, dtype=np.int64)
+    model_means: List[np.ndarray] = []
+    within_vars: List[np.ndarray] = []
+    for m in range(n_models):
+        sel = np.where(member_idx == m)[0]
+        if sel.size == 0:
+            continue
+        vals = pred_ens[sel, :]
+        model_means.append(np.mean(vals, axis=0))
+        if sel.size > 1:
+            within_vars.append(np.var(vals, axis=0, ddof=0))
+        else:
+            within_vars.append(np.zeros(n_loc, dtype=np.float64))
+    if not model_means:
+        z = np.zeros(n_loc, dtype=np.float64)
+        return z, z, z
+    within = np.mean(np.stack(within_vars, axis=0), axis=0)
+    between = (
+        np.var(np.stack(model_means, axis=0), axis=0, ddof=0)
+        if len(model_means) > 1
+        else np.zeros(n_loc, dtype=np.float64)
+    )
+    total = within + between
+    return within, between, total
+
+
+def _pit_rank_counts_from_reference(
+    pred_ens: np.ndarray,
+    ref_ens: np.ndarray,
+    pit_edges: np.ndarray,
+    n_ens: int,
+    rng: np.random.Generator,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    PIT and rank histogram counts using all reference members as pseudo-observations.
+
+    pred_ens shape: [n_pred, n_locations]
+    ref_ens shape:  [n_ref, n_locations]
+    """
+    if pred_ens.ndim != 2 or ref_ens.ndim != 2:
+        raise ValueError("pred_ens/ref_ens must be 2D arrays")
+    if pred_ens.shape[1] != ref_ens.shape[1]:
+        raise ValueError("pred_ens and ref_ens must share n_locations")
+
+    # Compare each reference member against predictive ensemble.
+    less = np.sum(pred_ens[:, None, :] < ref_ens[None, :, :], axis=0).astype(np.int64)
+    equal = np.sum(pred_ens[:, None, :] == ref_ens[None, :, :], axis=0).astype(np.int64)
+    u = rng.random(size=less.shape, dtype=np.float64)
+    pit = (less + u * equal) / max(float(n_ens), 1.0)
+    valid = np.isfinite(pit)
+    pit_counts = np.zeros(len(pit_edges) - 1, dtype=np.float64)
+    rank_counts = np.zeros(n_ens + 1, dtype=np.float64)
+    if not np.any(valid):
+        return pit_counts, rank_counts
+
+    pit_counts += np.histogram(pit[valid], bins=pit_edges)[0].astype(np.float64)
+    # Randomized rank with tie handling: integer rank in [0, n_ens].
+    rank = less + np.floor(u * (equal + 1)).astype(np.int64)
+    rank = np.clip(rank, 0, n_ens)
+    rank_counts += np.bincount(rank[valid], minlength=n_ens + 1).astype(np.float64)
+    return pit_counts, rank_counts
+
+
 def _nanmax_floor(arr: np.ndarray, floor: float = MIN_EPS) -> float:
     """Safe nanmax with lower floor."""
     if arr.size == 0:
@@ -430,6 +519,198 @@ def _scatter_style(marker_size: float) -> Dict[str, Any]:
         "antialiaseds": False,
         "rasterized": True,
     }
+
+
+def _compute_cell_edges(centers: np.ndarray) -> np.ndarray:
+    """Compute cell edges from sorted cell centers."""
+    c = np.asarray(centers, dtype=np.float64)
+    if c.size == 1:
+        return np.array([c[0] - 0.5, c[0] + 0.5], dtype=np.float64)
+    mids = 0.5 * (c[:-1] + c[1:])
+    left = c[0] - (mids[0] - c[0])
+    right = c[-1] + (c[-1] - mids[-1])
+    return np.concatenate(([left], mids, [right])).astype(np.float64)
+
+
+def _build_structured_renderer(
+    x: np.ndarray, y: np.ndarray
+) -> Optional[Dict[str, Any]]:
+    """
+    Recover a structured 2D grid from point coordinates for seam-free rendering.
+
+    Returns None when geometry cannot be mapped cleanly to a unique rectilinear grid.
+    """
+    x = np.asarray(x, dtype=np.float64)
+    y = np.asarray(y, dtype=np.float64)
+    n_points = int(x.size)
+    if n_points <= 1:
+        return None
+
+    ux = np.unique(x)
+    uy = np.unique(y)
+    nx = int(ux.size)
+    ny = int(uy.size)
+    if nx < 2 or ny < 2:
+        return None
+    # Structured renderer is only appropriate when grid occupancy is high.
+    coverage = float(n_points) / float(nx * ny)
+    if coverage < 0.95:
+        return None
+
+    xr = max(float(np.nanmax(x) - np.nanmin(x)), 1.0)
+    yr = max(float(np.nanmax(y) - np.nanmin(y)), 1.0)
+    atol_x = 1e-10 * xr
+    atol_y = 1e-10 * yr
+
+    ix = np.searchsorted(ux, x)
+    iy = np.searchsorted(uy, y)
+    in_bounds = (ix >= 0) & (ix < nx) & (iy >= 0) & (iy < ny)
+    if not np.all(in_bounds):
+        return None
+    if not np.all(np.isclose(x, ux[ix], rtol=0.0, atol=atol_x)):
+        return None
+    if not np.all(np.isclose(y, uy[iy], rtol=0.0, atol=atol_y)):
+        return None
+
+    linear = iy * nx + ix
+    if np.unique(linear).size != n_points:
+        # Duplicate points in same cell -> ambiguous grid assignment.
+        return None
+
+    flat_to_point = np.full(nx * ny, -1, dtype=np.int64)
+    flat_to_point[linear] = np.arange(n_points, dtype=np.int64)
+    return {
+        "mode": "structured",
+        "nx": nx,
+        "ny": ny,
+        "flat_to_point": flat_to_point,
+        "x_edges": _compute_cell_edges(ux),
+        "y_edges": _compute_cell_edges(uy),
+    }
+
+
+def _build_triangulation_renderer(x: np.ndarray, y: np.ndarray) -> Optional[Dict[str, Any]]:
+    """Build point-only triangulation renderer with long-edge masking."""
+    x = np.asarray(x, dtype=np.float64)
+    y = np.asarray(y, dtype=np.float64)
+    if x.size < 3:
+        return None
+    tri = mtri.Triangulation(x, y)
+    if tri.triangles.size == 0:
+        return None
+
+    tris = tri.triangles
+    dx = _median_positive_step(x)
+    dy = _median_positive_step(y)
+    sx = dx if dx is not None and np.isfinite(dx) and dx > 0.0 else 1.0
+    sy = dy if dy is not None and np.isfinite(dy) and dy > 0.0 else 1.0
+    xn = x / sx
+    yn = y / sy
+
+    x0, y0 = xn[tris[:, 0]], yn[tris[:, 0]]
+    x1, y1 = xn[tris[:, 1]], yn[tris[:, 1]]
+    x2, y2 = xn[tris[:, 2]], yn[tris[:, 2]]
+    l01 = np.sqrt((x0 - x1) ** 2 + (y0 - y1) ** 2)
+    l12 = np.sqrt((x1 - x2) ** 2 + (y1 - y2) ** 2)
+    l20 = np.sqrt((x2 - x0) ** 2 + (y2 - y0) ** 2)
+    lmax = np.maximum(l01, np.maximum(l12, l20))
+    finite = np.isfinite(lmax) & (lmax > 0.0)
+    if np.any(finite):
+        med = float(np.median(lmax[finite]))
+        cutoff = 2.5 * med
+        tri.set_mask(lmax > cutoff)
+    return {"mode": "tri", "triangulation": tri}
+
+
+def _build_spatial_renderer(
+    x: np.ndarray,
+    y: np.ndarray,
+    figsize: Tuple[float, float],
+    dpi: int,
+    n_rows: int,
+    n_cols: int,
+) -> Dict[str, Any]:
+    """Build renderer config: structured grid first, scatter fallback."""
+    structured = _build_structured_renderer(x, y)
+    if structured is not None:
+        return structured
+    tri = _build_triangulation_renderer(x, y)
+    if tri is not None:
+        return tri
+    marker_size = _adaptive_marker_size(
+        x, y, figsize=figsize, dpi=dpi, n_rows=n_rows, n_cols=n_cols, fill_factor=1.20
+    )
+    return {
+        "mode": "scatter",
+        "marker_size": marker_size,
+    }
+
+
+def _field_to_structured_grid(arr: np.ndarray, renderer: Dict[str, Any]) -> np.ndarray:
+    """Map 1D point values to structured 2D grid with NaN for absent cells."""
+    flat_to_point = renderer["flat_to_point"]
+    flat = np.full(flat_to_point.shape[0], np.nan, dtype=np.float64)
+    valid = flat_to_point >= 0
+    flat[valid] = np.asarray(arr, dtype=np.float64)[flat_to_point[valid]]
+    return flat.reshape(int(renderer["ny"]), int(renderer["nx"]))
+
+
+def _plot_spatial_field(
+    ax: Any,
+    x: np.ndarray,
+    y: np.ndarray,
+    arr: np.ndarray,
+    renderer: Dict[str, Any],
+    cmap: str,
+    vmin: float,
+    vmax: float,
+    norm: Optional[Any] = None,
+) -> Any:
+    """Plot one spatial field with best available renderer."""
+    kwargs: Dict[str, Any] = {"cmap": cmap}
+    if norm is not None:
+        kwargs["norm"] = norm
+    else:
+        kwargs["vmin"] = vmin
+        kwargs["vmax"] = vmax
+    if renderer["mode"] == "structured":
+        grid = np.ma.masked_invalid(_field_to_structured_grid(arr, renderer))
+        return ax.pcolormesh(
+            renderer["x_edges"],
+            renderer["y_edges"],
+            grid,
+            shading="flat",
+            antialiased=False,
+            rasterized=True,
+            **kwargs,
+        )
+    if renderer["mode"] == "tri":
+        return ax.tripcolor(
+            renderer["triangulation"],
+            np.asarray(arr, dtype=np.float64),
+            shading="gouraud",
+            rasterized=True,
+            **kwargs,
+        )
+    return ax.scatter(
+        x,
+        y,
+        c=arr,
+        **_scatter_style(float(renderer["marker_size"])),
+        **kwargs,
+    )
+
+
+def _update_spatial_artist(artist: Any, arr: np.ndarray, renderer: Dict[str, Any]) -> None:
+    """Update an existing spatial artist for animation frame."""
+    if renderer["mode"] == "structured":
+        grid = np.ma.masked_invalid(_field_to_structured_grid(arr, renderer))
+        artist.set_array(grid.ravel())
+        return
+    if renderer["mode"] == "tri":
+        artist.set_array(np.asarray(arr, dtype=np.float64))
+        return
+    artist.set_array(arr)
 
 
 def _save_nonspatial_uq_diagnostics(
@@ -569,11 +850,11 @@ def _save_nonspatial_uq_diagnostics(
         x = x[mask]
         y = y[mask]
         if x.size > 0:
-            vmax = max(_nanmax_floor(x), _nanmax_floor(y))
+            vmax = max(_nanmax_floor(np.quantile(x, 0.995)), _nanmax_floor(np.quantile(y, 0.995)))
             fig, ax = plt.subplots(1, 1, figsize=(6.8, 5.6), dpi=280, constrained_layout=True)
-            hb = ax.hexbin(x, y, gridsize=45, mincnt=1, cmap="viridis")
+            hb = ax.hexbin(x, y, gridsize=48, mincnt=1, bins="log", cmap="viridis")
             cb = fig.colorbar(hb, ax=ax, fraction=0.05, pad=0.03)
-            cb.set_label("Count")
+            cb.set_label("log10(count)")
             ax.plot([0, vmax], [0, vmax], "--", color="white", linewidth=1.2, label="Ideal y=x")
             if x.size > 2:
                 slope, intercept = np.polyfit(x, y, deg=1)
@@ -582,7 +863,7 @@ def _save_nonspatial_uq_diagnostics(
                 corr = np.corrcoef(x, y)[0, 1]
                 ax.text(
                     0.02,
-                    0.98,
+                    0.95,
                     f"corr={corr:.3f}\nslope={slope:.3f}",
                     transform=ax.transAxes,
                     va="top",
@@ -628,23 +909,104 @@ def _save_nonspatial_uq_diagnostics(
         fig.savefig(os.path.join(out_dir, UQ_INTERVAL_COVERAGE_PNG), bbox_inches="tight")
         plt.close(fig)
 
+    # Predictive variance decomposition (epistemic vs stochastic).
+    if (
+        "within_var_wd" in metrics
+        and "between_var_wd" in metrics
+        and "between_frac_wd" in metrics
+    ):
+        within = metrics["within_var_wd"]
+        between = metrics["between_var_wd"]
+        total = metrics.get("total_var_wd", within + between)
+        frac = metrics["between_frac_wd"]
+        ratio = metrics.get("between_to_within_wd", None)
+        within_m = np.mean(within, axis=0)
+        between_m = np.mean(between, axis=0)
+        total_m = np.mean(total, axis=0)
+        frac_m = np.mean(frac, axis=0)
+
+        fig, axs = plt.subplots(1, 2, figsize=(12.4, 4.8), dpi=280, constrained_layout=True)
+        ax0, ax1 = axs
+        ax0.plot(time_hours, total_m, linewidth=1.6, color="#111111", label="Total variance")
+        ax0.plot(time_hours, within_m, linewidth=1.4, color="#1f77b4", label="Within-model (noise)")
+        ax0.plot(time_hours, between_m, linewidth=1.4, color="#d62728", label="Between-model")
+        ax0.set_yscale("log")
+        ax0.set_xlabel("Lead time (hour)")
+        ax0.set_ylabel("Variance (log scale)")
+        ax0.set_title("Variance decomposition (WD)")
+        ax0.grid(True, alpha=0.3)
+        ax0.legend(fontsize=8, loc="upper left")
+
+        ax1.plot(time_hours, frac_m, linewidth=1.6, color="#2ca02c", label="Between / total")
+        ax1.axhline(0.5, linestyle="--", color="gray", linewidth=0.9, alpha=0.7)
+        if ratio is not None:
+            ratio_m = np.mean(ratio, axis=0)
+            ax1_t = ax1.twinx()
+            ax1_t.plot(time_hours, ratio_m, linewidth=1.2, color="#9467bd", label="Between / within")
+            ax1_t.set_ylabel("Variance ratio")
+            ax1_t.grid(False)
+            lines, labels = ax1.get_legend_handles_labels()
+            lines2, labels2 = ax1_t.get_legend_handles_labels()
+            ax1_t.legend(lines + lines2, labels + labels2, fontsize=8, loc="upper right")
+        else:
+            ax1.legend(fontsize=8, loc="upper right")
+        ax1.set_ylim(0.0, 1.0)
+        ax1.set_xlabel("Lead time (hour)")
+        ax1.set_ylabel("Fraction")
+        ax1.set_title("Epistemic share and dominance")
+        ax1.grid(True, alpha=0.3)
+        fig.savefig(os.path.join(out_dir, UQ_VAR_DECOMP_PNG), bbox_inches="tight")
+        plt.close(fig)
+
     # Per-hydrograph metric boxplots (time-averaged)
-    box_data: List[np.ndarray] = []
-    box_labels: List[str] = []
-    for key in ["rmse_wd", "crps_wd", "brier_wd_exceed", "spread_ratio_wd"]:
+    small_box_data: List[np.ndarray] = []
+    small_box_labels: List[str] = []
+    for key in ["rmse_wd", "crps_wd", "brier_wd_exceed", "wasserstein_wd"]:
         if key in metrics:
-            box_data.append(np.mean(metrics[key], axis=1))
-            box_labels.append(key)
-    if wasserstein_wd is not None:
-        box_data.append(np.mean(wasserstein_wd, axis=1))
-        box_labels.append("wasserstein_wd")
-    if box_data:
-        fig, ax = plt.subplots(1, 1, figsize=(8.2, 4.8), dpi=280, constrained_layout=True)
-        ax.boxplot(box_data, labels=box_labels, showfliers=False)
-        ax.set_title("Per-hydrograph time-mean UQ metrics")
-        ax.set_ylabel("Metric value")
-        ax.grid(True, axis="y", alpha=0.3)
-        fig.autofmt_xdate(rotation=20, ha="right")
+            small_box_data.append(np.mean(metrics[key], axis=1))
+            small_box_labels.append(key)
+    ratio_data = (
+        np.mean(metrics["spread_ratio_wd"], axis=1)
+        if "spread_ratio_wd" in metrics
+        else None
+    )
+    if small_box_data or ratio_data is not None:
+        fig, axs = plt.subplots(1, 2, figsize=(12.8, 4.8), dpi=280, constrained_layout=True)
+        ax_small, ax_ratio = axs
+        if small_box_data:
+            ax_small.boxplot(
+                small_box_data,
+                labels=small_box_labels,
+                showfliers=False,
+                whis=(5, 95),
+            )
+            ax_small.set_yscale("log")
+            ax_small.set_title("Error/score metrics (log scale)")
+            ax_small.set_ylabel("Metric value")
+            ax_small.grid(True, axis="y", alpha=0.3)
+            ax_small.tick_params(axis="x", rotation=18)
+        else:
+            ax_small.set_visible(False)
+
+        if ratio_data is not None:
+            ax_ratio.boxplot(
+                [ratio_data],
+                labels=["spread_ratio_wd"],
+                showfliers=False,
+                whis=(5, 95),
+            )
+            ax_ratio.axhline(1.0, linestyle="--", color="gray", linewidth=1.0, alpha=0.8)
+            ax_ratio.set_title("Dispersion ratio")
+            ax_ratio.set_ylabel("Predicted spread / GT spread")
+            lo = np.quantile(ratio_data, 0.01)
+            hi = np.quantile(ratio_data, 0.99)
+            margin = 0.10 * max(hi - lo, 0.1)
+            ax_ratio.set_ylim(max(0.0, lo - margin), hi + margin)
+            ax_ratio.grid(True, axis="y", alpha=0.3)
+        else:
+            ax_ratio.set_visible(False)
+
+        fig.suptitle("Per-hydrograph time-mean UQ metrics", fontsize=12.5)
         fig.savefig(os.path.join(out_dir, UQ_BOXPLOT_PNG), bbox_inches="tight")
         plt.close(fig)
 
@@ -669,6 +1031,10 @@ def _save_hydrograph_uq_figures_and_animation(
 
     mpl.rc("font", family="serif", size=11)
     x, y = _geometry_xy(geometry)
+    renderer_3x2 = _build_spatial_renderer(x, y, figsize=(12.4, 14.5), dpi=320, n_rows=3, n_cols=2)
+    renderer_1x3 = _build_spatial_renderer(x, y, figsize=(16.5, 5.2), dpi=320, n_rows=1, n_cols=3)
+    renderer_1x1 = _build_spatial_renderer(x, y, figsize=(6.8, 5.8), dpi=320, n_rows=1, n_cols=1)
+    renderer_2x3 = _build_spatial_renderer(x, y, figsize=(14.8, 9.6), dpi=260, n_rows=2, n_cols=3)
     hid = hydrograph_id or "unknown"
     uq_dir = os.path.join(out_dir, "uq_figures_per_hydrograph")
     os.makedirs(uq_dir, exist_ok=True)
@@ -691,9 +1057,6 @@ def _save_hydrograph_uq_figures_and_animation(
             fig, axs = plt.subplots(
                 3, 2, figsize=(12.4, 14.5), dpi=320, constrained_layout=True
             )
-            marker_size = _adaptive_marker_size(
-                x, y, figsize=(12.4, 14.5), dpi=320, n_rows=3, n_cols=2, fill_factor=1.20
-            )
             fig.suptitle(
                 f"Hydrograph {hid} | {ch.upper()} | t={t} | GT ({n_ref_sims} sims) vs Forecast ({n_ens} ens)",
                 fontsize=12.5,
@@ -708,11 +1071,12 @@ def _save_hydrograph_uq_figures_and_animation(
                 ("Forecast spread (std)", pred_std, "plasma", 0.0, spread_max, "std"),
             ]
             for ax, (title, arr, cmap, vmin, vmax, cblabel) in zip(axs.flatten(), panels):
-                sc = ax.scatter(
-                    x,
-                    y,
-                    c=arr,
-                    **_scatter_style(marker_size),
+                sc = _plot_spatial_field(
+                    ax=ax,
+                    x=x,
+                    y=y,
+                    arr=arr,
+                    renderer=renderer_3x2,
                     cmap=cmap,
                     vmin=vmin,
                     vmax=vmax,
@@ -735,17 +1099,21 @@ def _save_hydrograph_uq_figures_and_animation(
         gt_prob_mean = np.mean(gt_prob_wd, axis=0)
         diff_abs = np.abs(pred_prob_mean - gt_prob_mean)
         fig, axs = plt.subplots(1, 3, figsize=(16.5, 5.2), dpi=320, constrained_layout=True)
-        marker_size = _adaptive_marker_size(
-            x, y, figsize=(16.5, 5.2), dpi=320, n_rows=1, n_cols=3, fill_factor=1.20
-        )
         items = [
             (f"GT mean P(wd>{UQ_EXCEEDANCE_THRESHOLD:.2f})", gt_prob_mean, "viridis", 0.0, 1.0),
             (f"Forecast mean P(wd>{UQ_EXCEEDANCE_THRESHOLD:.2f})", pred_prob_mean, "viridis", 0.0, 1.0),
             ("|Probability error|", diff_abs, "magma", 0.0, _nanmax_floor(diff_abs)),
         ]
         for ax, (title, arr, cmap, vmin, vmax) in zip(axs, items):
-            sc = ax.scatter(
-                x, y, c=arr, **_scatter_style(marker_size), cmap=cmap, vmin=vmin, vmax=vmax
+            sc = _plot_spatial_field(
+                ax=ax,
+                x=x,
+                y=y,
+                arr=arr,
+                renderer=renderer_1x3,
+                cmap=cmap,
+                vmin=vmin,
+                vmax=vmax,
             )
             ax.set_title(title)
             ax.set_aspect("equal")
@@ -762,11 +1130,15 @@ def _save_hydrograph_uq_figures_and_animation(
         crps_mean = np.mean(crps_map_wd, axis=0)
         vmax = _nanmax_floor(crps_mean)
         fig, ax = plt.subplots(1, 1, figsize=(6.8, 5.8), dpi=320, constrained_layout=True)
-        marker_size = _adaptive_marker_size(
-            x, y, figsize=(6.8, 5.8), dpi=320, n_rows=1, n_cols=1, fill_factor=1.20
-        )
-        sc = ax.scatter(
-            x, y, c=crps_mean, **_scatter_style(marker_size), cmap="magma", vmin=0.0, vmax=vmax
+        sc = _plot_spatial_field(
+            ax=ax,
+            x=x,
+            y=y,
+            arr=crps_mean,
+            renderer=renderer_1x1,
+            cmap="magma",
+            vmin=0.0,
+            vmax=vmax,
         )
         ax.set_title("WD CRPS map (time-mean)")
         ax.set_aspect("equal")
@@ -786,34 +1158,83 @@ def _save_hydrograph_uq_figures_and_animation(
         wd_gt_mean = gt_mean_by_channel["wd"]
         wd_gt_std = gt_std_by_channel["wd"]
         wd_abs_err = np.abs(wd_pred_mean - wd_gt_mean)
-        wd_ratio = np.clip(wd_pred_std / np.maximum(wd_gt_std, MIN_EPS), 0.0, 3.0)
+        wd_ratio = np.clip(wd_pred_std / np.maximum(wd_gt_std, MIN_EPS), 0.0, 5.0)
         vmax = max(_nanmax_floor(wd_pred_mean), _nanmax_floor(wd_gt_mean), MIN_EPS)
         spread_max = max(_nanmax_floor(wd_pred_std), _nanmax_floor(wd_gt_std), MIN_EPS)
         err_max = _nanmax_floor(wd_abs_err)
-        ratio_max = max(_nanmax_floor(wd_ratio), 1.5)
+        ratio_vals = wd_ratio[np.isfinite(wd_ratio)]
+        if ratio_vals.size > 0:
+            q_low = float(np.quantile(ratio_vals, 0.02))
+            q_high = float(np.quantile(ratio_vals, 0.98))
+            margin = max(1.0 - q_low, q_high - 1.0, 0.15)
+            ratio_vmin = max(0.4, 1.0 - margin)
+            ratio_vmax = min(2.5, 1.0 + margin)
+        else:
+            ratio_vmin, ratio_vmax = 0.5, 1.5
+        ratio_norm = mcolors.TwoSlopeNorm(vmin=ratio_vmin, vcenter=1.0, vmax=ratio_vmax)
 
         fig, axs = plt.subplots(2, 3, figsize=(14.8, 9.6), dpi=260, constrained_layout=True)
-        marker_size = _adaptive_marker_size(
-            x, y, figsize=(14.8, 9.6), dpi=260, n_rows=2, n_cols=3, fill_factor=1.20
-        )
         ax_gt_m, ax_pr_m, ax_err, ax_gt_s, ax_pr_s, ax_ratio = axs.flatten()
-        s_gt_m = ax_gt_m.scatter(
-            x, y, c=wd_gt_mean[0], **_scatter_style(marker_size), cmap="viridis", vmin=0.0, vmax=vmax
+        s_gt_m = _plot_spatial_field(
+            ax=ax_gt_m,
+            x=x,
+            y=y,
+            arr=wd_gt_mean[0],
+            renderer=renderer_2x3,
+            cmap="viridis",
+            vmin=0.0,
+            vmax=vmax,
         )
-        s_pr_m = ax_pr_m.scatter(
-            x, y, c=wd_pred_mean[0], **_scatter_style(marker_size), cmap="viridis", vmin=0.0, vmax=vmax
+        s_pr_m = _plot_spatial_field(
+            ax=ax_pr_m,
+            x=x,
+            y=y,
+            arr=wd_pred_mean[0],
+            renderer=renderer_2x3,
+            cmap="viridis",
+            vmin=0.0,
+            vmax=vmax,
         )
-        s_err = ax_err.scatter(
-            x, y, c=wd_abs_err[0], **_scatter_style(marker_size), cmap="magma", vmin=0.0, vmax=err_max
+        s_err = _plot_spatial_field(
+            ax=ax_err,
+            x=x,
+            y=y,
+            arr=wd_abs_err[0],
+            renderer=renderer_2x3,
+            cmap="magma",
+            vmin=0.0,
+            vmax=err_max,
         )
-        s_gt_s = ax_gt_s.scatter(
-            x, y, c=wd_gt_std[0], **_scatter_style(marker_size), cmap="plasma", vmin=0.0, vmax=spread_max
+        s_gt_s = _plot_spatial_field(
+            ax=ax_gt_s,
+            x=x,
+            y=y,
+            arr=wd_gt_std[0],
+            renderer=renderer_2x3,
+            cmap="plasma",
+            vmin=0.0,
+            vmax=spread_max,
         )
-        s_pr_s = ax_pr_s.scatter(
-            x, y, c=wd_pred_std[0], **_scatter_style(marker_size), cmap="plasma", vmin=0.0, vmax=spread_max
+        s_pr_s = _plot_spatial_field(
+            ax=ax_pr_s,
+            x=x,
+            y=y,
+            arr=wd_pred_std[0],
+            renderer=renderer_2x3,
+            cmap="plasma",
+            vmin=0.0,
+            vmax=spread_max,
         )
-        s_ratio = ax_ratio.scatter(
-            x, y, c=wd_ratio[0], **_scatter_style(marker_size), cmap="RdYlGn_r", vmin=0.5, vmax=ratio_max
+        s_ratio = _plot_spatial_field(
+            ax=ax_ratio,
+            x=x,
+            y=y,
+            arr=wd_ratio[0],
+            renderer=renderer_2x3,
+            cmap="RdBu_r",
+            vmin=ratio_vmin,
+            vmax=ratio_vmax,
+            norm=ratio_norm,
         )
         for ax, title in [
             (ax_gt_m, f"GT mean ({n_ref_sims} sims)"),
@@ -831,7 +1252,8 @@ def _save_hydrograph_uq_figures_and_animation(
         fig.colorbar(s_err, ax=ax_err, fraction=0.046, pad=0.02)
         fig.colorbar(s_gt_s, ax=ax_gt_s, fraction=0.046, pad=0.02)
         fig.colorbar(s_pr_s, ax=ax_pr_s, fraction=0.046, pad=0.02)
-        fig.colorbar(s_ratio, ax=ax_ratio, fraction=0.046, pad=0.02)
+        cb_ratio = fig.colorbar(s_ratio, ax=ax_ratio, fraction=0.046, pad=0.02)
+        cb_ratio.set_label("ratio (center=1)")
 
         def _animate(frame_idx: int) -> List[Any]:
             time_hours = (frame_idx + 1) * dt_seconds / 3600.0
@@ -839,12 +1261,12 @@ def _save_hydrograph_uq_figures_and_animation(
                 f"Hydrograph {hid} | t={frame_idx} ({time_hours:.2f} h)",
                 fontsize=13,
             )
-            s_gt_m.set_array(wd_gt_mean[frame_idx])
-            s_pr_m.set_array(wd_pred_mean[frame_idx])
-            s_err.set_array(wd_abs_err[frame_idx])
-            s_gt_s.set_array(wd_gt_std[frame_idx])
-            s_pr_s.set_array(wd_pred_std[frame_idx])
-            s_ratio.set_array(wd_ratio[frame_idx])
+            _update_spatial_artist(s_gt_m, wd_gt_mean[frame_idx], renderer_2x3)
+            _update_spatial_artist(s_pr_m, wd_pred_mean[frame_idx], renderer_2x3)
+            _update_spatial_artist(s_err, wd_abs_err[frame_idx], renderer_2x3)
+            _update_spatial_artist(s_gt_s, wd_gt_std[frame_idx], renderer_2x3)
+            _update_spatial_artist(s_pr_s, wd_pred_std[frame_idx], renderer_2x3)
+            _update_spatial_artist(s_ratio, wd_ratio[frame_idx], renderer_2x3)
             return [s_gt_m, s_pr_m, s_err, s_gt_s, s_pr_s, s_ratio]
 
         ani = animation.FuncAnimation(
@@ -917,6 +1339,11 @@ def _rollout_prediction_per_hydrograph(
     per_channel_spread_pred: Dict[str, List[np.ndarray]] = {name: [] for name in target_variables}
     per_channel_spread_gt: Dict[str, List[np.ndarray]] = {name: [] for name in target_variables}
     per_channel_spread_ratio: Dict[str, List[np.ndarray]] = {name: [] for name in target_variables}
+    per_channel_within_var: Dict[str, List[np.ndarray]] = {name: [] for name in target_variables}
+    per_channel_between_var: Dict[str, List[np.ndarray]] = {name: [] for name in target_variables}
+    per_channel_total_var: Dict[str, List[np.ndarray]] = {name: [] for name in target_variables}
+    per_channel_between_frac: Dict[str, List[np.ndarray]] = {name: [] for name in target_variables}
+    per_channel_between_to_within: Dict[str, List[np.ndarray]] = {name: [] for name in target_variables}
     wd_prob_brier: List[np.ndarray] = []
     wd_prob_mae: List[np.ndarray] = []
     wd_wasserstein: List[np.ndarray] = []
@@ -936,6 +1363,7 @@ def _rollout_prediction_per_hydrograph(
     pit_edges = np.linspace(0.0, 1.0, 21, dtype=np.float64)
     pit_hist_counts = np.zeros(len(pit_edges) - 1, dtype=np.float64)
     rank_hist_counts = np.zeros(n_ens + 1, dtype=np.float64)
+    pit_rank_rng = np.random.default_rng(1234567)
 
     spread_skill_samples: List[np.ndarray] = []
     max_scatter_points_per_step = 250
@@ -959,6 +1387,11 @@ def _rollout_prediction_per_hydrograph(
         run_spread_pred: Dict[str, List[float]] = {name: [] for name in target_variables}
         run_spread_gt: Dict[str, List[float]] = {name: [] for name in target_variables}
         run_spread_ratio: Dict[str, List[float]] = {name: [] for name in target_variables}
+        run_within_var: Dict[str, List[float]] = {name: [] for name in target_variables}
+        run_between_var: Dict[str, List[float]] = {name: [] for name in target_variables}
+        run_total_var: Dict[str, List[float]] = {name: [] for name in target_variables}
+        run_between_frac: Dict[str, List[float]] = {name: [] for name in target_variables}
+        run_between_to_within: Dict[str, List[float]] = {name: [] for name in target_variables}
         run_pred_mean_by_channel: Dict[str, List[np.ndarray]] = {name: [] for name in target_variables}
         run_pred_std_by_channel: Dict[str, List[np.ndarray]] = {name: [] for name in target_variables}
         run_gt_mean_by_channel: Dict[str, List[np.ndarray]] = {name: [] for name in target_variables}
@@ -1067,12 +1500,27 @@ def _rollout_prediction_per_hydrograph(
                 spread_pred_t = float(np.mean(np.std(pred_ens_ch, axis=0)))
                 spread_gt_t = float(np.mean(np.std(gt_ref_ch, axis=0)))
                 spread_ratio_t = spread_pred_t / max(spread_gt_t, MIN_EPS)
+                within_loc, between_loc, total_loc = _variance_decomposition_by_model(
+                    pred_ens_ch, member_model_indices, n_models
+                )
+                within_t = float(np.mean(within_loc))
+                between_t = float(np.mean(between_loc))
+                total_t = float(np.mean(total_loc))
+                between_frac_t = float(np.clip(between_t / max(total_t, MIN_EPS), 0.0, 1.0))
+                between_to_within_t = float(
+                    np.clip(between_t / max(within_t, MIN_EPS), 0.0, 100.0)
+                )
 
                 run_rmse[ch_name].append(rmse_t)
                 run_crps[ch_name].append(crps_t)
                 run_spread_pred[ch_name].append(spread_pred_t)
                 run_spread_gt[ch_name].append(spread_gt_t)
                 run_spread_ratio[ch_name].append(spread_ratio_t)
+                run_within_var[ch_name].append(within_t)
+                run_between_var[ch_name].append(between_t)
+                run_total_var[ch_name].append(total_t)
+                run_between_frac[ch_name].append(between_frac_t)
+                run_between_to_within[ch_name].append(between_to_within_t)
 
                 if ch_name == "wd":
                     pred_prob = np.mean(pred_ens_ch >= UQ_EXCEEDANCE_THRESHOLD, axis=0)
@@ -1113,16 +1561,16 @@ def _rollout_prediction_per_hydrograph(
                     gt_q = np.quantile(gt_ref_ch, w_quantiles, axis=0)
                     run_wd_wasserstein.append(float(np.mean(np.abs(pred_q - gt_q))))
 
-                    # PIT and rank histogram against reference ensemble mean (single pseudo-observation).
-                    ref_vals = gt_mean_ch
-                    less = np.sum(pred_ens_ch < ref_vals[None, :], axis=0)
-                    equal = np.sum(pred_ens_ch == ref_vals[None, :], axis=0)
-                    pit = (less + 0.5 * equal) / float(n_ens)
-                    valid = np.isfinite(pit)
-                    if np.any(valid):
-                        pit_hist_counts += np.histogram(pit[valid], bins=pit_edges)[0].astype(np.float64)
-                        rank = np.clip(less[valid], 0, n_ens).astype(np.int64)
-                        rank_hist_counts += np.bincount(rank, minlength=n_ens + 1).astype(np.float64)
+                    # Proper PIT/rank: use all reference members as pseudo-observations.
+                    pit_counts_t, rank_counts_t = _pit_rank_counts_from_reference(
+                        pred_ens=pred_ens_ch,
+                        ref_ens=gt_ref_ch,
+                        pit_edges=pit_edges,
+                        n_ens=n_ens,
+                        rng=pit_rank_rng,
+                    )
+                    pit_hist_counts += pit_counts_t
+                    rank_hist_counts += rank_counts_t
 
                     # Spread-skill diagnostic samples (subsampled for plotting efficiency).
                     spread_loc = np.std(pred_ens_ch, axis=0)
@@ -1189,6 +1637,13 @@ def _rollout_prediction_per_hydrograph(
             per_channel_spread_pred[ch_name].append(np.asarray(run_spread_pred[ch_name], dtype=np.float64))
             per_channel_spread_gt[ch_name].append(np.asarray(run_spread_gt[ch_name], dtype=np.float64))
             per_channel_spread_ratio[ch_name].append(np.asarray(run_spread_ratio[ch_name], dtype=np.float64))
+            per_channel_within_var[ch_name].append(np.asarray(run_within_var[ch_name], dtype=np.float64))
+            per_channel_between_var[ch_name].append(np.asarray(run_between_var[ch_name], dtype=np.float64))
+            per_channel_total_var[ch_name].append(np.asarray(run_total_var[ch_name], dtype=np.float64))
+            per_channel_between_frac[ch_name].append(np.asarray(run_between_frac[ch_name], dtype=np.float64))
+            per_channel_between_to_within[ch_name].append(
+                np.asarray(run_between_to_within[ch_name], dtype=np.float64)
+            )
         if run_wd_brier:
             wd_prob_brier.append(np.asarray(run_wd_brier, dtype=np.float64))
             wd_prob_mae.append(np.asarray(run_wd_mae, dtype=np.float64))
@@ -1214,6 +1669,13 @@ def _rollout_prediction_per_hydrograph(
         metrics[f"spread_pred_{ch_name}"] = np.stack(per_channel_spread_pred[ch_name], axis=0)
         metrics[f"spread_gt_{ch_name}"] = np.stack(per_channel_spread_gt[ch_name], axis=0)
         metrics[f"spread_ratio_{ch_name}"] = np.stack(per_channel_spread_ratio[ch_name], axis=0)
+        metrics[f"within_var_{ch_name}"] = np.stack(per_channel_within_var[ch_name], axis=0)
+        metrics[f"between_var_{ch_name}"] = np.stack(per_channel_between_var[ch_name], axis=0)
+        metrics[f"total_var_{ch_name}"] = np.stack(per_channel_total_var[ch_name], axis=0)
+        metrics[f"between_frac_{ch_name}"] = np.stack(per_channel_between_frac[ch_name], axis=0)
+        metrics[f"between_to_within_{ch_name}"] = np.stack(
+            per_channel_between_to_within[ch_name], axis=0
+        )
     if wd_prob_brier:
         metrics["brier_wd_exceed"] = np.stack(wd_prob_brier, axis=0)
     if wd_prob_mae:
@@ -1237,56 +1699,98 @@ def _rollout_prediction_per_hydrograph(
     np.savez(data_path, **npz_data)
     logger.info("Saved per-hydrograph metrics to %s", data_path)
 
+    # Publication-oriented core summary (clear, lower clutter, key UQ metrics only).
+    core_specs = [
+        ("rmse_wd", "RMSE (WD)", None),
+        ("crps_wd", "CRPS (WD)", None),
+        ("wasserstein_wd", "Wasserstein-1 (WD)", None),
+        ("brier_wd_exceed", f"Brier: P(wd>{UQ_EXCEEDANCE_THRESHOLD:.2f})", None),
+        ("prob_mae_wd_exceed", f"Prob MAE: P(wd>{UQ_EXCEEDANCE_THRESHOLD:.2f})", None),
+        ("spread_ratio_wd", "Spread ratio (pred/gt)", 1.0),
+        ("between_frac_wd", "Between-model variance fraction", None),
+        ("between_to_within_wd", "Between/within variance ratio", 1.0),
+    ]
+    core_specs = [spec for spec in core_specs if spec[0] in stats]
+    if core_specs:
+        n_core = len(core_specs)
+        n_cols = 2
+        n_rows = int(np.ceil(n_core / n_cols))
+        fig, axs = plt.subplots(
+            n_rows, n_cols, figsize=(7.4 * n_cols, 4.3 * n_rows), dpi=280, constrained_layout=True
+        )
+        axs_flat = np.array(axs).reshape(-1)
+        for i, (key, title, ref_line) in enumerate(core_specs):
+            mean = stats[key]["mean"]
+            std = stats[key]["std"]
+            ax = axs_flat[i]
+            ax.plot(time_hours, mean, linewidth=1.8, color="#1f77b4")
+            ax.fill_between(time_hours, mean - std, mean + std, alpha=0.18, color="#1f77b4")
+            ax.set_title(title)
+            ax.set_xlabel("Lead time (hour)")
+            ax.set_ylabel("Value")
+            if ref_line is not None:
+                ax.axhline(ref_line, color="gray", linestyle="--", alpha=0.8, linewidth=1.0)
+            if key == "spread_ratio_wd":
+                lo = float(np.nanquantile(metrics[key], 0.02))
+                hi = float(np.nanquantile(metrics[key], 0.98))
+                m = 0.1 * max(hi - lo, 0.1)
+                ax.set_ylim(max(0.0, lo - m), hi + m)
+            elif key == "between_frac_wd":
+                ax.set_ylim(0.0, 1.0)
+            elif key == "between_to_within_wd":
+                lo = float(np.nanquantile(metrics[key], 0.02))
+                hi = float(np.nanquantile(metrics[key], 0.98))
+                m = 0.1 * max(hi - lo, 0.1)
+                ax.set_ylim(max(0.0, lo - m), hi + m)
+            ax.grid(True, alpha=0.28)
+        for j in range(n_core, len(axs_flat)):
+            axs_flat[j].set_visible(False)
+        summary_path = os.path.join(out_dir, ROLLOUT_SUMMARY_HYDRO_PNG)
+        fig.savefig(summary_path, bbox_inches="tight")
+        plt.close(fig)
+        logger.info("Saved per-hydrograph core summary figure to %s", summary_path)
+
+    # Full diagnostic summary retained for completeness (all metrics).
     plot_keys = list(stats.keys())
     n_plots = len(plot_keys)
-    n_cols = 2
-    n_rows = int(np.ceil(n_plots / n_cols))
-    fig, axs = plt.subplots(
-        n_rows, n_cols, figsize=(8 * n_cols, 4.8 * n_rows), tight_layout=True
-    )
-    axs_flat = np.array(axs).reshape(-1)
-    for i, key in enumerate(plot_keys):
-        mean = stats[key]["mean"]
-        std = stats[key]["std"]
-        ax = axs_flat[i]
-        ax.plot(time_hours, mean, marker="o", markersize=3, linewidth=1.2, label=f"{key} mean")
-        ax.fill_between(time_hours, mean - std, mean + std, alpha=0.25, label="±1 std")
-        ax.set_title(f"{key} over time (across hydrographs)")
-        ax.set_xlabel("Time (hour)")
-        if key.startswith("spread_ratio"):
-            ax.set_ylabel("Spread ratio (pred/gt)")
-            ax.axhline(1.0, color="gray", linestyle="--", alpha=0.8)
-        elif key.startswith("rmse_"):
-            ax.set_ylabel("RMSE")
-        elif key.startswith("crps_"):
-            ax.set_ylabel("CRPS")
-        elif key.startswith("coverage_"):
-            ax.set_ylabel("Coverage")
-            if key.endswith("_50"):
-                ax.axhline(0.5, color="gray", linestyle="--", alpha=0.6)
-            elif key.endswith("_80"):
-                ax.axhline(0.8, color="gray", linestyle="--", alpha=0.6)
-            elif key.endswith("_90"):
-                ax.axhline(0.9, color="gray", linestyle="--", alpha=0.6)
-            elif key.endswith("_95"):
-                ax.axhline(0.95, color="gray", linestyle="--", alpha=0.6)
-            ax.set_ylim(0.0, 1.0)
-        elif key.startswith("width_"):
-            ax.set_ylabel("Interval width")
-        elif key.startswith("brier"):
-            ax.set_ylabel("Brier score")
-        elif key.startswith("wasserstein"):
-            ax.set_ylabel("Wasserstein-1")
-        else:
-            ax.set_ylabel("Metric")
-        ax.grid(True, alpha=0.3)
-        ax.legend(fontsize=8)
-    for j in range(n_plots, len(axs_flat)):
-        axs_flat[j].set_visible(False)
-    summary_path = os.path.join(out_dir, ROLLOUT_SUMMARY_HYDRO_PNG)
-    fig.savefig(summary_path, dpi=220)
-    plt.close(fig)
-    logger.info("Saved per-hydrograph summary figure to %s", summary_path)
+    if n_plots > 0:
+        n_cols = 2
+        n_rows = int(np.ceil(n_plots / n_cols))
+        fig, axs = plt.subplots(
+            n_rows, n_cols, figsize=(8.2 * n_cols, 3.8 * n_rows), dpi=220, constrained_layout=True
+        )
+        axs_flat = np.array(axs).reshape(-1)
+        for i, key in enumerate(plot_keys):
+            mean = stats[key]["mean"]
+            std = stats[key]["std"]
+            ax = axs_flat[i]
+            ax.plot(time_hours, mean, linewidth=1.35, color="#1f77b4")
+            ax.fill_between(time_hours, mean - std, mean + std, alpha=0.18, color="#1f77b4")
+            ax.set_title(key)
+            ax.set_xlabel("Lead time (hour)")
+            if key.startswith("spread_ratio"):
+                ax.set_ylabel("Spread ratio")
+                ax.axhline(1.0, color="gray", linestyle="--", alpha=0.8, linewidth=0.9)
+            elif key.startswith("coverage_"):
+                ax.set_ylabel("Coverage")
+                if key.endswith("_50"):
+                    ax.axhline(0.5, color="gray", linestyle="--", alpha=0.6, linewidth=0.9)
+                elif key.endswith("_80"):
+                    ax.axhline(0.8, color="gray", linestyle="--", alpha=0.6, linewidth=0.9)
+                elif key.endswith("_90"):
+                    ax.axhline(0.9, color="gray", linestyle="--", alpha=0.6, linewidth=0.9)
+                elif key.endswith("_95"):
+                    ax.axhline(0.95, color="gray", linestyle="--", alpha=0.6, linewidth=0.9)
+                ax.set_ylim(0.0, 1.0)
+            else:
+                ax.set_ylabel("Value")
+            ax.grid(True, alpha=0.25)
+        for j in range(n_plots, len(axs_flat)):
+            axs_flat[j].set_visible(False)
+        full_summary_path = os.path.join(out_dir, ROLLOUT_SUMMARY_HYDRO_FULL_PNG)
+        fig.savefig(full_summary_path, bbox_inches="tight")
+        plt.close(fig)
+        logger.info("Saved full per-hydrograph summary figure to %s", full_summary_path)
 
     rel_mean_pred = np.divide(
         rel_sum_pred, rel_count, out=np.zeros_like(rel_sum_pred), where=rel_count > 0
