@@ -17,6 +17,7 @@ Example:
 import argparse
 import logging
 import os
+import re
 import sys
 import time
 from pathlib import Path
@@ -79,7 +80,11 @@ DEVICE_REF_KEYS = ("dynamic", "target", "geometry")
 CHANNEL_INDEX = {"wd": 0, "vx": 1, "vy": 2}
 ROLLOUT_METRICS_NPZ = "rollout_metrics_data.npz"
 ROLLOUT_SUMMARY_PNG = "rollout_metrics_summary.png"
+ROLLOUT_METRICS_HYDRO_NPZ = "rollout_metrics_per_hydrograph.npz"
+ROLLOUT_SUMMARY_HYDRO_PNG = "rollout_metrics_per_hydrograph.png"
 DEFAULT_EVAL_LOG = "eval_post_training.log"
+HYDROGRAPH_SIM_PATTERN = re.compile(r"^(.+)_sim(\d+)$")
+UQ_EXCEEDANCE_THRESHOLD = 0.05
 
 
 def _opt(config: Any, section: Optional[str], key: str, default: Any) -> Any:
@@ -90,6 +95,26 @@ def _opt(config: Any, section: Optional[str], key: str, default: Any) -> Any:
     if obj is None:
         return default
     return getattr(obj, key, default)
+
+
+def parse_hydrograph_run_id(run_id: str) -> Tuple[str, Optional[int]]:
+    """Parse run_id convention: {hydrograph_id}_sim{sim_id}."""
+    rid = str(run_id).strip()
+    m = HYDROGRAPH_SIM_PATTERN.match(rid)
+    if m:
+        return m.group(1), int(m.group(2))
+    return rid, None
+
+
+def group_run_ids_by_hydrograph(run_ids: List[str]) -> Dict[str, List[str]]:
+    """Group run IDs by hydrograph ID inferred from *_simN naming."""
+    groups: Dict[str, List[str]] = {}
+    for rid in run_ids:
+        hydro_id, _ = parse_hydrograph_run_id(rid)
+        groups.setdefault(hydro_id, []).append(rid)
+    for hydro_id in groups:
+        groups[hydro_id] = sorted(groups[hydro_id])
+    return groups
 
 
 class _PhaseTimer:
@@ -165,9 +190,9 @@ def _save_generic_rollout_visuals(
     x, y = _geometry_xy(geometry)
     rid = run_id or "unknown"
     n_steps = next(iter(gt_by_channel.values())).shape[0]
-    steps = [s for s in PUBLICATION_TIMESTEPS if 0 <= s < n_steps] or [
-        min(n_steps - 1, 0)
-    ]
+    steps = [s for s in PUBLICATION_TIMESTEPS if 0 <= s < n_steps] or (
+        [min(n_steps - 1, 0)] if n_steps > 0 else []
+    )
     n_rows = len(target_variables)
 
     for t in steps:
@@ -255,6 +280,527 @@ def _compute_csi(threshold: float, pred: np.ndarray, gt: np.ndarray) -> float:
     return float(tp / denom) if denom > 0 else 1.0
 
 
+def _build_query_points_from_geometry(
+    geometry: torch.Tensor, query_res: List[int]
+) -> torch.Tensor:
+    """Build query grid points from geometry bounds."""
+    geom = geometry.detach().cpu().numpy()
+    x_vals = geom[:, 0]
+    y_vals = geom[:, 1]
+    tx = np.linspace(float(x_vals.min()), float(x_vals.max()), query_res[0], dtype=np.float32)
+    ty = np.linspace(float(y_vals.min()), float(y_vals.max()), query_res[1], dtype=np.float32)
+    grid_x, grid_y = np.meshgrid(tx, ty, indexing="ij")
+    q_pts = np.stack([grid_x, grid_y], axis=-1)
+    return torch.tensor(q_pts, device=geometry.device, dtype=geometry.dtype)
+
+
+def _crps_ensemble_vs_reference(
+    forecast_ens: np.ndarray, reference_ens: np.ndarray
+) -> np.ndarray:
+    """
+    CRPS per location for forecast ensemble against reference ensemble.
+
+    Parameters
+    ----------
+    forecast_ens: [n_forecast, n_locations]
+    reference_ens: [n_reference, n_locations]
+    """
+    term_1 = np.mean(
+        np.abs(forecast_ens[:, None, :] - reference_ens[None, :, :]), axis=(0, 1)
+    )
+    term_2 = 0.5 * np.mean(
+        np.abs(forecast_ens[:, None, :] - forecast_ens[None, :, :]), axis=(0, 1)
+    )
+    return term_1 - term_2
+
+
+def _save_hydrograph_uq_figures_and_animation(
+    geometry: Any,
+    pred_mean_by_channel: Dict[str, np.ndarray],
+    pred_std_by_channel: Dict[str, np.ndarray],
+    gt_mean_by_channel: Dict[str, np.ndarray],
+    gt_std_by_channel: Dict[str, np.ndarray],
+    target_variables: List[str],
+    out_dir: str,
+    hydrograph_id: str,
+    dt_seconds: float,
+    n_ref_sims: int,
+    n_ens: int,
+    pred_prob_wd: Optional[np.ndarray] = None,
+    gt_prob_wd: Optional[np.ndarray] = None,
+    crps_map_wd: Optional[np.ndarray] = None,
+) -> None:
+    """Generate publication-ready UQ figures and animations per hydrograph."""
+    import matplotlib as mpl
+
+    mpl.rc("font", family="serif", size=11)
+    x, y = _geometry_xy(geometry)
+    hid = hydrograph_id or "unknown"
+    uq_dir = os.path.join(out_dir, "uq_figures_per_hydrograph")
+    os.makedirs(uq_dir, exist_ok=True)
+    n_steps = next(iter(pred_mean_by_channel.values())).shape[0]
+    steps = [s for s in PUBLICATION_TIMESTEPS if 0 <= s < n_steps] or (
+        [0] if n_steps > 0 else []
+    )
+
+    for t in steps:
+        for ch in target_variables:
+            pred_mean = pred_mean_by_channel[ch][t]
+            pred_std = pred_std_by_channel[ch][t]
+            gt_mean = gt_mean_by_channel[ch][t]
+            gt_std = gt_std_by_channel[ch][t]
+            vmin_m, vmax_m, cmap_mean = _channel_vmin_vmax_cmap(ch, gt_mean, pred_mean)
+            spread_max = max(float(np.nanmax(gt_std)), float(np.nanmax(pred_std)), MIN_EPS)
+            ratio = np.clip(pred_std / np.maximum(gt_std, MIN_EPS), 0.0, 3.0)
+
+            fig, axs = plt.subplots(
+                2, 3, figsize=(16, 10), dpi=300, constrained_layout=True
+            )
+            fig.suptitle(
+                f"Hydrograph {hid} | {ch.upper()} | t={t} | GT ({n_ref_sims} sims) vs Forecast ({n_ens} ens)",
+                fontsize=12,
+            )
+
+            panels = [
+                ("GT mean", gt_mean, cmap_mean, vmin_m, vmax_m, ch),
+                ("GT spread (std)", gt_std, "plasma", 0.0, spread_max, "std"),
+                ("Forecast mean", pred_mean, cmap_mean, vmin_m, vmax_m, ch),
+                ("Forecast spread (std)", pred_std, "plasma", 0.0, spread_max, "std"),
+                ("Spread ratio (pred/gt)", ratio, "RdYlGn_r", 0.5, 1.5, "ratio"),
+            ]
+            for ax, (title, arr, cmap, vmin, vmax, cblabel) in zip(
+                axs.flatten()[:5], panels
+            ):
+                sc = ax.scatter(
+                    x, y, c=arr, s=6, marker="s", linewidths=0, cmap=cmap, vmin=vmin, vmax=vmax, rasterized=True
+                )
+                ax.set_title(title)
+                ax.set_aspect("equal")
+                ax.axis("off")
+                cbar = fig.colorbar(sc, ax=ax, fraction=0.046, pad=0.02)
+                cbar.set_label(cblabel)
+
+            ax6 = axs.flatten()[5]
+            if (
+                ch == "wd"
+                and pred_prob_wd is not None
+                and gt_prob_wd is not None
+            ):
+                prob_diff = pred_prob_wd[t] - gt_prob_wd[t]
+                sc6 = ax6.scatter(
+                    x, y, c=prob_diff, s=6, marker="s", linewidths=0,
+                    cmap="coolwarm", vmin=-1.0, vmax=1.0, rasterized=True
+                )
+                ax6.set_title(f"Prob. diff: P(wd>{UQ_EXCEEDANCE_THRESHOLD:.2f})")
+                cbar6 = fig.colorbar(sc6, ax=ax6, fraction=0.046, pad=0.02)
+                cbar6.set_label("pred - gt")
+            else:
+                bias = pred_mean - gt_mean
+                bmax = max(float(np.nanmax(np.abs(bias))), MIN_EPS)
+                sc6 = ax6.scatter(
+                    x, y, c=bias, s=6, marker="s", linewidths=0,
+                    cmap="coolwarm", vmin=-bmax, vmax=bmax, rasterized=True
+                )
+                ax6.set_title("Mean bias (pred - gt)")
+                cbar6 = fig.colorbar(sc6, ax=ax6, fraction=0.046, pad=0.02)
+                cbar6.set_label("bias")
+            ax6.set_aspect("equal")
+            ax6.axis("off")
+
+            fig.savefig(
+                os.path.join(uq_dir, f"uq_{ch}_{hid}_t{t}.png"),
+                bbox_inches="tight",
+                pad_inches=0.1,
+            )
+            plt.close(fig)
+
+    if pred_prob_wd is not None and gt_prob_wd is not None:
+        pred_prob_mean = np.mean(pred_prob_wd, axis=0)
+        gt_prob_mean = np.mean(gt_prob_wd, axis=0)
+        diff_abs = np.abs(pred_prob_mean - gt_prob_mean)
+        fig, axs = plt.subplots(1, 3, figsize=(16, 5), dpi=300, constrained_layout=True)
+        items = [
+            (f"GT mean P(wd>{UQ_EXCEEDANCE_THRESHOLD:.2f})", gt_prob_mean, "viridis", 0.0, 1.0),
+            (f"Forecast mean P(wd>{UQ_EXCEEDANCE_THRESHOLD:.2f})", pred_prob_mean, "viridis", 0.0, 1.0),
+            ("|Probability error|", diff_abs, "magma", 0.0, max(float(np.nanmax(diff_abs)), MIN_EPS)),
+        ]
+        for ax, (title, arr, cmap, vmin, vmax) in zip(axs, items):
+            sc = ax.scatter(x, y, c=arr, s=6, marker="s", linewidths=0, cmap=cmap, vmin=vmin, vmax=vmax, rasterized=True)
+            ax.set_title(title)
+            ax.set_aspect("equal")
+            ax.axis("off")
+            fig.colorbar(sc, ax=ax, fraction=0.046, pad=0.02)
+        fig.savefig(
+            os.path.join(uq_dir, f"uq_wd_timeavg_prob_{hid}.png"),
+            bbox_inches="tight",
+            pad_inches=0.1,
+        )
+        plt.close(fig)
+
+    if crps_map_wd is not None:
+        crps_mean = np.mean(crps_map_wd, axis=0)
+        vmax = max(float(np.nanmax(crps_mean)), MIN_EPS)
+        fig, ax = plt.subplots(1, 1, figsize=(6.5, 5.5), dpi=300, constrained_layout=True)
+        sc = ax.scatter(
+            x, y, c=crps_mean, s=6, marker="s", linewidths=0, cmap="magma", vmin=0.0, vmax=vmax, rasterized=True
+        )
+        ax.set_title("WD CRPS map (time-mean)")
+        ax.set_aspect("equal")
+        ax.axis("off")
+        cb = fig.colorbar(sc, ax=ax, fraction=0.046, pad=0.02)
+        cb.set_label("CRPS")
+        fig.savefig(
+            os.path.join(uq_dir, f"uq_wd_timeavg_crps_{hid}.png"),
+            bbox_inches="tight",
+            pad_inches=0.1,
+        )
+        plt.close(fig)
+
+    if "wd" in pred_mean_by_channel:
+        wd_pred_mean = pred_mean_by_channel["wd"]
+        wd_pred_std = pred_std_by_channel["wd"]
+        wd_gt_mean = gt_mean_by_channel["wd"]
+        wd_gt_std = gt_std_by_channel["wd"]
+        vmax = max(
+            float(np.nanmax(wd_pred_mean)),
+            float(np.nanmax(wd_gt_mean)),
+            float(np.nanmax(wd_pred_mean + 2.0 * wd_pred_std)),
+            float(np.nanmax(wd_gt_mean + 2.0 * wd_gt_std)),
+            MIN_EPS,
+        )
+        spread_max = max(
+            float(np.nanmax(wd_pred_std)), float(np.nanmax(wd_gt_std)), MIN_EPS
+        )
+        fig, axs = plt.subplots(2, 2, figsize=(12, 10), dpi=220, constrained_layout=True)
+        ax_gt_m, ax_pr_m, ax_gt_s, ax_pr_s = axs.flatten()
+        s_gt_m = ax_gt_m.scatter(x, y, c=wd_gt_mean[0], s=6, marker="s", linewidths=0, cmap="viridis", vmin=0.0, vmax=vmax)
+        s_pr_m = ax_pr_m.scatter(x, y, c=wd_pred_mean[0], s=6, marker="s", linewidths=0, cmap="viridis", vmin=0.0, vmax=vmax)
+        s_gt_s = ax_gt_s.scatter(x, y, c=wd_gt_std[0], s=6, marker="s", linewidths=0, cmap="plasma", vmin=0.0, vmax=spread_max)
+        s_pr_s = ax_pr_s.scatter(x, y, c=wd_pred_std[0], s=6, marker="s", linewidths=0, cmap="plasma", vmin=0.0, vmax=spread_max)
+        for ax, title in [
+            (ax_gt_m, f"GT mean ({n_ref_sims} sims)"),
+            (ax_pr_m, f"Forecast mean ({n_ens} ens)"),
+            (ax_gt_s, "GT spread (std)"),
+            (ax_pr_s, "Forecast spread (std)"),
+        ]:
+            ax.set_title(title)
+            ax.set_aspect("equal")
+            ax.axis("off")
+        fig.colorbar(s_gt_m, ax=ax_gt_m, fraction=0.046, pad=0.02)
+        fig.colorbar(s_pr_m, ax=ax_pr_m, fraction=0.046, pad=0.02)
+        fig.colorbar(s_gt_s, ax=ax_gt_s, fraction=0.046, pad=0.02)
+        fig.colorbar(s_pr_s, ax=ax_pr_s, fraction=0.046, pad=0.02)
+
+        def _animate(frame_idx: int) -> List[Any]:
+            time_hours = (frame_idx + 1) * dt_seconds / 3600.0
+            fig.suptitle(
+                f"Hydrograph {hid} | t={frame_idx} ({time_hours:.2f} h)",
+                fontsize=13,
+            )
+            s_gt_m.set_array(wd_gt_mean[frame_idx])
+            s_pr_m.set_array(wd_pred_mean[frame_idx])
+            s_gt_s.set_array(wd_gt_std[frame_idx])
+            s_pr_s.set_array(wd_pred_std[frame_idx])
+            return [s_gt_m, s_pr_m, s_gt_s, s_pr_s]
+
+        ani = animation.FuncAnimation(
+            fig, _animate, frames=n_steps, interval=ANIMATION_INTERVAL_MS, blit=False
+        )
+        ani.save(
+            os.path.join(uq_dir, f"uq_rollout_{hid}.gif"),
+            writer="pillow",
+            fps=ANIMATION_FPS,
+        )
+        plt.close(fig)
+
+
+def _rollout_prediction_per_hydrograph(
+    trainer: Any,
+    hydrograph_samples: List[Dict[str, Any]],
+    rollout_length: int,
+    history_steps: int,
+    dynamic_norm: Any,
+    target_norm: Any,
+    device: torch.device,
+    skip_before_timestep: int,
+    dt: float,
+    out_dir: str,
+    target_variables: List[str],
+    logger: logging.Logger,
+    fgn_noise_dim: Optional[int],
+    n_ensemble_samples: int,
+) -> None:
+    """
+    Evaluate per hydrograph using all reference simulations as ground-truth uncertainty.
+
+    Ground-truth uncertainty: variability across reference simulations (Manning's n).
+    Prediction uncertainty: variability across stochastic ensemble rollouts.
+    """
+    model = trainer.model
+    model.eval()
+    dynamic_norm.to(device)
+    target_norm.to(device)
+    os.makedirs(out_dir, exist_ok=True)
+
+    n_ens = max(1, int(n_ensemble_samples))
+    use_ensemble = fgn_noise_dim is not None and n_ens > 1
+    if not use_ensemble:
+        logger.warning(
+            "Per-hydrograph UQ run without stochastic ensemble. "
+            "Set gino.use_fgn_noise=true and rollout.n_ensemble_samples>1 for predictive uncertainty."
+        )
+
+    start_pred_t = skip_before_timestep + history_steps
+    end_pred_t = start_pred_t + rollout_length
+
+    per_channel_rmse: Dict[str, List[np.ndarray]] = {name: [] for name in target_variables}
+    per_channel_crps: Dict[str, List[np.ndarray]] = {name: [] for name in target_variables}
+    per_channel_spread_pred: Dict[str, List[np.ndarray]] = {name: [] for name in target_variables}
+    per_channel_spread_gt: Dict[str, List[np.ndarray]] = {name: [] for name in target_variables}
+    per_channel_spread_ratio: Dict[str, List[np.ndarray]] = {name: [] for name in target_variables}
+    wd_prob_brier: List[np.ndarray] = []
+    wd_prob_mae: List[np.ndarray] = []
+
+    for sample in tqdm(hydrograph_samples, desc="Hydrograph rollout evaluation"):
+        hydro_id = sample["hydrograph_id"]
+        geometry = sample["geometry"]
+        static_0 = sample["static"].to(device).unsqueeze(0)
+        geom_0 = geometry.to(device).unsqueeze(0)
+        query_0 = sample["query_points"].to(device).unsqueeze(0)
+        full_boundary = sample["boundary"].to(device)
+        dynamic_ref = sample["dynamic_ref"].to(device)
+        n_ref = int(sample["n_ref_sims"])
+
+        gt_rollout_ref = dynamic_ref[:, start_pred_t:end_pred_t]
+        gt_boundary_rollout = full_boundary[start_pred_t:end_pred_t]
+
+        run_rmse: Dict[str, List[float]] = {name: [] for name in target_variables}
+        run_crps: Dict[str, List[float]] = {name: [] for name in target_variables}
+        run_spread_pred: Dict[str, List[float]] = {name: [] for name in target_variables}
+        run_spread_gt: Dict[str, List[float]] = {name: [] for name in target_variables}
+        run_spread_ratio: Dict[str, List[float]] = {name: [] for name in target_variables}
+        run_pred_mean_by_channel: Dict[str, List[np.ndarray]] = {name: [] for name in target_variables}
+        run_pred_std_by_channel: Dict[str, List[np.ndarray]] = {name: [] for name in target_variables}
+        run_gt_mean_by_channel: Dict[str, List[np.ndarray]] = {name: [] for name in target_variables}
+        run_gt_std_by_channel: Dict[str, List[np.ndarray]] = {name: [] for name in target_variables}
+        run_wd_pred_prob: List[np.ndarray] = []
+        run_wd_gt_prob: List[np.ndarray] = []
+        run_wd_crps_map: List[np.ndarray] = []
+        run_wd_brier: List[float] = []
+        run_wd_mae: List[float] = []
+
+        # Do not condition on a specific hidden Manning's-n realization:
+        # initialize from the mean history across reference simulations.
+        init_history = dynamic_ref[:, skip_before_timestep:start_pred_t].mean(dim=0)
+        if use_ensemble:
+            current_dynamics = [init_history.clone() for _ in range(n_ens)]
+        else:
+            current_dynamic = init_history.clone()
+        current_boundary = full_boundary[skip_before_timestep:start_pred_t].clone()
+
+        for t in range(rollout_length):
+            with torch.no_grad():
+                if use_ensemble:
+                    pred_members: List[torch.Tensor] = []
+                    for ens_idx in range(n_ens):
+                        dyn_hist = current_dynamics[ens_idx]
+                        dyn_flat = dyn_hist.permute(1, 0, 2).reshape(1, dyn_hist.shape[1], -1)
+                        bc_flat = current_boundary.permute(1, 0, 2).reshape(1, current_boundary.shape[1], -1)
+                        x = torch.cat([static_0, bc_flat, dyn_flat], dim=2)
+                        z = torch.randn(fgn_noise_dim, device=device, dtype=x.dtype)
+                        pred_members.append(
+                            model(
+                                input_geom=geom_0,
+                                latent_queries=query_0,
+                                output_queries=geom_0,
+                                x=x,
+                                ada_in=z,
+                            )
+                        )
+                    pred_stack = torch.stack(pred_members, dim=0)  # [n_ens, 1, n_cells, n_target]
+                else:
+                    dyn_flat = current_dynamic.permute(1, 0, 2).reshape(
+                        1, current_dynamic.shape[1], -1
+                    )
+                    bc_flat = current_boundary.permute(1, 0, 2).reshape(
+                        1, current_boundary.shape[1], -1
+                    )
+                    x = torch.cat([static_0, bc_flat, dyn_flat], dim=2)
+                    pred = model(
+                        input_geom=geom_0,
+                        latent_queries=query_0,
+                        output_queries=geom_0,
+                        x=x,
+                    )
+                    pred_stack = pred.unsqueeze(0)
+
+            inv_pred_ens = target_norm.inverse_transform(pred_stack.squeeze(1))
+            inv_gt_ref = dynamic_norm.inverse_transform(gt_rollout_ref[:, t])
+
+            pred_mean_field = inv_pred_ens.mean(dim=0)
+            pred_std_field = inv_pred_ens.std(dim=0, unbiased=False)
+            gt_mean_field = inv_gt_ref.mean(dim=0)
+            gt_std_field = inv_gt_ref.std(dim=0, unbiased=False)
+
+            for ch_idx, ch_name in enumerate(target_variables):
+                pred_ens_ch = inv_pred_ens[:, :, ch_idx].detach().cpu().numpy()
+                gt_ref_ch = inv_gt_ref[:, :, ch_idx].detach().cpu().numpy()
+                pred_mean_ch = pred_mean_field[:, ch_idx].detach().cpu().numpy()
+                pred_std_ch = pred_std_field[:, ch_idx].detach().cpu().numpy()
+                gt_mean_ch = gt_mean_field[:, ch_idx].detach().cpu().numpy()
+                gt_std_ch = gt_std_field[:, ch_idx].detach().cpu().numpy()
+
+                run_pred_mean_by_channel[ch_name].append(pred_mean_ch)
+                run_pred_std_by_channel[ch_name].append(pred_std_ch)
+                run_gt_mean_by_channel[ch_name].append(gt_mean_ch)
+                run_gt_std_by_channel[ch_name].append(gt_std_ch)
+
+                rmse_t = float(np.sqrt(np.mean((pred_mean_ch - gt_mean_ch) ** 2)))
+                crps_map = _crps_ensemble_vs_reference(pred_ens_ch, gt_ref_ch)
+                crps_t = float(np.mean(crps_map))
+                spread_pred_t = float(np.mean(np.std(pred_ens_ch, axis=0)))
+                spread_gt_t = float(np.mean(np.std(gt_ref_ch, axis=0)))
+                spread_ratio_t = spread_pred_t / max(spread_gt_t, MIN_EPS)
+
+                run_rmse[ch_name].append(rmse_t)
+                run_crps[ch_name].append(crps_t)
+                run_spread_pred[ch_name].append(spread_pred_t)
+                run_spread_gt[ch_name].append(spread_gt_t)
+                run_spread_ratio[ch_name].append(spread_ratio_t)
+
+                if ch_name == "wd":
+                    pred_prob = np.mean(pred_ens_ch >= UQ_EXCEEDANCE_THRESHOLD, axis=0)
+                    gt_prob = np.mean(gt_ref_ch >= UQ_EXCEEDANCE_THRESHOLD, axis=0)
+                    run_wd_pred_prob.append(pred_prob)
+                    run_wd_gt_prob.append(gt_prob)
+                    run_wd_crps_map.append(crps_map)
+                    run_wd_brier.append(float(np.mean((pred_prob - gt_prob) ** 2)))
+                    run_wd_mae.append(float(np.mean(np.abs(pred_prob - gt_prob))))
+
+            if use_ensemble:
+                for ens_idx in range(n_ens):
+                    current_dynamics[ens_idx] = torch.cat(
+                        [current_dynamics[ens_idx][1:], pred_stack[ens_idx, 0].unsqueeze(0)],
+                        dim=0,
+                    )
+            else:
+                current_dynamic = torch.cat(
+                    [current_dynamic[1:], pred_stack[0, 0].unsqueeze(0)],
+                    dim=0,
+                )
+            current_boundary = torch.cat(
+                [current_boundary[1:], gt_boundary_rollout[t].unsqueeze(0)], dim=0
+            )
+
+        pred_mean_by_channel = {
+            k: np.stack(v, axis=0) for k, v in run_pred_mean_by_channel.items()
+        }
+        pred_std_by_channel = {
+            k: np.stack(v, axis=0) for k, v in run_pred_std_by_channel.items()
+        }
+        gt_mean_by_channel = {
+            k: np.stack(v, axis=0) for k, v in run_gt_mean_by_channel.items()
+        }
+        gt_std_by_channel = {
+            k: np.stack(v, axis=0) for k, v in run_gt_std_by_channel.items()
+        }
+        pred_prob_wd = np.stack(run_wd_pred_prob, axis=0) if run_wd_pred_prob else None
+        gt_prob_wd = np.stack(run_wd_gt_prob, axis=0) if run_wd_gt_prob else None
+        crps_map_wd = np.stack(run_wd_crps_map, axis=0) if run_wd_crps_map else None
+
+        _save_hydrograph_uq_figures_and_animation(
+            geometry=geometry,
+            pred_mean_by_channel=pred_mean_by_channel,
+            pred_std_by_channel=pred_std_by_channel,
+            gt_mean_by_channel=gt_mean_by_channel,
+            gt_std_by_channel=gt_std_by_channel,
+            target_variables=target_variables,
+            out_dir=out_dir,
+            hydrograph_id=hydro_id,
+            dt_seconds=dt,
+            n_ref_sims=n_ref,
+            n_ens=n_ens,
+            pred_prob_wd=pred_prob_wd,
+            gt_prob_wd=gt_prob_wd,
+            crps_map_wd=crps_map_wd,
+        )
+
+        for ch_name in target_variables:
+            per_channel_rmse[ch_name].append(np.asarray(run_rmse[ch_name], dtype=np.float64))
+            per_channel_crps[ch_name].append(np.asarray(run_crps[ch_name], dtype=np.float64))
+            per_channel_spread_pred[ch_name].append(np.asarray(run_spread_pred[ch_name], dtype=np.float64))
+            per_channel_spread_gt[ch_name].append(np.asarray(run_spread_gt[ch_name], dtype=np.float64))
+            per_channel_spread_ratio[ch_name].append(np.asarray(run_spread_ratio[ch_name], dtype=np.float64))
+        if run_wd_brier:
+            wd_prob_brier.append(np.asarray(run_wd_brier, dtype=np.float64))
+            wd_prob_mae.append(np.asarray(run_wd_mae, dtype=np.float64))
+
+        logger.info("Completed hydrograph %s (n_ref=%d, n_ens=%d)", hydro_id, n_ref, n_ens)
+
+    if not any(len(v) > 0 for v in per_channel_rmse.values()):
+        logger.warning("No per-hydrograph metrics were produced.")
+        return
+
+    metrics: Dict[str, np.ndarray] = {}
+    for ch_name in target_variables:
+        metrics[f"rmse_{ch_name}"] = np.stack(per_channel_rmse[ch_name], axis=0)
+        metrics[f"crps_{ch_name}"] = np.stack(per_channel_crps[ch_name], axis=0)
+        metrics[f"spread_pred_{ch_name}"] = np.stack(per_channel_spread_pred[ch_name], axis=0)
+        metrics[f"spread_gt_{ch_name}"] = np.stack(per_channel_spread_gt[ch_name], axis=0)
+        metrics[f"spread_ratio_{ch_name}"] = np.stack(per_channel_spread_ratio[ch_name], axis=0)
+    if wd_prob_brier:
+        metrics["brier_wd_exceed"] = np.stack(wd_prob_brier, axis=0)
+    if wd_prob_mae:
+        metrics["prob_mae_wd_exceed"] = np.stack(wd_prob_mae, axis=0)
+
+    stats = {k: {"mean": v.mean(axis=0), "std": v.std(axis=0)} for k, v in metrics.items()}
+    time_hours = (np.arange(1, rollout_length + 1) * dt) / 3600.0
+    npz_data: Dict[str, Any] = {"time_hours": time_hours}
+    for key, stat_dict in stats.items():
+        npz_data[f"{key}_mean"] = stat_dict["mean"]
+        npz_data[f"{key}_std"] = stat_dict["std"]
+        npz_data[f"{key}_all"] = metrics[key]
+    data_path = os.path.join(out_dir, ROLLOUT_METRICS_HYDRO_NPZ)
+    np.savez(data_path, **npz_data)
+    logger.info("Saved per-hydrograph metrics to %s", data_path)
+
+    plot_keys = list(stats.keys())
+    n_plots = len(plot_keys)
+    n_cols = 2
+    n_rows = int(np.ceil(n_plots / n_cols))
+    fig, axs = plt.subplots(
+        n_rows, n_cols, figsize=(8 * n_cols, 4.8 * n_rows), tight_layout=True
+    )
+    axs_flat = np.array(axs).reshape(-1)
+    for i, key in enumerate(plot_keys):
+        mean = stats[key]["mean"]
+        std = stats[key]["std"]
+        ax = axs_flat[i]
+        ax.plot(time_hours, mean, marker="o", markersize=3, linewidth=1.2, label=f"{key} mean")
+        ax.fill_between(time_hours, mean - std, mean + std, alpha=0.25, label="±1 std")
+        ax.set_title(f"{key} over time (across hydrographs)")
+        ax.set_xlabel("Time (hour)")
+        if key.startswith("spread_ratio"):
+            ax.set_ylabel("Spread ratio (pred/gt)")
+            ax.axhline(1.0, color="gray", linestyle="--", alpha=0.8)
+        elif key.startswith("rmse_"):
+            ax.set_ylabel("RMSE")
+        elif key.startswith("crps_"):
+            ax.set_ylabel("CRPS")
+        elif key.startswith("brier"):
+            ax.set_ylabel("Brier score")
+        else:
+            ax.set_ylabel("Metric")
+        ax.grid(True, alpha=0.3)
+        ax.legend(fontsize=8)
+    for j in range(n_plots, len(axs_flat)):
+        axs_flat[j].set_visible(False)
+    summary_path = os.path.join(out_dir, ROLLOUT_SUMMARY_HYDRO_PNG)
+    fig.savefig(summary_path, dpi=220)
+    plt.close(fig)
+    logger.info("Saved per-hydrograph summary figure to %s", summary_path)
+
+
 def _rollout_prediction_generic(
     trainer: Any,
     rollout_dataset: Any,
@@ -271,16 +817,23 @@ def _rollout_prediction_generic(
     fgn_noise_dim: Optional[int] = None,
     n_ensemble_samples: int = 1,
 ) -> None:
-    """Run autoregressive rollout, compute RMSE/CSI, save visuals and aggregate metrics."""
+    """
+    Generic rollout mode (single reference trajectory per run).
+
+    Ensemble mode follows paper-style AR updates: each member keeps its own state.
+    """
     model = trainer.model
     model.eval()
     dynamic_norm.to(device)
     target_norm.to(device)
     os.makedirs(out_dir, exist_ok=True)
 
-    per_channel_rmse: Dict[str, List[np.ndarray]] = {
-        name: [] for name in target_variables
-    }
+    n_ens = max(1, int(n_ensemble_samples))
+    use_ensemble = fgn_noise_dim is not None and n_ens > 1
+
+    per_channel_rmse: Dict[str, List[np.ndarray]] = {name: [] for name in target_variables}
+    per_channel_spread: Dict[str, List[np.ndarray]] = {name: [] for name in target_variables}
+    per_channel_spread_skill: Dict[str, List[np.ndarray]] = {name: [] for name in target_variables}
     wd_csi_005: List[np.ndarray] = []
     wd_csi_03: List[np.ndarray] = []
 
@@ -293,12 +846,21 @@ def _rollout_prediction_generic(
         end_pred_t = start_pred_t + rollout_length
         gt_rollout = full_dynamic[start_pred_t:end_pred_t]
         gt_boundary_rollout = full_boundary[start_pred_t:end_pred_t]
-        run_rmse = {name: [] for name in target_variables}
+
+        run_rmse: Dict[str, List[float]] = {name: [] for name in target_variables}
+        run_spread: Dict[str, List[float]] = {name: [] for name in target_variables}
+        run_spread_skill: Dict[str, List[float]] = {name: [] for name in target_variables}
         run_csi_005: List[float] = []
         run_csi_03: List[float] = []
-        run_pred_by_channel = {name: [] for name in target_variables}
-        run_gt_by_channel = {name: [] for name in target_variables}
-        current_dynamic = full_dynamic[skip_before_timestep:start_pred_t].clone()
+        run_pred_by_channel: Dict[str, List[np.ndarray]] = {name: [] for name in target_variables}
+        run_gt_by_channel: Dict[str, List[np.ndarray]] = {name: [] for name in target_variables}
+
+        if use_ensemble:
+            current_dynamics = [
+                full_dynamic[skip_before_timestep:start_pred_t].clone() for _ in range(n_ens)
+            ]
+        else:
+            current_dynamic = full_dynamic[skip_before_timestep:start_pred_t].clone()
         current_boundary = full_boundary[skip_before_timestep:start_pred_t].clone()
 
         static_0 = sample["static"].to(device).unsqueeze(0)
@@ -306,58 +868,83 @@ def _rollout_prediction_generic(
         query_0 = sample["query_points"].to(device).unsqueeze(0)
 
         for t in range(rollout_length):
-            dyn_flat = current_dynamic.permute(1, 0, 2).reshape(
-                1, current_dynamic.shape[1], -1
-            )
-            bc_flat = current_boundary.permute(1, 0, 2).reshape(
-                1, current_boundary.shape[1], -1
-            )
-            x = torch.cat([static_0, bc_flat, dyn_flat], dim=2)
             with torch.no_grad():
-                if fgn_noise_dim is not None and n_ensemble_samples > 1:
-                    preds = []
-                    for _ in range(n_ensemble_samples):
+                if use_ensemble:
+                    pred_members: List[torch.Tensor] = []
+                    for ens_idx in range(n_ens):
+                        dyn_hist = current_dynamics[ens_idx]
+                        dyn_flat = dyn_hist.permute(1, 0, 2).reshape(1, dyn_hist.shape[1], -1)
+                        bc_flat = current_boundary.permute(1, 0, 2).reshape(1, current_boundary.shape[1], -1)
+                        x = torch.cat([static_0, bc_flat, dyn_flat], dim=2)
                         z = torch.randn(fgn_noise_dim, device=device, dtype=x.dtype)
-                        p = model(
-                            input_geom=geom_0,
-                            latent_queries=query_0,
-                            output_queries=geom_0,
-                            x=x,
-                            ada_in=z,
+                        pred_members.append(
+                            model(
+                                input_geom=geom_0,
+                                latent_queries=query_0,
+                                output_queries=geom_0,
+                                x=x,
+                                ada_in=z,
+                            )
                         )
-                        preds.append(p)
-                    pred = torch.stack(preds, dim=0).mean(dim=0)
+                    pred_stack = torch.stack(pred_members, dim=0)
+                    pred = pred_stack.mean(dim=0)
                 else:
+                    dyn_flat = current_dynamic.permute(1, 0, 2).reshape(
+                        1, current_dynamic.shape[1], -1
+                    )
+                    bc_flat = current_boundary.permute(1, 0, 2).reshape(
+                        1, current_boundary.shape[1], -1
+                    )
+                    x = torch.cat([static_0, bc_flat, dyn_flat], dim=2)
                     pred = model(
                         input_geom=geom_0,
                         latent_queries=query_0,
                         output_queries=geom_0,
                         x=x,
                     )
+                    pred_stack = pred.unsqueeze(0)
+
             inv_pred = target_norm.inverse_transform(pred)
             inv_gt = dynamic_norm.inverse_transform(gt_rollout[t].unsqueeze(0))
+            inv_pred_ens = target_norm.inverse_transform(pred_stack.squeeze(1))
+
             for ch_idx, ch_name in enumerate(target_variables):
                 ch_pred = inv_pred[0, :, ch_idx].detach().cpu().numpy()
                 ch_gt = inv_gt[0, :, ch_idx].detach().cpu().numpy()
-                run_rmse[ch_name].append(
-                    float(np.sqrt(np.mean((ch_pred - ch_gt) ** 2)))
-                )
+                run_rmse[ch_name].append(float(np.sqrt(np.mean((ch_pred - ch_gt) ** 2))))
                 run_pred_by_channel[ch_name].append(ch_pred)
                 run_gt_by_channel[ch_name].append(ch_gt)
+                if use_ensemble:
+                    ens_ch = inv_pred_ens[:, :, ch_idx].detach().cpu().numpy()
+                    spread_t = float(np.mean(np.std(ens_ch, axis=0)))
+                    skill_t = float(np.sqrt(np.mean((ch_pred - ch_gt) ** 2)))
+                    run_spread[ch_name].append(spread_t)
+                    run_spread_skill[ch_name].append(
+                        spread_t / skill_t if skill_t > MIN_EPS else 0.0
+                    )
                 if ch_name == "wd":
                     run_csi_005.append(_compute_csi(0.05, ch_pred, ch_gt))
                     run_csi_03.append(_compute_csi(0.3, ch_pred, ch_gt))
-            current_dynamic = torch.cat(
-                [current_dynamic[1:], pred.squeeze(0).unsqueeze(0)], dim=0
-            )
+
+            if use_ensemble:
+                for ens_idx in range(n_ens):
+                    current_dynamics[ens_idx] = torch.cat(
+                        [current_dynamics[ens_idx][1:], pred_stack[ens_idx, 0].unsqueeze(0)],
+                        dim=0,
+                    )
+            else:
+                current_dynamic = torch.cat(
+                    [current_dynamic[1:], pred.squeeze(0).unsqueeze(0)], dim=0
+                )
             current_boundary = torch.cat(
                 [current_boundary[1:], gt_boundary_rollout[t].unsqueeze(0)], dim=0
             )
 
         for ch_name in target_variables:
-            per_channel_rmse[ch_name].append(
-                np.array(run_rmse[ch_name], dtype=np.float64)
-            )
+            per_channel_rmse[ch_name].append(np.array(run_rmse[ch_name], dtype=np.float64))
+            if use_ensemble:
+                per_channel_spread[ch_name].append(np.array(run_spread[ch_name], dtype=np.float64))
+                per_channel_spread_skill[ch_name].append(np.array(run_spread_skill[ch_name], dtype=np.float64))
         if "wd" in target_variables:
             wd_csi_005.append(np.array(run_csi_005, dtype=np.float64))
             wd_csi_03.append(np.array(run_csi_03, dtype=np.float64))
@@ -409,13 +996,14 @@ def _rollout_prediction_generic(
     metrics: Dict[str, np.ndarray] = {}
     for ch_name in target_variables:
         metrics[f"rmse_{ch_name}"] = np.stack(per_channel_rmse[ch_name], axis=0)
+        if use_ensemble:
+            metrics[f"spread_{ch_name}"] = np.stack(per_channel_spread[ch_name], axis=0)
+            metrics[f"spread_skill_{ch_name}"] = np.stack(per_channel_spread_skill[ch_name], axis=0)
     if "wd" in target_variables and wd_csi_005 and wd_csi_03:
         metrics["csi_005"] = np.stack(wd_csi_005, axis=0)
         metrics["csi_03"] = np.stack(wd_csi_03, axis=0)
-    stats = {
-        k: {"mean": v.mean(axis=0), "std": v.std(axis=0)}
-        for k, v in metrics.items()
-    }
+
+    stats = {k: {"mean": v.mean(axis=0), "std": v.std(axis=0)} for k, v in metrics.items()}
     time_hours = (np.arange(1, rollout_length + 1) * dt) / 3600.0
     npz_data: Dict[str, Any] = {"time_hours": time_hours}
     for key, stat_dict in stats.items():
@@ -441,7 +1029,11 @@ def _rollout_prediction_generic(
         ax.fill_between(time_hours, mean - std, mean + std, alpha=0.3, label="±1 std")
         ax.set_title(f"{key} over time")
         ax.set_xlabel("Time (hour)")
-        ax.set_ylabel("RMSE" if key.startswith("rmse_") else "CSI")
+        if key.startswith("spread_skill"):
+            ax.set_ylabel("Spread-skill ratio")
+            ax.axhline(1.0, color="gray", linestyle="--", alpha=0.7)
+        else:
+            ax.set_ylabel("RMSE" if key.startswith("rmse_") else "CSI")
         ax.grid(True)
         ax.legend()
     for j in range(n_plots, len(axs_flat)):
@@ -691,8 +1283,8 @@ def _build_rollout_normalized_dataset(
     normalizers: Dict[str, Any],
     target_variables: List[str],
     logger: logging.Logger,
-) -> Any:
-    """Build rollout test HDF dataset, collect fields, normalize, return NormalizedRolloutTestDataset."""
+) -> Tuple[Any, Optional[List[Dict[str, Any]]]]:
+    """Build rollout dataset and optional grouped hydrograph samples."""
     rollout_length = config.data.rollout_length
     history_steps = config.data.n_history
     skip = _opt(config, "data", "skip_before_timestep", 0)
@@ -715,7 +1307,20 @@ def _build_rollout_normalized_dataset(
             raise_on_smaller=True,
             skip_before_timestep=skip,
         )
-    logger.info("Rollout runs: %d", len(rds))
+
+    groups = group_run_ids_by_hydrograph(rds.valid_run_ids)
+    sims_per_hydro = [len(v) for v in groups.values()] if groups else []
+    if sims_per_hydro and max(sims_per_hydro) > 1:
+        logger.info(
+            "Rollout runs: %d total | Hydrographs: %d (sims per hydrograph min=%d max=%d)",
+            len(rds.valid_run_ids),
+            len(groups),
+            min(sims_per_hydro),
+            max(sims_per_hydro),
+        )
+    else:
+        logger.info("Rollout runs: %d", len(rds))
+
     with _PhaseTimer(logger, "Collecting rollout fields"):
         geom_list, static_list, boundary_list, dyn_list, _ = collect_all_fields(
             rds, expect_target=False
@@ -746,10 +1351,38 @@ def _build_rollout_normalized_dataset(
         }
         for i in range(len(rds))
     ]
-    return NormalizedRolloutTestDataset(
+    rollout_dataset = NormalizedRolloutTestDataset(
         normalized_samples=samples,
         query_res=config.data.query_res,
     )
+    hydrograph_samples: Optional[List[Dict[str, Any]]] = None
+    if sims_per_hydro and max(sims_per_hydro) > 1:
+        run_id_to_idx = {rid: i for i, rid in enumerate(rds.valid_run_ids)}
+        query_points = _build_query_points_from_geometry(
+            geometry_big[0], config.data.query_res
+        )
+        hydrograph_samples = []
+        for hydro_id, run_ids_group in groups.items():
+            indices = [run_id_to_idx[rid] for rid in run_ids_group if rid in run_id_to_idx]
+            if len(indices) < 2:
+                continue
+            hydrograph_samples.append(
+                {
+                    "hydrograph_id": hydro_id,
+                    "geometry": geometry_big[indices[0]],
+                    "static": static_big[indices[0]],
+                    "boundary": boundary_big[indices[0]],
+                    "dynamic_ref": torch.stack([dynamic_big[i] for i in indices], dim=0),
+                    "query_points": query_points,
+                    "n_ref_sims": len(indices),
+                }
+            )
+        logger.info(
+            "Built %d grouped hydrograph samples for UQ evaluation.",
+            len(hydrograph_samples),
+        )
+
+    return rollout_dataset, hydrograph_samples
 
 
 def main() -> int:
@@ -846,27 +1479,50 @@ def main() -> int:
         )
         return 0
 
-    rollout_norm_ds = _build_rollout_normalized_dataset(
+    rollout_norm_ds, hydrograph_samples = _build_rollout_normalized_dataset(
         config, normalizers, target_variables, logger
     )
     logger.info("Rollout normalized dataset: %d runs", len(rollout_norm_ds))
-    with _PhaseTimer(logger, "Rollout evaluation + plotting"):
-        _rollout_prediction_generic(
-            trainer=trainer,
-            rollout_dataset=rollout_norm_ds,
-            rollout_length=config.data.rollout_length,
-            history_steps=config.data.n_history,
-            dynamic_norm=normalizers["dynamic"],
-            target_norm=normalizers["target"],
-            device=device,
-            skip_before_timestep=_opt(config, "data", "skip_before_timestep", 0),
-            dt=config.data.dt,
-            out_dir=config.rollout.out_dir,
-            target_variables=target_variables,
-            logger=logger,
-            fgn_noise_dim=_opt(config, "gino", "fgn_noise_dim", 32) if use_fgn else None,
-            n_ensemble_samples=_opt(config, "rollout", "n_ensemble_samples", 1),
+    if hydrograph_samples:
+        logger.info(
+            "Hydrograph-grouped mode enabled: %d hydrographs with reference ensembles.",
+            len(hydrograph_samples),
         )
+    with _PhaseTimer(logger, "Rollout evaluation + plotting"):
+        if hydrograph_samples:
+            _rollout_prediction_per_hydrograph(
+                trainer=trainer,
+                hydrograph_samples=hydrograph_samples,
+                rollout_length=config.data.rollout_length,
+                history_steps=config.data.n_history,
+                dynamic_norm=normalizers["dynamic"],
+                target_norm=normalizers["target"],
+                device=device,
+                skip_before_timestep=_opt(config, "data", "skip_before_timestep", 0),
+                dt=config.data.dt,
+                out_dir=config.rollout.out_dir,
+                target_variables=target_variables,
+                logger=logger,
+                fgn_noise_dim=_opt(config, "gino", "fgn_noise_dim", 32) if use_fgn else None,
+                n_ensemble_samples=_opt(config, "rollout", "n_ensemble_samples", 1),
+            )
+        else:
+            _rollout_prediction_generic(
+                trainer=trainer,
+                rollout_dataset=rollout_norm_ds,
+                rollout_length=config.data.rollout_length,
+                history_steps=config.data.n_history,
+                dynamic_norm=normalizers["dynamic"],
+                target_norm=normalizers["target"],
+                device=device,
+                skip_before_timestep=_opt(config, "data", "skip_before_timestep", 0),
+                dt=config.data.dt,
+                out_dir=config.rollout.out_dir,
+                target_variables=target_variables,
+                logger=logger,
+                fgn_noise_dim=_opt(config, "gino", "fgn_noise_dim", 32) if use_fgn else None,
+                n_ensemble_samples=_opt(config, "rollout", "n_ensemble_samples", 1),
+            )
     logger.info("Evaluation finished successfully.")
     return 0
 
