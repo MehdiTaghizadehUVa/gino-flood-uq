@@ -1244,8 +1244,11 @@ class FGNTrainer(Trainer):
         """Single-step FGN: n_crps forward passes with different z, loss on (pred_samples, y)."""
         n_crps = self.crps_n_samples
         outs = []
+        batch_size = sample["x"].shape[0]
         for _ in range(n_crps):
-            z = torch.randn(self.fgn_noise_dim, device=self.device, dtype=sample["x"].dtype)
+            z = torch.randn(
+                batch_size, self.fgn_noise_dim, device=self.device, dtype=sample["x"].dtype
+            )
             samp = {**sample, "ada_in": z}
             if self.mixed_precision:
                 with torch.autocast(device_type=self.autocast_device_type):
@@ -1347,7 +1350,9 @@ class FGNTrainer(Trainer):
                 kwargs_base = {"input_geom": geom, "latent_queries": q, "output_queries": out_q, "x": x}
                 outs_s = []
                 for _ in range(n_crps):
-                    z = torch.randn(self.fgn_noise_dim, device=self.device, dtype=x.dtype)
+                    z = torch.randn(
+                        x.shape[0], self.fgn_noise_dim, device=self.device, dtype=x.dtype
+                    )
                     if self.mixed_precision:
                         with torch.autocast(device_type=self.autocast_device_type):
                             out = self.model(**kwargs_base, ada_in=z)
@@ -1438,8 +1443,11 @@ class FGNTrainer(Trainer):
         n_crps = self.crps_n_samples
         outs = []
         y_eval = sample["y"]
+        batch_size = sample["x"].shape[0]
         for _ in range(n_crps):
-            z = torch.randn(self.fgn_noise_dim, device=self.device, dtype=sample["x"].dtype)
+            z = torch.randn(
+                batch_size, self.fgn_noise_dim, device=self.device, dtype=sample["x"].dtype
+            )
             samp = {**sample, "ada_in": z}
             out = self.model(**samp)
             if self.data_processor is not None:
@@ -1761,7 +1769,7 @@ def rollout_prediction(
     """
     Performs autoregressive rollout, computing and plotting metrics for water depth, VX, and VY.
     When fgn_noise_dim is set and n_ensemble_samples > 1, runs an ensemble of forwards per step
-    and uses the mean prediction (FGN-style probabilistic rollout).
+    with per-sample noise z shaped [B, D] and uses the mean prediction.
     """
     model = trainer.model
     model.eval()
@@ -1810,7 +1818,7 @@ def rollout_prediction(
                 if fgn_noise_dim is not None and n_ensemble_samples > 1:
                     preds = []
                     for _ in range(n_ensemble_samples):
-                        z = torch.randn(fgn_noise_dim, device=device, dtype=x.dtype)
+                        z = torch.randn(x.shape[0], fgn_noise_dim, device=device, dtype=x.dtype)
                         p = model(
                             input_geom=geometry.to(device).unsqueeze(0),
                             latent_queries=sample["query_points"].to(device).unsqueeze(0),

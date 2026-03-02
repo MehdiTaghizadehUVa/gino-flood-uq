@@ -18,23 +18,69 @@ class AdaIN(nn.Module):
         self.mlp = mlp
 
         self.embedding = None
-    
+
+    def _canonicalize_embedding(self, embedding):
+        """Normalize embedding shape to [B, embed_dim] while accepting [embed_dim] too."""
+        if embedding.ndim == 1:
+            if embedding.numel() != self.embed_dim:
+                raise ValueError(
+                    f"AdaIN expected embedding dim {self.embed_dim}, got {embedding.numel()}."
+                )
+            return embedding.reshape(1, self.embed_dim)
+        if embedding.ndim == 2:
+            if embedding.shape[1] != self.embed_dim:
+                raise ValueError(
+                    f"AdaIN expected embedding shape [B, {self.embed_dim}], got {tuple(embedding.shape)}."
+                )
+            return embedding
+        raise ValueError(
+            f"AdaIN expected embedding with rank 1 or 2, got rank {embedding.ndim}."
+        )
+
     def set_embedding(self, x):
-        self.embedding = x.reshape(self.embed_dim,)
+        if x.ndim == 1:
+            self.embedding = self._canonicalize_embedding(x).squeeze(0)
+        elif x.ndim == 2:
+            self.embedding = self._canonicalize_embedding(x)
+        else:
+            raise ValueError(
+                f"AdaIN expected embedding with rank 1 or 2, got rank {x.ndim}."
+            )
 
     def forward(self, x, embedding=None):
-        """Forward with optional embedding. If embedding is passed, it is used (and kept in the
-        computation graph). Otherwise use self.embedding (set via set_embedding)."""
+        """Forward with optional embedding.
+
+        Accepted embedding shapes:
+          - [embed_dim]
+          - [1, embed_dim]
+          - [B, embed_dim]
+        """
         if embedding is not None:
-            e = embedding.reshape(self.embed_dim,)
+            e = embedding
         else:
             e = self.embedding
             if e is None:
                 raise RuntimeError("AdaIN: pass embedding or call set_embedding before forward")
-            e = e.reshape(self.embed_dim,)
-        weight, bias = torch.split(self.mlp(e), self.in_channels, dim=0)
-        out = nn.functional.group_norm(x, self.in_channels, weight, bias, eps=self.eps)
-        return out
+
+        e = self._canonicalize_embedding(e)
+        batch_size = x.shape[0]
+        if e.shape[0] == 1 and batch_size > 1:
+            e = e.expand(batch_size, -1)
+        elif e.shape[0] != batch_size:
+            raise ValueError(
+                f"AdaIN embedding batch ({e.shape[0]}) must be 1 or match x batch ({batch_size})."
+            )
+
+        # Normalize per sample/channel group first, then apply sample-wise affine parameters.
+        x_norm = nn.functional.group_norm(
+            x, self.in_channels, weight=None, bias=None, eps=self.eps
+        )
+        affine = self.mlp(e)
+        weight, bias = torch.split(affine, self.in_channels, dim=-1)
+        view_shape = (batch_size, self.in_channels) + (1,) * (x.ndim - 2)
+        weight = weight.reshape(view_shape)
+        bias = bias.reshape(view_shape)
+        return x_norm * weight + bias
 
 class InstanceNorm(nn.Module):
     def __init__(self, **kwargs):

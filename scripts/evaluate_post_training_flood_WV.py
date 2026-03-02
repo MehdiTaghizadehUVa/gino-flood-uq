@@ -1426,7 +1426,7 @@ def _rollout_prediction_per_hydrograph(
                         bc_flat = current_boundary.permute(1, 0, 2).reshape(1, current_boundary.shape[1], -1)
                         x = torch.cat([static_0, bc_flat, dyn_flat], dim=2)
                         if fgn_noise_dim is not None:
-                            z = torch.randn(fgn_noise_dim, device=device, dtype=x.dtype)
+                            z = torch.randn(x.shape[0], fgn_noise_dim, device=device, dtype=x.dtype)
                             pred_members.append(
                                 model(
                                     input_geom=geom_0,
@@ -1456,7 +1456,7 @@ def _rollout_prediction_per_hydrograph(
                     )
                     x = torch.cat([static_0, bc_flat, dyn_flat], dim=2)
                     if fgn_noise_dim is not None:
-                        z = torch.randn(fgn_noise_dim, device=device, dtype=x.dtype)
+                        z = torch.randn(x.shape[0], fgn_noise_dim, device=device, dtype=x.dtype)
                         pred = model(
                             input_geom=geom_0,
                             latent_queries=query_0,
@@ -1932,7 +1932,7 @@ def _rollout_prediction_generic(
                         bc_flat = current_boundary.permute(1, 0, 2).reshape(1, current_boundary.shape[1], -1)
                         x = torch.cat([static_0, bc_flat, dyn_flat], dim=2)
                         if fgn_noise_dim is not None:
-                            z = torch.randn(fgn_noise_dim, device=device, dtype=x.dtype)
+                            z = torch.randn(x.shape[0], fgn_noise_dim, device=device, dtype=x.dtype)
                             pred_members.append(
                                 model(
                                     input_geom=geom_0,
@@ -1963,7 +1963,7 @@ def _rollout_prediction_generic(
                     )
                     x = torch.cat([static_0, bc_flat, dyn_flat], dim=2)
                     if fgn_noise_dim is not None:
-                        z = torch.randn(fgn_noise_dim, device=device, dtype=x.dtype)
+                        z = torch.randn(x.shape[0], fgn_noise_dim, device=device, dtype=x.dtype)
                         pred = model(
                             input_geom=geom_0,
                             latent_queries=query_0,

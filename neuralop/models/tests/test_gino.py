@@ -103,3 +103,56 @@ def test_gino(gno_transform_type, latent_feature_dim, gno_coord_dim, gno_pos_emb
     if batch_size > 1:
         # assert f[1:] accumulates no grad
         assert not x.grad[1:].nonzero().any()
+
+
+def test_gino_fgn_batched_noise_conditioning():
+    if torch.backends.cuda.is_built():
+        device = torch.device("cuda:0")
+    else:
+        device = torch.device("cpu:0")
+
+    batch_size = 3
+    gno_coord_dim = 2
+    fgn_noise_dim = 6
+    model = GINO(
+        in_channels=in_channels,
+        out_channels=out_channels,
+        projection_channels=projection_channels,
+        gno_coord_dim=gno_coord_dim,
+        gno_radius=0.3,
+        gno_pos_embed_type="transformer",
+        in_gno_transform_type="linear",
+        out_gno_transform_type="linear",
+        fno_n_modes=(6, 6),
+        fno_hidden_channels=16,
+        fno_n_layers=2,
+        fno_norm="ada_in",
+        use_fgn_noise=True,
+        fgn_noise_dim=fgn_noise_dim,
+    ).to(device)
+
+    latent_density_local = 4
+    latent_geom = torch.stack(
+        torch.meshgrid(
+            [torch.linspace(0, 1, latent_density_local)] * gno_coord_dim, indexing="xy"
+        )
+    )
+    latent_geom = latent_geom.permute(*list(range(1, gno_coord_dim + 1)), 0).to(device)
+
+    input_geom = torch.randn(n_in, gno_coord_dim, device=device)
+    output_queries = torch.randn(n_out, gno_coord_dim, device=device)
+    x = torch.randn(batch_size, n_in, in_channels, device=device, requires_grad=True)
+    ada_in = torch.randn(batch_size, fgn_noise_dim, device=device)
+
+    out = model(
+        x=x,
+        input_geom=input_geom,
+        latent_queries=latent_geom,
+        output_queries=output_queries,
+        ada_in=ada_in,
+    )
+    assert list(out.shape) == [batch_size, n_out, out_channels]
+    assert out.isfinite().all()
+
+    out.sum().backward()
+    assert x.grad is not None

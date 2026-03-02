@@ -114,6 +114,7 @@ class GINO(BaseModel):
         by a learned linear map (no sinusoidal embed). For probabilistic ensembles.
     fgn_noise_dim : int, default=32
         Dimension of the FGN noise vector z when use_fgn_noise=True.
+        Canonical runtime shape is [B, fgn_noise_dim] (with [fgn_noise_dim] also accepted).
     fno_preactivation : bool, default=False
         If True, use a pre-act style in the FNO blocks (like a pre-activation ResNet).
     fno_skip : str, default='linear'
@@ -402,23 +403,53 @@ class GINO(BaseModel):
         """
         # Permute channel to second dimension => (b,c,d_1,d_2,...)
         in_p = in_p.permute(0, in_p.ndim-1, *range(1, in_p.ndim-1))
+        batch_size = in_p.shape[0]
 
-        # AdaIN embedding: when ada_in is provided, pass it through forward for gradient flow
+        # AdaIN embedding: canonical contract is [B, D], while [D] and [1, D] are allowed.
         ada_in_embed = None
+        raw_ada_in = None
         if ada_in is not None:
-            if ada_in.ndim == 2:
-                ada_in = ada_in.squeeze(0)
-            if self.use_fgn_noise and self.fgn_noise_encoder is not None:
-                ada_in_embed = self.fgn_noise_encoder(ada_in.unsqueeze(0)).squeeze(0)
-            elif self.adain_pos_embed is not None:
-                ada_in_embed = self.adain_pos_embed(ada_in.unsqueeze(0)).squeeze(0)
+            if ada_in.ndim == 1:
+                raw_ada_in = ada_in.unsqueeze(0)
+            elif ada_in.ndim == 2:
+                raw_ada_in = ada_in
             else:
-                ada_in_embed = ada_in
+                raise ValueError(
+                    f"ada_in must have shape [D], [1, D], or [B, D], got shape {tuple(ada_in.shape)}."
+                )
+
+            if raw_ada_in.shape[0] == 1 and batch_size > 1:
+                raw_ada_in = raw_ada_in.expand(batch_size, -1)
+            elif raw_ada_in.shape[0] != batch_size:
+                raise ValueError(
+                    f"ada_in batch ({raw_ada_in.shape[0]}) must be 1 or match model batch ({batch_size})."
+                )
         elif self.use_fgn_noise and self.fgn_noise_encoder is not None and self.fno_norm == "ada_in":
-            device = in_p.device
-            z_zero = torch.zeros(self.fgn_noise_dim, device=device, dtype=in_p.dtype)
-            ada_in_embed_zero = self.fgn_noise_encoder(z_zero.unsqueeze(0)).squeeze(0)
-            self.fno_blocks.set_ada_in_embeddings(ada_in_embed_zero)
+            # Deterministic fallback for callers that omit ada_in.
+            raw_ada_in = torch.zeros(
+                (batch_size, self.fgn_noise_dim), device=in_p.device, dtype=in_p.dtype
+            )
+
+        if raw_ada_in is not None:
+            if self.use_fgn_noise and self.fgn_noise_encoder is not None:
+                if raw_ada_in.shape[1] != self.fgn_noise_dim:
+                    raise ValueError(
+                        f"FGN expected ada_in dim {self.fgn_noise_dim}, got {raw_ada_in.shape[1]}."
+                    )
+                ada_in_embed = self.fgn_noise_encoder(raw_ada_in)
+            elif self.adain_pos_embed is not None:
+                if raw_ada_in.shape[1] != self.adain_pos_embed.in_channels:
+                    raise ValueError(
+                        f"AdaIN positional embedding expected dim {self.adain_pos_embed.in_channels}, "
+                        f"got {raw_ada_in.shape[1]}."
+                    )
+                ada_in_embed = self.adain_pos_embed(raw_ada_in)
+            else:
+                if self.ada_in_dim is not None and raw_ada_in.shape[1] != self.ada_in_dim:
+                    raise ValueError(
+                        f"AdaIN expected embedding dim {self.ada_in_dim}, got {raw_ada_in.shape[1]}."
+                    )
+                ada_in_embed = raw_ada_in
 
         # Lifting
         in_p = self.lifting(in_p)
@@ -455,7 +486,8 @@ class GINO(BaseModel):
         latent_features : torch.Tensor, optional
             Additional channels for the latent domain, shape (b, d_1,..., d_k, C).
         ada_in : torch.Tensor, optional
-            If using AdaIN in the FNO, pass the embedding here.
+            If using AdaIN in the FNO, pass conditioning with canonical shape [B, D].
+            Backward-compatible shapes [D] and [1, D] are also accepted.
 
         Returns
         -------
