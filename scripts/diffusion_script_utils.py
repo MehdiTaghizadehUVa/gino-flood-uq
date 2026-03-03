@@ -5,6 +5,7 @@ from __future__ import annotations
 import inspect
 import json
 import logging
+import numbers
 from pathlib import Path
 from typing import Any, Dict, Mapping, MutableMapping, Optional, Tuple
 
@@ -13,6 +14,16 @@ import torch
 
 def to_builtin(obj: Any) -> Any:
     """Recursively convert config-like objects to Python builtin containers."""
+    # Preserve scalar-like values before __dict__-based conversion.
+    if obj is None or isinstance(obj, (str, bytes, bool)):
+        return obj
+    if isinstance(obj, numbers.Integral):
+        return int(obj)
+    if isinstance(obj, numbers.Real):
+        return float(obj)
+    if isinstance(obj, numbers.Complex):
+        return complex(obj)
+
     if isinstance(obj, dict):
         return {k: to_builtin(v) for k, v in obj.items()}
     if isinstance(obj, (list, tuple)):
