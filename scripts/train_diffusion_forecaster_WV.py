@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import copy
+import inspect
 import json
 import os
 import sys
@@ -112,11 +113,10 @@ def _prepare_datasets(
     seed = int(safe_get(safe_get(config, "distributed", {}), "seed", 123))
     static_text_files = list(safe_get(data_cfg, "static_text_files", ["M40_CS.txt", "M40_CU.txt", "M40_FA.txt"]))
 
-    full_dataset = FloodDatasetHDF(
+    dataset_kwargs = dict(
         data_root=str(safe_get(data_cfg, "root", "")),
         n_history=int(safe_get(data_cfg, "n_history", 3)),
         train_txt=str(safe_get(data_cfg, "train_txt", "train.txt")),
-        write_train_txt=bool(safe_get(data_cfg, "write_train_txt", False)),
         static_text_files=static_text_files,
         hdf_suffix=".hdf",
         noise_type=str(safe_get(data_cfg, "noise_type", "none")),
@@ -125,6 +125,11 @@ def _prepare_datasets(
         ar_rollout_steps=max(1, int(safe_get(safe_get(config, "opt", {}), "ar_rollout_steps", 1))),
         target_variables=target_variables,
     )
+    # Backward compatibility: only pass write_train_txt if this FloodDatasetHDF
+    # implementation supports it.
+    if "write_train_txt" in inspect.signature(FloodDatasetHDF.__init__).parameters:
+        dataset_kwargs["write_train_txt"] = bool(safe_get(data_cfg, "write_train_txt", False))
+    full_dataset = FloodDatasetHDF(**dataset_kwargs)
 
     n_samples_max = safe_get(data_cfg, "n_samples_max", None)
     if n_samples_max is not None and int(n_samples_max) > 0:
