@@ -1,0 +1,78 @@
+#!/bin/bash
+#SBATCH -A uqgroup
+#SBATCH -p gpu-a100-80
+#SBATCH --gres=gpu:1
+#SBATCH -c 8
+#SBATCH --mem=128G
+#SBATCH -t 72:00:00
+#SBATCH -J ddofs_wv_tr
+#SBATCH --array=0-3
+#SBATCH -o logs/out/ddofs_wv_tr-%A_%a.out
+#SBATCH -e logs/err/ddofs_wv_tr-%A_%a.err
+
+set -euo pipefail
+module purge
+module load apptainer
+
+if [[ -n "${SLURM_SUBMIT_DIR:-}" ]]; then
+  SCRIPT_DIR="${SLURM_SUBMIT_DIR}"
+else
+  SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+fi
+cd "${SCRIPT_DIR}"
+mkdir -p logs/out logs/err
+
+PROJECT_DIR="/home/$USER/GINO_Model/neuraloperator_no_physics"
+TRAIN_SCRIPT="${PROJECT_DIR}/scripts/train_diffusion_forecaster_WV.py"
+TRAIN_CONFIG="${PROJECT_DIR}/config/gino_pluvial_flood_config_WV_depth_only_diffusion.yaml"
+CONTAINER_PATH="/share/resources/containers/apptainer/archive/pytorch-2.0.1.sif"
+DATA_ROOT="/scratch/$USER/Data_Generation_UQ/Results/M40"
+
+ENSEMBLE_ID="${SLURM_ARRAY_TASK_ID}"
+BASE_SEED=123
+SEED=$((BASE_SEED + ENSEMBLE_ID))
+
+RUN_GROUP="ddofs_wv_m40_depth_job${SLURM_ARRAY_JOB_ID}"
+WANDB_NAME="ddofs_wv_m40_depth_seed${SEED}_steps40_gprff_rbf_ls0.0500"
+CKPT_ROOT="/home/$USER/GINO_Model/neuraloperator_no_physics/scripts/checkpoints_WV_depth_only_diffusion"
+CKPT_DIR="${CKPT_ROOT}/${RUN_GROUP}_ens${ENSEMBLE_ID}"
+mkdir -p "${CKPT_DIR}"
+
+HOST_CA_BUNDLE=""
+for cand in /etc/pki/tls/certs/ca-bundle.crt /etc/ssl/certs/ca-certificates.crt; do
+  if [[ -f "$cand" ]]; then
+    HOST_CA_BUNDLE="$cand"
+    break
+  fi
+done
+APPTAINER_BIND_ARGS="--nv"
+if [[ -n "${HOST_CA_BUNDLE}" ]]; then
+  APPTAINER_BIND_ARGS="--nv --bind ${HOST_CA_BUNDLE}:/host_ca_bundle.crt:ro"
+  export APPTAINERENV_SSL_CERT_FILE=/host_ca_bundle.crt
+  export APPTAINERENV_REQUESTS_CA_BUNDLE=/host_ca_bundle.crt
+fi
+
+for key_path in "${PROJECT_DIR}/config/wandb_api_key.txt" "/scratch/$USER/Data_Generation_UQ/GINO_Model/neuraloperator_no_physics/config/wandb_api_key.txt"; do
+  if [[ -f "${key_path}" ]]; then
+    export APPTAINERENV_WANDB_API_KEY="$(head -n 1 "${key_path}" | tr -d "\r")"
+    break
+  fi
+done
+
+echo "Training script: ${TRAIN_SCRIPT}"
+echo "Config:          ${TRAIN_CONFIG}"
+echo "Data root:       ${DATA_ROOT}"
+echo "Seed:            ${SEED}"
+echo "Checkpoint dir:  ${CKPT_DIR}"
+echo "W&B group:       ${RUN_GROUP}"
+echo "W&B name:        ${WANDB_NAME}"
+
+apptainer run ${APPTAINER_BIND_ARGS} "${CONTAINER_PATH}" "${TRAIN_SCRIPT}" \
+  --config_path "${TRAIN_CONFIG}" \
+  --data.root "${DATA_ROOT}" \
+  --rollout_data.root "${DATA_ROOT}" \
+  --distributed.seed "${SEED}" \
+  --checkpoint.save_dir "${CKPT_DIR}" \
+  --wandb.log true \
+  --wandb.group "${RUN_GROUP}" \
+  --wandb.name "${WANDB_NAME}"

@@ -1,0 +1,170 @@
+# WV depth-only config for DDO-style conditional diffusion baseline.
+flood: &FLOOD
+  arch: 'gino'
+  sample_max: 10000
+
+  distributed:
+    use_distributed: False
+    wireup_info: 'mpi'
+    wireup_store: 'tcp'
+    model_parallel_size: 1
+    seed: 123
+    device: 'cuda:0'
+
+  deterministic: true
+
+  data:
+    root: "C:/Users/jrj6wm/Desktop/Data_Generation_UQ/Results/M40"
+    resolution: 48
+    n_history: 3
+    batch_size: 32
+    n_samples_max: null
+    query_res: [48, 48]
+    train_txt: "train.txt"
+    write_train_txt: true
+    num_workers: 4
+    pin_memory: true
+    persistent_workers: false
+    prefetch_factor: 1
+    normalizer_chunk_size: 10000
+    normalizer_path: "normalizers_depth_only.pt"
+    static_text_files:
+      - "M40_CS.txt"
+      - "M40_CU.txt"
+      - "M40_FA.txt"
+    noise_type: "none"
+    target_variables: ["wd"]
+    noise_std: [0.01]
+    rollout_length: 78
+    skip_before_timestep: 12
+    dt: 1200
+
+  rollout_data:
+    root: "C:/Users/jrj6wm/Desktop/Data_Generation_UQ/Results/M40"
+    test_txt: "test.txt"
+    static_text_files:
+      - "M40_CS.txt"
+      - "M40_CU.txt"
+      - "M40_FA.txt"
+
+  gino:
+    data_channels: 20   # overwritten at runtime for diffusion conditioning channels
+    out_channels: 1     # depth-only
+    latent_feature_channels: 0
+    projection_channels: 256
+    gno_coord_dim: 2
+    gno_radius: 0.1
+    in_gno_transform_type: 'linear'
+    out_gno_transform_type: 'linear'
+    gno_pos_embed_type: None
+    gno_embed_channels: 32
+    gno_embed_max_positions: 10000
+    in_gno_channel_mlp_hidden_layers: [80, 80, 80]
+    out_gno_channel_mlp_hidden_layers: [512, 256]
+
+    fno_n_modes: [16, 16]
+    fno_hidden_channels: 64
+    fno_lifting_channel_ratio: 2
+    fno_n_layers: 4
+    fno_use_channel_mlp: True
+    fno_norm: 'instance_norm'
+    fno_ada_in_features: 16
+    fno_ada_in_dim: 32
+
+    output_distribution: 'deterministic'
+    use_fgn_noise: false
+    fgn_noise_dim: 32
+
+    fno_factorization: 'tucker'
+    fno_rank: 0.4
+    fno_joint_factorization: false
+    fno_fixed_rank_modes: false
+    fno_implementation: 'factorized'
+    fno_domain_padding: 0.1
+    fno_channel_mlp_expansion: 1.0
+    fno_channel_mlp_dropout: 0.0
+    fno_resolution_scaling_factor: 1
+    autoregressive: True
+    gno_in_weighting_fn: 'edam'
+    gno_in_wt_fn_scale: 1.0
+    gno_out_weighting_fn: 'edam'
+    gno_out_wt_fn_scale: 1.0
+    alpha: 1.0
+    beta: 1.0
+
+  diffusion:
+    enabled: true
+    parameterization: epsilon
+    timestep_sampler: low_discrepancy
+    schedule:
+      ns_method: vp_cosine
+      lmbd0: 10.0
+      lmbd1: -10.0
+      weight_method: shifted_sigmoid_2
+    gp:
+      type: rff_rbf          # independent | rff_rbf
+      sigma: 1.0
+      length_scale: 0.05
+      rff_features: 256
+    sampler:
+      method: denoise
+      num_steps: 40
+      s_min: 1.0e-4
+      return_mean_last: true
+    conditioning:
+      add_noisy_target: true
+      add_time_features: true
+      time_feature_type: sincos
+
+  checkpoint:
+    save_dir: "./checkpoints_WV_depth_only_diffusion"
+    resume_from_dir: null
+
+  rollout:
+    run_after_training: false
+    out_dir: "./rollout_uq_WV_depth_only_diffusion"
+    n_ensemble_samples: 25
+    n_ensemble_samples_per_model: 25
+
+  verify_training: false
+  inverse_test: true
+
+  print_every: 100
+  max_val_batches: 64
+  log_level: 'INFO'
+  log_file: "train_diffusion_forecaster.log"
+  use_progress_bar: true
+
+  opt:
+    n_epochs: 150
+    learning_rate: 1e-4
+    ar_finetune_start_epoch: 100
+    ar_rollout_steps: 8
+    ar_curriculum_epochs_per_step: 25
+    training_loss: 'l2'
+    testing_loss: 'l2'
+    weight_decay: 1e-4
+    clip_grad_norm: 1.0
+
+    scheduler: 'ReduceLROnPlateau'
+    scheduler_monitor: 'avg_loss'
+    scheduler_mode: 'min'
+    scheduler_patience: 5
+    scheduler_threshold: 1e-4
+    scheduler_threshold_mode: 'rel'
+    scheduler_cooldown: 0
+    scheduler_min_lr: 0.0
+    scheduler_T_max: 200
+    scheduler_eta_min: 0.0
+    step_size: 50
+    gamma: 0.5
+
+  wandb:
+    log: false
+    name: null
+    group: null
+    project: 'Flood_GINO_NoPhysics'
+    entity: 'uva_mehdi'
+    sweep: false
+    log_output: true
+    eval_interval: 1
