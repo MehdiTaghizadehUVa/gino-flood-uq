@@ -115,8 +115,13 @@ flood: &FLOOD
       return_mean_last: true
     conditioning:
       add_noisy_target: true
-      add_time_features: true
-      time_feature_type: sincos
+      time_injection: adain      # channel | adain
+      add_time_features: true    # used only when time_injection=channel
+      time_feature_type: sincos  # used only when time_injection=channel
+      time_embedding_dim: 32
+      time_embedding_hidden_dim: 128
+      time_embedding_scale: 10000.0
+      allow_eval_conditioning_override: false
 
   checkpoint:
     save_dir: "./checkpoints_WV_depth_only_diffusion"

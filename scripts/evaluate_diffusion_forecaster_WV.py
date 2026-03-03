@@ -193,9 +193,56 @@ def _load_diffusion_model(
     # Allow runtime overrides from config.diffusion for evaluation.
     diff_cfg = safe_get(config, "diffusion", {})
     gp_cfg = safe_get(diff_cfg, "gp", {})
-    cond_cfg = safe_get(diff_cfg, "conditioning", {})
+    cond_cfg_runtime = safe_get(diff_cfg, "conditioning", {})
     sampler_cfg = safe_get(diff_cfg, "sampler", {})
     schedule_cfg = safe_get(diff_cfg, "schedule", {})
+    allow_cond_override = bool(safe_get(cond_cfg_runtime, "allow_eval_conditioning_override", False))
+
+    loaded_fno_norm = str(safe_get(gino_cfg, "fno_norm", "")).lower()
+    loaded_time_injection = "adain" if loaded_fno_norm == "ada_in" else "channel"
+    runtime_time_injection = safe_get(cond_cfg_runtime, "time_injection", None)
+    checkpoint_time_injection = cond_h.get("time_injection", loaded_time_injection)
+    requested_time_injection = str(
+        runtime_time_injection if runtime_time_injection is not None else checkpoint_time_injection
+    ).lower()
+    if requested_time_injection not in {"channel", "adain"}:
+        raise ValueError(
+            "diffusion.conditioning.time_injection must be one of {'channel', 'adain'}, "
+            f"got {requested_time_injection!r}"
+        )
+    if requested_time_injection != loaded_time_injection and not allow_cond_override:
+        raise ValueError(
+            "Conditioning mode mismatch between runtime config and checkpoint denoiser. "
+            f"Requested time_injection={requested_time_injection!r} but loaded gino.fno_norm={loaded_fno_norm!r}. "
+            "Set diffusion.conditioning.allow_eval_conditioning_override=true only if you intentionally "
+            "want to override this behavior."
+        )
+    if requested_time_injection != loaded_time_injection and allow_cond_override:
+        logger.warning(
+            "Overriding checkpoint conditioning mode: requested=%s loaded=%s",
+            requested_time_injection,
+            loaded_time_injection,
+        )
+
+    default_time_embedding_dim = int(
+        cond_h.get("time_embedding_dim", safe_get(gino_cfg, "fno_ada_in_dim", 32))
+    )
+    if requested_time_injection == "channel":
+        default_time_embedding_dim = int(cond_h.get("time_embedding_dim", 32))
+
+    cond_cfg = ConditioningConfig(
+        add_noisy_target=bool(safe_get(cond_cfg_runtime, "add_noisy_target", cond_h.get("add_noisy_target", True))),
+        add_time_features=bool(safe_get(cond_cfg_runtime, "add_time_features", cond_h.get("add_time_features", True))),
+        time_feature_type=str(safe_get(cond_cfg_runtime, "time_feature_type", cond_h.get("time_feature_type", "sincos"))),
+        time_injection=requested_time_injection,
+        time_embedding_dim=int(safe_get(cond_cfg_runtime, "time_embedding_dim", default_time_embedding_dim)),
+        time_embedding_hidden_dim=int(
+            safe_get(cond_cfg_runtime, "time_embedding_hidden_dim", cond_h.get("time_embedding_hidden_dim", 128))
+        ),
+        time_embedding_scale=float(
+            safe_get(cond_cfg_runtime, "time_embedding_scale", cond_h.get("time_embedding_scale", 10000.0))
+        ),
+    )
 
     gp_sampler = PointRFFGaussianProcessSampler(
         dim=2,
@@ -214,16 +261,24 @@ def _load_diffusion_model(
         lmbd0=float(safe_get(schedule_cfg, "lmbd0", schedule_h.get("lmbd0", 10.0))),
         lmbd1=float(safe_get(schedule_cfg, "lmbd1", schedule_h.get("lmbd1", -10.0))),
         weight_method=safe_get(schedule_cfg, "weight_method", schedule_h.get("weight_method", "shifted_sigmoid_2")),
-        conditioning=ConditioningConfig(
-            add_noisy_target=bool(safe_get(cond_cfg, "add_noisy_target", cond_h.get("add_noisy_target", True))),
-            add_time_features=bool(safe_get(cond_cfg, "add_time_features", cond_h.get("add_time_features", True))),
-            time_feature_type=str(safe_get(cond_cfg, "time_feature_type", cond_h.get("time_feature_type", "sincos"))),
-        ),
+        conditioning=cond_cfg,
         sampler_method=str(safe_get(sampler_cfg, "method", sampler_h.get("method", "denoise"))),
         sampler_num_steps=int(safe_get(sampler_cfg, "num_steps", sampler_h.get("num_steps", 40))),
         sampler_s_min=float(safe_get(sampler_cfg, "s_min", sampler_h.get("s_min", 1e-4))),
         sampler_return_mean_last=bool(safe_get(sampler_cfg, "return_mean_last", sampler_h.get("return_mean_last", True))),
     ).to(device)
+    logger.info(
+        (
+            "Loaded diffusion model %s with time_injection=%s time_embedding_dim=%d "
+            "add_noisy_target=%s fno_norm=%s in_channels=%s"
+        ),
+        ckpt_path,
+        cond_cfg.time_injection,
+        cond_cfg.time_embedding_dim,
+        cond_cfg.add_noisy_target,
+        str(safe_get(gino_cfg, "fno_norm", "unknown")),
+        str(safe_get(gino_cfg, "data_channels", "unknown")),
+    )
 
     forecaster.eval()
     return forecaster

@@ -19,6 +19,10 @@ class ConditioningConfig:
     add_noisy_target: bool = True
     add_time_features: bool = True
     time_feature_type: str = "sincos"  # sincos|raw
+    time_injection: str = "channel"  # channel|adain
+    time_embedding_dim: int = 32
+    time_embedding_hidden_dim: int = 128
+    time_embedding_scale: float = 10000.0
 
 
 class ConditionalDDOForecaster(nn.Module):
@@ -65,8 +69,43 @@ class ConditionalDDOForecaster(nn.Module):
         self.sampler_num_steps = int(sampler_num_steps)
         self.sampler_s_min = float(sampler_s_min)
         self.sampler_return_mean_last = bool(sampler_return_mean_last)
+        self._validate_conditioning_config()
+        if self.conditioning.time_injection == "adain":
+            self.time_mlp: Optional[nn.Module] = nn.Sequential(
+                nn.Linear(self.conditioning.time_embedding_dim, self.conditioning.time_embedding_hidden_dim),
+                nn.SiLU(),
+                nn.Linear(self.conditioning.time_embedding_hidden_dim, self.conditioning.time_embedding_dim),
+            )
+        else:
+            self.time_mlp = None
         if not (0.0 <= self.sampler_s_min < 1.0):
             raise ValueError(f"sampler_s_min must be in [0, 1), got {self.sampler_s_min}")
+
+    def _validate_conditioning_config(self) -> None:
+        cfg = self.conditioning
+        if not bool(cfg.add_noisy_target):
+            raise ValueError("Diffusion baseline requires conditioning.add_noisy_target=true.")
+        if cfg.time_injection not in {"channel", "adain"}:
+            raise ValueError(
+                f"conditioning.time_injection must be one of {{'channel', 'adain'}}, got {cfg.time_injection!r}"
+            )
+        if cfg.time_feature_type not in {"sincos", "raw"}:
+            raise ValueError(
+                f"conditioning.time_feature_type must be one of {{'sincos', 'raw'}}, got {cfg.time_feature_type!r}"
+            )
+        if int(cfg.time_embedding_dim) <= 0:
+            raise ValueError(
+                f"conditioning.time_embedding_dim must be > 0, got {cfg.time_embedding_dim}"
+            )
+        if int(cfg.time_embedding_hidden_dim) <= 0:
+            raise ValueError(
+                "conditioning.time_embedding_hidden_dim must be > 0, "
+                f"got {cfg.time_embedding_hidden_dim}"
+            )
+        if float(cfg.time_embedding_scale) <= 0:
+            raise ValueError(
+                f"conditioning.time_embedding_scale must be > 0, got {cfg.time_embedding_scale}"
+            )
 
     def diffusion_hparams(self) -> Dict[str, Any]:
         return {
@@ -94,6 +133,10 @@ class ConditionalDDOForecaster(nn.Module):
                 "add_noisy_target": self.conditioning.add_noisy_target,
                 "add_time_features": self.conditioning.add_time_features,
                 "time_feature_type": self.conditioning.time_feature_type,
+                "time_injection": self.conditioning.time_injection,
+                "time_embedding_dim": self.conditioning.time_embedding_dim,
+                "time_embedding_hidden_dim": self.conditioning.time_embedding_hidden_dim,
+                "time_embedding_scale": self.conditioning.time_embedding_scale,
             },
         }
 
@@ -107,7 +150,47 @@ class ConditionalDDOForecaster(nn.Module):
     def _alpha_sigma(self, t: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         return get_vp_cosine_params(t=t, lmbd0=self.lmbd0, lmbd1=self.lmbd1)
 
+    @staticmethod
+    def _sinusoidal_timestep_embedding(t: torch.Tensor, dim: int, scale: float) -> torch.Tensor:
+        if t.ndim != 1:
+            raise ValueError(f"t must be [B], got shape={tuple(t.shape)}")
+        dim = int(dim)
+        scale = float(scale)
+        if dim <= 0:
+            raise ValueError(f"dim must be > 0, got {dim}")
+        if scale <= 0:
+            raise ValueError(f"scale must be > 0, got {scale}")
+
+        if dim == 1:
+            return t.reshape(-1, 1)
+
+        half = dim // 2
+        freq = torch.exp(
+            -torch.log(torch.tensor(scale, device=t.device, dtype=t.dtype))
+            * torch.arange(half, device=t.device, dtype=t.dtype)
+            / max(half - 1, 1)
+        )
+        args = (2.0 * np.pi * t.reshape(-1, 1)) * freq.reshape(1, -1)
+        emb = torch.cat([torch.sin(args), torch.cos(args)], dim=1)
+        if dim % 2 == 1:
+            emb = torch.cat([emb, torch.zeros(t.shape[0], 1, device=t.device, dtype=t.dtype)], dim=1)
+        return emb
+
+    def _build_time_adain(self, t: torch.Tensor) -> torch.Tensor:
+        if self.conditioning.time_injection != "adain":
+            raise RuntimeError("_build_time_adain called when conditioning.time_injection != 'adain'.")
+        if self.time_mlp is None:
+            raise RuntimeError("time_mlp is not initialized for adain conditioning.")
+        emb = self._sinusoidal_timestep_embedding(
+            t=t,
+            dim=self.conditioning.time_embedding_dim,
+            scale=self.conditioning.time_embedding_scale,
+        )
+        return self.time_mlp(emb)
+
     def _time_features(self, t: torch.Tensor, n_points: int, dtype: torch.dtype) -> torch.Tensor:
+        if self.conditioning.time_injection != "channel":
+            return torch.empty(t.shape[0], n_points, 0, device=t.device, dtype=dtype)
         if not self.conditioning.add_time_features:
             return torch.empty(t.shape[0], n_points, 0, device=t.device, dtype=dtype)
 
@@ -207,11 +290,13 @@ class ConditionalDDOForecaster(nn.Module):
         )
         z_t = alpha_e * target + sigma_e * eps
         x_in = self._build_denoiser_input(context=context, z_t=z_t, t=t)
+        ada_in = self._build_time_adain(t) if self.conditioning.time_injection == "adain" else None
         eps_hat = self._predict_eps(
             x_in=x_in,
             input_geom=input_geom,
             latent_queries=latent_queries,
             output_queries=output_queries,
+            ada_in=ada_in,
         )
 
         # 0.5 * ||eps_hat - eps||^2, averaged over locations/channels then over batch.
@@ -262,12 +347,15 @@ class ConditionalDDOForecaster(nn.Module):
             t_cur = t_grid[step_idx].expand(bsz)
             t_prev = t_grid[step_idx + 1].expand(bsz)
             x_in = self._build_denoiser_input(context=context, z_t=z_t, t=t_cur)
+            step_ada_in = self._build_time_adain(t_cur) if self.conditioning.time_injection == "adain" else None
+            if ada_in is not None:
+                step_ada_in = ada_in
             eps_hat = self._predict_eps(
                 x_in=x_in,
                 input_geom=input_geom,
                 latent_queries=latent_queries,
                 output_queries=output_queries,
-                ada_in=ada_in,
+                ada_in=step_ada_in,
             )
             if stochastic:
                 eps = self.gp_sampler.sample(

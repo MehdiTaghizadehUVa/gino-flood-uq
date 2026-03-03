@@ -274,16 +274,22 @@ def _configure_denoiser(
     n_static: int,
     n_boundary_channels: int,
     n_target_channels: int,
-) -> Tuple[Dict[str, Any], int, int]:
+) -> Tuple[Dict[str, Any], int, int, str, int]:
     diff_cfg = safe_get(config, "diffusion", {})
     cond_cfg = safe_get(diff_cfg, "conditioning", {})
     n_history = int(safe_get(safe_get(config, "data", {}), "n_history", 3))
+    time_injection = str(safe_get(cond_cfg, "time_injection", "channel")).lower()
+    if time_injection not in {"channel", "adain"}:
+        raise ValueError(
+            f"diffusion.conditioning.time_injection must be one of {{'channel', 'adain'}}, got {time_injection!r}"
+        )
+    time_embedding_dim = int(safe_get(cond_cfg, "time_embedding_dim", 32))
 
     base_channels = n_static + n_history * n_boundary_channels + n_history * n_target_channels
     extra = 0
     if bool(safe_get(cond_cfg, "add_noisy_target", True)):
         extra += n_target_channels
-    if bool(safe_get(cond_cfg, "add_time_features", True)):
+    if time_injection == "channel" and bool(safe_get(cond_cfg, "add_time_features", True)):
         t_type = str(safe_get(cond_cfg, "time_feature_type", "sincos")).lower()
         extra += TIME_FEATURE_DIM_SINCOS if t_type == "sincos" else TIME_FEATURE_DIM_RAW
 
@@ -294,9 +300,12 @@ def _configure_denoiser(
     gino_cfg["out_channels"] = int(n_target_channels)
     gino_cfg["output_distribution"] = "deterministic"
     gino_cfg["use_fgn_noise"] = False
-    if str(safe_get(gino_cfg, "fno_norm", "")).lower() == "ada_in":
+    if time_injection == "adain":
+        gino_cfg["fno_norm"] = "ada_in"
+        gino_cfg["fno_ada_in_dim"] = int(time_embedding_dim)
+    elif str(safe_get(gino_cfg, "fno_norm", "")).lower() == "ada_in":
         gino_cfg["fno_norm"] = "instance_norm"
-    return gino_cfg, base_channels, total_in_channels
+    return gino_cfg, base_channels, total_in_channels, time_injection, time_embedding_dim
 
 
 def _init_scheduler(config: Any, optimizer: torch.optim.Optimizer):
@@ -478,7 +487,7 @@ def main() -> int:
     )
     logger.info("Prepared loaders: train_batches=%d test_batches=%d", len(train_loader), len(test_loader))
 
-    gino_cfg, _, total_in_channels = _configure_denoiser(
+    gino_cfg, _, total_in_channels, time_injection, time_embedding_dim = _configure_denoiser(
         config,
         n_static=n_static,
         n_boundary_channels=n_boundary_channels,
@@ -501,7 +510,33 @@ def main() -> int:
         add_noisy_target=bool(safe_get(cond_cfg_raw, "add_noisy_target", True)),
         add_time_features=bool(safe_get(cond_cfg_raw, "add_time_features", True)),
         time_feature_type=str(safe_get(cond_cfg_raw, "time_feature_type", "sincos")),
+        time_injection=str(safe_get(cond_cfg_raw, "time_injection", "channel")).lower(),
+        time_embedding_dim=int(safe_get(cond_cfg_raw, "time_embedding_dim", 32)),
+        time_embedding_hidden_dim=int(safe_get(cond_cfg_raw, "time_embedding_hidden_dim", 128)),
+        time_embedding_scale=float(safe_get(cond_cfg_raw, "time_embedding_scale", 10000.0)),
     )
+    logger.info(
+        (
+            "Diffusion conditioning: time_injection=%s time_embedding_dim=%d "
+            "add_noisy_target=%s add_time_features=%s total_in_channels=%d fno_norm=%s"
+        ),
+        cond_cfg.time_injection,
+        cond_cfg.time_embedding_dim,
+        cond_cfg.add_noisy_target,
+        cond_cfg.add_time_features,
+        total_in_channels,
+        str(safe_get(gino_cfg, "fno_norm", "unknown")),
+    )
+    if cond_cfg.time_injection != time_injection:
+        raise ValueError(
+            "Mismatch between denoiser wiring and conditioning config: "
+            f"time_injection={time_injection!r} vs {cond_cfg.time_injection!r}"
+        )
+    if cond_cfg.time_injection == "adain" and cond_cfg.time_embedding_dim != time_embedding_dim:
+        raise ValueError(
+            "Mismatch between denoiser fno_ada_in_dim and conditioning.time_embedding_dim: "
+            f"{time_embedding_dim} vs {cond_cfg.time_embedding_dim}"
+        )
     gp_sampler = PointRFFGaussianProcessSampler(
         dim=2,
         gp_type=str(safe_get(gp_cfg, "type", "rff_rbf")),
@@ -552,6 +587,7 @@ def main() -> int:
 
     best_val_loss = float("inf")
     global_step = 0
+    first_batch_checked = False
     logger.info("Starting diffusion training for %d epochs", n_epochs)
 
     for epoch in range(1, n_epochs + 1):
@@ -562,6 +598,28 @@ def main() -> int:
         pbar = tqdm(train_loader, desc=f"Epoch {epoch}/{n_epochs}", leave=False)
         for batch in pbar:
             sample = _prepare_batch(batch, device)
+            if not first_batch_checked:
+                batch_size = sample["context"].shape[0]
+                t_probe = torch.full(
+                    (batch_size,),
+                    0.5,
+                    device=device,
+                    dtype=sample["context"].dtype,
+                )
+                if cond_cfg.time_injection == "adain":
+                    ada_probe = forecaster._build_time_adain(t_probe)
+                    expected_shape = (batch_size, cond_cfg.time_embedding_dim)
+                    if tuple(ada_probe.shape) != expected_shape:
+                        raise ValueError(
+                            f"AdaIN timestep embedding shape mismatch: got {tuple(ada_probe.shape)} "
+                            f"expected {expected_shape}"
+                        )
+                else:
+                    if cond_cfg.time_injection != "channel":
+                        raise ValueError(
+                            f"Unexpected conditioning mode in first-batch check: {cond_cfg.time_injection!r}"
+                        )
+                first_batch_checked = True
             optimizer.zero_grad(set_to_none=True)
 
             loss, stats = forecaster.training_loss(sample)
