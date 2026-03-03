@@ -2947,11 +2947,13 @@ def main() -> int:
     if gaussian_mode:
         for model_idx, model in enumerate(models):
             model_fno_norm = getattr(model, "fno_norm", None)
-            if model_fno_norm is not None and str(model_fno_norm).strip().lower() == "ada_in":
+            model_fno_norm = "none" if model_fno_norm is None else str(model_fno_norm).strip().lower()
+            if model_fno_norm != "instance_norm":
                 raise ValueError(
-                    "Gaussian evaluation requires checkpoints without AdaIN conditioning. "
-                    f"Model[{model_idx}] has fno_norm='ada_in'. "
-                    "Train/use Gaussian checkpoints with gino.fno_norm set to none."
+                    "Gaussian evaluation expects checkpoints trained with "
+                    "gino.fno_norm='instance_norm'. "
+                    f"Model[{model_idx}] has fno_norm={model_fno_norm!r}. "
+                    "Train/use Gaussian checkpoints with gino.fno_norm set to instance_norm."
                 )
     eval_losses = _build_eval_losses(config, use_fgn)
     logger.info(

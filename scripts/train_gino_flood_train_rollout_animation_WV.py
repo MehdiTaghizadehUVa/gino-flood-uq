@@ -2530,14 +2530,22 @@ def main():
         raise ValueError(
             "gino.output_distribution='gaussian' requires gino.use_fgn_noise=false."
         )
-    if output_distribution == "gaussian" and fno_norm_mode == "ada_in":
-        warnings.warn(
-            "gino.output_distribution='gaussian' with gino.fno_norm='ada_in' has no default "
-            "conditioning embedding in this pipeline. Overriding gino.fno_norm -> None.",
-            UserWarning,
-            stacklevel=2,
-        )
-        setattr(config.gino, "fno_norm", None)
+    if output_distribution == "gaussian" and fno_norm_mode != "instance_norm":
+        if fno_norm_mode == "ada_in":
+            warnings.warn(
+                "gino.output_distribution='gaussian' is incompatible with gino.fno_norm='ada_in'. "
+                "Overriding gino.fno_norm -> 'instance_norm'.",
+                UserWarning,
+                stacklevel=2,
+            )
+        else:
+            warnings.warn(
+                "gino.output_distribution='gaussian' uses gino.fno_norm='instance_norm' in this "
+                f"pipeline (got {fno_norm_mode!r}). Overriding gino.fno_norm -> 'instance_norm'.",
+                UserWarning,
+                stacklevel=2,
+            )
+        setattr(config.gino, "fno_norm", "instance_norm")
     if training_loss_name == "crps" and not use_fgn:
         raise ValueError(
             "training_loss='crps' requires gino.use_fgn_noise=true in this pipeline."
