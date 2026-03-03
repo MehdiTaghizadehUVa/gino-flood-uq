@@ -49,6 +49,7 @@ from train_gino_flood_train_rollout_animation_WV import (  # noqa: E402
     NormalizedDatasetOnTheFly,
     FloodGINODataProcessor,
     FGNTrainer,
+    GaussianNLLTrainer,
     Trainer,
     FloodRolloutTestDatasetHDF,
     collect_all_fields,
@@ -60,7 +61,11 @@ from train_gino_flood_train_rollout_animation_WV import (  # noqa: E402
 from neuralop import get_model  # noqa: E402
 from neuralop.models.base_model import BaseModel  # noqa: E402
 from neuralop.losses.data_losses import LpLoss  # noqa: E402
-from neuralop.losses.probabilistic_losses import CRPSLoss  # noqa: E402
+from neuralop.losses.probabilistic_losses import (  # noqa: E402
+    CRPSLoss,
+    GaussianNLLLoss,
+    split_gaussian_packed,
+)
 from neuralop.data.transforms.normalizers import load_normalizers, save_normalizers  # noqa: E402
 from neuralop.training.training_state import load_training_state  # noqa: E402
 
@@ -120,6 +125,17 @@ def _opt(config: Any, section: Optional[str], key: str, default: Any) -> Any:
     if obj is None:
         return default
     return _safe_get(obj, key, default)
+
+
+def _opt_float(config: Any, section: Optional[str], key: str, default: float) -> float:
+    """Safe float getter with fallback for None/invalid config values."""
+    val = _opt(config, section, key, default)
+    if val is None:
+        return float(default)
+    try:
+        return float(val)
+    except (TypeError, ValueError):
+        return float(default)
 
 
 def parse_hydrograph_run_id(run_id: str) -> Tuple[str, Optional[int]]:
@@ -183,9 +199,38 @@ def _channel_vmin_vmax_cmap(
     return -vmax, vmax, "coolwarm"
 
 
+def _is_gaussian_mode(config: Any) -> bool:
+    out_dist = str(_opt(config, "gino", "output_distribution", "deterministic")).strip().lower()
+    train_loss = str(_opt(config, "opt", "training_loss", "l2")).strip().lower()
+    return out_dist == "gaussian" and train_loss == "gaussian_nll"
+
+
+def _sample_from_packed_gaussian(
+    out: torch.Tensor,
+    n_channels: int,
+    min_logvar: float,
+    max_logvar: float,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    mu, logvar = split_gaussian_packed(out, n_channels=n_channels)
+    logvar = torch.clamp(logvar, min=float(min_logvar), max=float(max_logvar))
+    sample = mu + torch.exp(0.5 * logvar) * torch.randn_like(mu)
+    return sample, mu, logvar
+
+
 def _build_eval_losses(config: Any, use_fgn: bool) -> Dict[str, Any]:
     """Build loss dict for one-step evaluation (L2 and optionally CRPS)."""
     l2_loss = LpLoss(d=2, p=2)
+    if _is_gaussian_mode(config):
+        return {
+            "l2": l2_loss,
+            "gaussian_nll": GaussianNLLLoss(
+                channel_weights=_opt(config, "opt", "crps_channel_weights", None),
+                reduction="mean",
+                min_logvar=_opt_float(config, "opt", "gaussian_min_logvar", -9.0),
+                max_logvar=_opt_float(config, "opt", "gaussian_max_logvar", 4.0),
+                logvar_reg_weight=0.0,
+            ),
+        }
     if use_fgn and _opt(config, "opt", "training_loss", "l2") == "crps":
         n_samples = max(2, int(_opt(config, "opt", "crps_n_samples", 2)))
         ch_weights = _opt(config, "opt", "crps_channel_weights", None)
@@ -961,7 +1006,7 @@ def _save_nonspatial_uq_diagnostics(
     # Per-hydrograph metric boxplots (time-averaged)
     small_box_data: List[np.ndarray] = []
     small_box_labels: List[str] = []
-    for key in ["rmse_wd", "crps_wd", "brier_wd_exceed", "wasserstein_wd"]:
+    for key in ["rmse_wd", "crps_wd", "gaussian_nll_wd", "brier_wd_exceed", "wasserstein_wd"]:
         if key in metrics:
             small_box_data.append(np.mean(metrics[key], axis=1))
             small_box_labels.append(key)
@@ -1295,6 +1340,9 @@ def _rollout_prediction_per_hydrograph(
     logger: logging.Logger,
     fgn_noise_dim: Optional[int],
     n_ensemble_samples: int,
+    gaussian_mode: bool = False,
+    gaussian_min_logvar: float = -9.0,
+    gaussian_max_logvar: float = 4.0,
 ) -> None:
     """
     Evaluate per hydrograph using all reference simulations as ground-truth uncertainty.
@@ -1336,6 +1384,7 @@ def _rollout_prediction_per_hydrograph(
 
     per_channel_rmse: Dict[str, List[np.ndarray]] = {name: [] for name in target_variables}
     per_channel_crps: Dict[str, List[np.ndarray]] = {name: [] for name in target_variables}
+    per_channel_gaussian_nll: Dict[str, List[np.ndarray]] = {name: [] for name in target_variables}
     per_channel_spread_pred: Dict[str, List[np.ndarray]] = {name: [] for name in target_variables}
     per_channel_spread_gt: Dict[str, List[np.ndarray]] = {name: [] for name in target_variables}
     per_channel_spread_ratio: Dict[str, List[np.ndarray]] = {name: [] for name in target_variables}
@@ -1384,6 +1433,7 @@ def _rollout_prediction_per_hydrograph(
 
         run_rmse: Dict[str, List[float]] = {name: [] for name in target_variables}
         run_crps: Dict[str, List[float]] = {name: [] for name in target_variables}
+        run_gaussian_nll: Dict[str, List[float]] = {name: [] for name in target_variables}
         run_spread_pred: Dict[str, List[float]] = {name: [] for name in target_variables}
         run_spread_gt: Dict[str, List[float]] = {name: [] for name in target_variables}
         run_spread_ratio: Dict[str, List[float]] = {name: [] for name in target_variables}
@@ -1415,9 +1465,13 @@ def _rollout_prediction_per_hydrograph(
         current_boundary = full_boundary[skip_before_timestep:start_pred_t].clone()
 
         for t in range(rollout_length):
+            mu_stack: Optional[torch.Tensor] = None
+            logvar_stack: Optional[torch.Tensor] = None
             with torch.no_grad():
                 if use_ensemble:
                     pred_members: List[torch.Tensor] = []
+                    mu_members: List[torch.Tensor] = []
+                    logvar_members: List[torch.Tensor] = []
                     for ens_idx in range(n_ens):
                         dyn_hist = current_dynamics[ens_idx]
                         model_idx = member_model_indices[ens_idx]
@@ -1425,7 +1479,23 @@ def _rollout_prediction_per_hydrograph(
                         dyn_flat = dyn_hist.permute(1, 0, 2).reshape(1, dyn_hist.shape[1], -1)
                         bc_flat = current_boundary.permute(1, 0, 2).reshape(1, current_boundary.shape[1], -1)
                         x = torch.cat([static_0, bc_flat, dyn_flat], dim=2)
-                        if fgn_noise_dim is not None:
+                        if gaussian_mode:
+                            out = model(
+                                input_geom=geom_0,
+                                latent_queries=query_0,
+                                output_queries=geom_0,
+                                x=x,
+                            )
+                            sampled, mu, logvar = _sample_from_packed_gaussian(
+                                out,
+                                n_channels=int(dynamic_ref.shape[-1]),
+                                min_logvar=gaussian_min_logvar,
+                                max_logvar=gaussian_max_logvar,
+                            )
+                            pred_members.append(sampled)
+                            mu_members.append(mu)
+                            logvar_members.append(logvar)
+                        elif fgn_noise_dim is not None:
                             z = torch.randn(x.shape[0], fgn_noise_dim, device=device, dtype=x.dtype)
                             pred_members.append(
                                 model(
@@ -1446,6 +1516,9 @@ def _rollout_prediction_per_hydrograph(
                                 )
                             )
                     pred_stack = torch.stack(pred_members, dim=0)  # [n_ens, 1, n_cells, n_target]
+                    if gaussian_mode:
+                        mu_stack = torch.stack(mu_members, dim=0)
+                        logvar_stack = torch.stack(logvar_members, dim=0)
                 else:
                     model = models[0]
                     dyn_flat = current_dynamic.permute(1, 0, 2).reshape(
@@ -1455,7 +1528,23 @@ def _rollout_prediction_per_hydrograph(
                         1, current_boundary.shape[1], -1
                     )
                     x = torch.cat([static_0, bc_flat, dyn_flat], dim=2)
-                    if fgn_noise_dim is not None:
+                    if gaussian_mode:
+                        out = model(
+                            input_geom=geom_0,
+                            latent_queries=query_0,
+                            output_queries=geom_0,
+                            x=x,
+                        )
+                        sampled, mu, logvar = _sample_from_packed_gaussian(
+                            out,
+                            n_channels=int(dynamic_ref.shape[-1]),
+                            min_logvar=gaussian_min_logvar,
+                            max_logvar=gaussian_max_logvar,
+                        )
+                        pred_stack = sampled.unsqueeze(0)
+                        mu_stack = mu.unsqueeze(0)
+                        logvar_stack = logvar.unsqueeze(0)
+                    elif fgn_noise_dim is not None:
                         z = torch.randn(x.shape[0], fgn_noise_dim, device=device, dtype=x.dtype)
                         pred = model(
                             input_geom=geom_0,
@@ -1471,10 +1560,23 @@ def _rollout_prediction_per_hydrograph(
                             output_queries=geom_0,
                             x=x,
                         )
-                    pred_stack = pred.unsqueeze(0)
+                        pred_stack = pred.unsqueeze(0)
 
             inv_pred_ens = target_norm.inverse_transform(pred_stack.squeeze(1))
             inv_gt_ref = dynamic_norm.inverse_transform(gt_rollout_ref[:, t])
+            if gaussian_mode and mu_stack is not None and logvar_stack is not None:
+                mu_phys_stack = target_norm.inverse_transform(mu_stack.squeeze(1))
+                std_stat = target_norm.std
+                while std_stat.ndim > logvar_stack.squeeze(1).ndim and std_stat.shape[0] == 1:
+                    std_stat = std_stat.squeeze(0)
+                while std_stat.ndim < logvar_stack.squeeze(1).ndim:
+                    std_stat = std_stat.unsqueeze(0)
+                std_stat = std_stat.to(logvar_stack.device)
+                eps = float(getattr(target_norm, "eps", 1e-7))
+                logvar_phys_stack = logvar_stack.squeeze(1) + 2.0 * torch.log(std_stat + eps)
+            else:
+                mu_phys_stack = None
+                logvar_phys_stack = None
 
             pred_mean_field = inv_pred_ens.mean(dim=0)
             pred_std_field = inv_pred_ens.std(dim=0, unbiased=False)
@@ -1497,6 +1599,23 @@ def _rollout_prediction_per_hydrograph(
                 rmse_t = float(np.sqrt(np.mean((pred_mean_ch - gt_mean_ch) ** 2)))
                 crps_map = _crps_ensemble_vs_reference(pred_ens_ch, gt_ref_ch)
                 crps_t = float(np.mean(crps_map))
+                if gaussian_mode and mu_phys_stack is not None and logvar_phys_stack is not None:
+                    mu_loc = mu_phys_stack[:, :, ch_idx]
+                    var_loc = torch.exp(logvar_phys_stack[:, :, ch_idx])
+                    mix_mu = mu_loc.mean(dim=0)
+                    second = (var_loc + mu_loc.pow(2)).mean(dim=0)
+                    mix_var = torch.clamp(second - mix_mu.pow(2), min=MIN_EPS)
+                    gt_loc = gt_mean_field[:, ch_idx]
+                    nll_loc = 0.5 * (
+                        torch.log(mix_var)
+                        + (gt_loc - mix_mu).pow(2) / mix_var
+                        + torch.log(
+                            torch.tensor(2.0 * torch.pi, device=mix_var.device, dtype=mix_var.dtype)
+                        )
+                    )
+                    gaussian_nll_t = float(torch.mean(nll_loc).item())
+                else:
+                    gaussian_nll_t = float("nan")
                 spread_pred_t = float(np.mean(np.std(pred_ens_ch, axis=0)))
                 spread_gt_t = float(np.mean(np.std(gt_ref_ch, axis=0)))
                 spread_ratio_t = spread_pred_t / max(spread_gt_t, MIN_EPS)
@@ -1513,6 +1632,7 @@ def _rollout_prediction_per_hydrograph(
 
                 run_rmse[ch_name].append(rmse_t)
                 run_crps[ch_name].append(crps_t)
+                run_gaussian_nll[ch_name].append(gaussian_nll_t)
                 run_spread_pred[ch_name].append(spread_pred_t)
                 run_spread_gt[ch_name].append(spread_gt_t)
                 run_spread_ratio[ch_name].append(spread_ratio_t)
@@ -1634,6 +1754,9 @@ def _rollout_prediction_per_hydrograph(
         for ch_name in target_variables:
             per_channel_rmse[ch_name].append(np.asarray(run_rmse[ch_name], dtype=np.float64))
             per_channel_crps[ch_name].append(np.asarray(run_crps[ch_name], dtype=np.float64))
+            per_channel_gaussian_nll[ch_name].append(
+                np.asarray(run_gaussian_nll[ch_name], dtype=np.float64)
+            )
             per_channel_spread_pred[ch_name].append(np.asarray(run_spread_pred[ch_name], dtype=np.float64))
             per_channel_spread_gt[ch_name].append(np.asarray(run_spread_gt[ch_name], dtype=np.float64))
             per_channel_spread_ratio[ch_name].append(np.asarray(run_spread_ratio[ch_name], dtype=np.float64))
@@ -1666,6 +1789,10 @@ def _rollout_prediction_per_hydrograph(
     for ch_name in target_variables:
         metrics[f"rmse_{ch_name}"] = np.stack(per_channel_rmse[ch_name], axis=0)
         metrics[f"crps_{ch_name}"] = np.stack(per_channel_crps[ch_name], axis=0)
+        if gaussian_mode:
+            metrics[f"gaussian_nll_{ch_name}"] = np.stack(
+                per_channel_gaussian_nll[ch_name], axis=0
+            )
         metrics[f"spread_pred_{ch_name}"] = np.stack(per_channel_spread_pred[ch_name], axis=0)
         metrics[f"spread_gt_{ch_name}"] = np.stack(per_channel_spread_gt[ch_name], axis=0)
         metrics[f"spread_ratio_{ch_name}"] = np.stack(per_channel_spread_ratio[ch_name], axis=0)
@@ -1703,6 +1830,7 @@ def _rollout_prediction_per_hydrograph(
     core_specs = [
         ("rmse_wd", "RMSE (WD)", None),
         ("crps_wd", "CRPS (WD)", None),
+        ("gaussian_nll_wd", "Gaussian NLL (WD)", None),
         ("wasserstein_wd", "Wasserstein-1 (WD)", None),
         ("brier_wd_exceed", f"Brier: P(wd>{UQ_EXCEEDANCE_THRESHOLD:.2f})", None),
         ("prob_mae_wd_exceed", f"Prob MAE: P(wd>{UQ_EXCEEDANCE_THRESHOLD:.2f})", None),
@@ -1853,6 +1981,9 @@ def _rollout_prediction_generic(
     logger: logging.Logger,
     fgn_noise_dim: Optional[int] = None,
     n_ensemble_samples: int = 1,
+    gaussian_mode: bool = False,
+    gaussian_min_logvar: float = -9.0,
+    gaussian_max_logvar: float = 4.0,
 ) -> None:
     """
     Generic rollout mode (single reference trajectory per run).
@@ -1885,6 +2016,7 @@ def _rollout_prediction_generic(
     )
 
     per_channel_rmse: Dict[str, List[np.ndarray]] = {name: [] for name in target_variables}
+    per_channel_gaussian_nll: Dict[str, List[np.ndarray]] = {name: [] for name in target_variables}
     per_channel_spread: Dict[str, List[np.ndarray]] = {name: [] for name in target_variables}
     per_channel_spread_skill: Dict[str, List[np.ndarray]] = {name: [] for name in target_variables}
     wd_csi_005: List[np.ndarray] = []
@@ -1901,6 +2033,7 @@ def _rollout_prediction_generic(
         gt_boundary_rollout = full_boundary[start_pred_t:end_pred_t]
 
         run_rmse: Dict[str, List[float]] = {name: [] for name in target_variables}
+        run_gaussian_nll: Dict[str, List[float]] = {name: [] for name in target_variables}
         run_spread: Dict[str, List[float]] = {name: [] for name in target_variables}
         run_spread_skill: Dict[str, List[float]] = {name: [] for name in target_variables}
         run_csi_005: List[float] = []
@@ -1921,9 +2054,13 @@ def _rollout_prediction_generic(
         query_0 = sample["query_points"].to(device).unsqueeze(0)
 
         for t in range(rollout_length):
+            mu_stack: Optional[torch.Tensor] = None
+            logvar_stack: Optional[torch.Tensor] = None
             with torch.no_grad():
                 if use_ensemble:
                     pred_members: List[torch.Tensor] = []
+                    mu_members: List[torch.Tensor] = []
+                    logvar_members: List[torch.Tensor] = []
                     for ens_idx in range(n_ens):
                         dyn_hist = current_dynamics[ens_idx]
                         model_idx = member_model_indices[ens_idx]
@@ -1931,7 +2068,23 @@ def _rollout_prediction_generic(
                         dyn_flat = dyn_hist.permute(1, 0, 2).reshape(1, dyn_hist.shape[1], -1)
                         bc_flat = current_boundary.permute(1, 0, 2).reshape(1, current_boundary.shape[1], -1)
                         x = torch.cat([static_0, bc_flat, dyn_flat], dim=2)
-                        if fgn_noise_dim is not None:
+                        if gaussian_mode:
+                            out = model(
+                                input_geom=geom_0,
+                                latent_queries=query_0,
+                                output_queries=geom_0,
+                                x=x,
+                            )
+                            sampled, mu, logvar = _sample_from_packed_gaussian(
+                                out,
+                                n_channels=int(full_dynamic.shape[-1]),
+                                min_logvar=gaussian_min_logvar,
+                                max_logvar=gaussian_max_logvar,
+                            )
+                            pred_members.append(sampled)
+                            mu_members.append(mu)
+                            logvar_members.append(logvar)
+                        elif fgn_noise_dim is not None:
                             z = torch.randn(x.shape[0], fgn_noise_dim, device=device, dtype=x.dtype)
                             pred_members.append(
                                 model(
@@ -1952,7 +2105,12 @@ def _rollout_prediction_generic(
                                 )
                             )
                     pred_stack = torch.stack(pred_members, dim=0)
-                    pred = pred_stack.mean(dim=0)
+                    if gaussian_mode:
+                        mu_stack = torch.stack(mu_members, dim=0)
+                        logvar_stack = torch.stack(logvar_members, dim=0)
+                        pred = mu_stack.mean(dim=0)
+                    else:
+                        pred = pred_stack.mean(dim=0)
                 else:
                     model = models[0]
                     dyn_flat = current_dynamic.permute(1, 0, 2).reshape(
@@ -1962,7 +2120,23 @@ def _rollout_prediction_generic(
                         1, current_boundary.shape[1], -1
                     )
                     x = torch.cat([static_0, bc_flat, dyn_flat], dim=2)
-                    if fgn_noise_dim is not None:
+                    if gaussian_mode:
+                        out = model(
+                            input_geom=geom_0,
+                            latent_queries=query_0,
+                            output_queries=geom_0,
+                            x=x,
+                        )
+                        sampled_single, pred, logvar_single = _sample_from_packed_gaussian(
+                            out,
+                            n_channels=int(full_dynamic.shape[-1]),
+                            min_logvar=gaussian_min_logvar,
+                            max_logvar=gaussian_max_logvar,
+                        )
+                        pred_stack = sampled_single.unsqueeze(0)
+                        mu_stack = pred.unsqueeze(0)
+                        logvar_stack = logvar_single.unsqueeze(0)
+                    elif fgn_noise_dim is not None:
                         z = torch.randn(x.shape[0], fgn_noise_dim, device=device, dtype=x.dtype)
                         pred = model(
                             input_geom=geom_0,
@@ -1978,16 +2152,46 @@ def _rollout_prediction_generic(
                             output_queries=geom_0,
                             x=x,
                         )
-                    pred_stack = pred.unsqueeze(0)
+                        pred_stack = pred.unsqueeze(0)
 
             inv_pred = target_norm.inverse_transform(pred)
             inv_gt = dynamic_norm.inverse_transform(gt_rollout[t].unsqueeze(0))
             inv_pred_ens = target_norm.inverse_transform(pred_stack.squeeze(1))
+            if gaussian_mode and mu_stack is not None and logvar_stack is not None:
+                mu_phys_stack = target_norm.inverse_transform(mu_stack.squeeze(1))
+                std_stat = target_norm.std
+                while std_stat.ndim > logvar_stack.squeeze(1).ndim and std_stat.shape[0] == 1:
+                    std_stat = std_stat.squeeze(0)
+                while std_stat.ndim < logvar_stack.squeeze(1).ndim:
+                    std_stat = std_stat.unsqueeze(0)
+                std_stat = std_stat.to(logvar_stack.device)
+                eps = float(getattr(target_norm, "eps", 1e-7))
+                logvar_phys_stack = logvar_stack.squeeze(1) + 2.0 * torch.log(std_stat + eps)
+            else:
+                mu_phys_stack = None
+                logvar_phys_stack = None
 
             for ch_idx, ch_name in enumerate(target_variables):
                 ch_pred = inv_pred[0, :, ch_idx].detach().cpu().numpy()
                 ch_gt = inv_gt[0, :, ch_idx].detach().cpu().numpy()
                 run_rmse[ch_name].append(float(np.sqrt(np.mean((ch_pred - ch_gt) ** 2))))
+                if gaussian_mode and mu_phys_stack is not None and logvar_phys_stack is not None:
+                    mu_loc = mu_phys_stack[:, :, ch_idx]
+                    var_loc = torch.exp(logvar_phys_stack[:, :, ch_idx])
+                    mix_mu = mu_loc.mean(dim=0)
+                    second = (var_loc + mu_loc.pow(2)).mean(dim=0)
+                    mix_var = torch.clamp(second - mix_mu.pow(2), min=MIN_EPS)
+                    gt_loc = inv_gt[0, :, ch_idx]
+                    nll_loc = 0.5 * (
+                        torch.log(mix_var)
+                        + (gt_loc - mix_mu).pow(2) / mix_var
+                        + torch.log(
+                            torch.tensor(2.0 * torch.pi, device=mix_var.device, dtype=mix_var.dtype)
+                        )
+                    )
+                    run_gaussian_nll[ch_name].append(float(torch.mean(nll_loc).item()))
+                else:
+                    run_gaussian_nll[ch_name].append(float("nan"))
                 run_pred_by_channel[ch_name].append(ch_pred)
                 run_gt_by_channel[ch_name].append(ch_gt)
                 if use_ensemble:
@@ -2009,15 +2213,24 @@ def _rollout_prediction_generic(
                         dim=0,
                     )
             else:
-                current_dynamic = torch.cat(
-                    [current_dynamic[1:], pred.squeeze(0).unsqueeze(0)], dim=0
-                )
+                if gaussian_mode:
+                    current_dynamic = torch.cat(
+                        [current_dynamic[1:], sampled_single.squeeze(0).unsqueeze(0)], dim=0
+                    )
+                else:
+                    current_dynamic = torch.cat(
+                        [current_dynamic[1:], pred.squeeze(0).unsqueeze(0)], dim=0
+                    )
             current_boundary = torch.cat(
                 [current_boundary[1:], gt_boundary_rollout[t].unsqueeze(0)], dim=0
             )
 
         for ch_name in target_variables:
             per_channel_rmse[ch_name].append(np.array(run_rmse[ch_name], dtype=np.float64))
+            if gaussian_mode:
+                per_channel_gaussian_nll[ch_name].append(
+                    np.array(run_gaussian_nll[ch_name], dtype=np.float64)
+                )
             if use_ensemble:
                 per_channel_spread[ch_name].append(np.array(run_spread[ch_name], dtype=np.float64))
                 per_channel_spread_skill[ch_name].append(np.array(run_spread_skill[ch_name], dtype=np.float64))
@@ -2072,6 +2285,10 @@ def _rollout_prediction_generic(
     metrics: Dict[str, np.ndarray] = {}
     for ch_name in target_variables:
         metrics[f"rmse_{ch_name}"] = np.stack(per_channel_rmse[ch_name], axis=0)
+        if gaussian_mode:
+            metrics[f"gaussian_nll_{ch_name}"] = np.stack(
+                per_channel_gaussian_nll[ch_name], axis=0
+            )
         if use_ensemble:
             metrics[f"spread_{ch_name}"] = np.stack(per_channel_spread[ch_name], axis=0)
             metrics[f"spread_skill_{ch_name}"] = np.stack(per_channel_spread_skill[ch_name], axis=0)
@@ -2108,6 +2325,8 @@ def _rollout_prediction_generic(
         if key.startswith("spread_skill"):
             ax.set_ylabel("Spread-skill ratio")
             ax.axhline(1.0, color="gray", linestyle="--", alpha=0.7)
+        elif key.startswith("gaussian_nll"):
+            ax.set_ylabel("Gaussian NLL")
         else:
             ax.set_ylabel("RMSE" if key.startswith("rmse_") else "CSI")
         ax.grid(True)
@@ -2125,6 +2344,7 @@ def _make_trainer(
 ) -> Any:
     """Build FGNTrainer or Trainer from config (no training, eval only)."""
     use_fgn = _opt(config, "gino", "use_fgn_noise", False)
+    gaussian_mode = _is_gaussian_mode(config)
     use_progress_bar = _opt(config, None, "use_progress_bar", True)
     scheduler_monitor = _opt(config, "opt", "scheduler_monitor", "train_err")
     eval_interval = _opt(config, "wandb", "eval_interval", 1)
@@ -2143,6 +2363,20 @@ def _make_trainer(
         scheduler_monitor=scheduler_monitor,
         eval_interval=eval_interval,
     )
+    if gaussian_mode:
+        return GaussianNLLTrainer(
+            **common,
+            rel_l2_loss_fn=LpLoss(d=2, p=2),
+            ar_finetune_start_epoch=max(
+                0, int(_opt(config, "opt", "ar_finetune_start_epoch", 0))
+            ),
+            ar_rollout_steps=max(1, int(_opt(config, "opt", "ar_rollout_steps", 1))),
+            ar_curriculum_epochs_per_step=max(
+                0, int(_opt(config, "opt", "ar_curriculum_epochs_per_step", 0))
+            ),
+            gaussian_min_logvar=_opt_float(config, "opt", "gaussian_min_logvar", -9.0),
+            gaussian_max_logvar=_opt_float(config, "opt", "gaussian_max_logvar", 4.0),
+        )
     if use_fgn and _opt(config, "opt", "training_loss", "l2") == "crps":
         return FGNTrainer(
             **common,
@@ -2665,6 +2899,18 @@ def main() -> int:
         )
         logger.info("data.root=%s", _opt(config, "data", "root", "N/A"))
 
+    out_dist = str(_opt(config, "gino", "output_distribution", "deterministic")).strip().lower()
+    train_loss_name = str(_opt(config, "opt", "training_loss", "l2")).strip().lower()
+    use_fgn_cfg = bool(_opt(config, "gino", "use_fgn_noise", False))
+    if train_loss_name == "gaussian_nll" and out_dist != "gaussian":
+        raise ValueError(
+            "training_loss='gaussian_nll' requires gino.output_distribution='gaussian'."
+        )
+    if out_dist == "gaussian" and use_fgn_cfg:
+        raise ValueError(
+            "gino.output_distribution='gaussian' requires gino.use_fgn_noise=false."
+        )
+
     if _opt(config, "data", "write_train_txt", False):
         with _PhaseTimer(logger, "Refreshing train.txt"):
             run_ids = write_train_txt_from_data_root(
@@ -2697,12 +2943,23 @@ def main() -> int:
     if normalizers.get("target") is not None:
         normalizers["target"] = normalizers["target"].to(device)
     use_fgn = _opt(config, "gino", "use_fgn_noise", False)
+    gaussian_mode = _is_gaussian_mode(config)
+    if gaussian_mode:
+        for model_idx, model in enumerate(models):
+            model_fno_norm = getattr(model, "fno_norm", None)
+            if model_fno_norm is not None and str(model_fno_norm).strip().lower() == "ada_in":
+                raise ValueError(
+                    "Gaussian evaluation requires checkpoints without AdaIN conditioning. "
+                    f"Model[{model_idx}] has fno_norm='ada_in'. "
+                    "Train/use Gaussian checkpoints with gino.fno_norm set to none."
+                )
     eval_losses = _build_eval_losses(config, use_fgn)
     logger.info(
-        "Eval losses=%s inverse_test=%s n_models=%d",
+        "Eval losses=%s inverse_test=%s n_models=%d gaussian_mode=%s",
         list(eval_losses.keys()),
         inverse_test,
         len(models),
+        gaussian_mode,
     )
 
     run_single = args.run_single_step and not args.skip_single_step
@@ -2714,6 +2971,9 @@ def main() -> int:
                     device=device,
                     target_norm=normalizers.get("target"),
                     inverse_test=inverse_test,
+                    output_distribution=str(
+                        _opt(config, "gino", "output_distribution", "deterministic")
+                    ).strip().lower(),
                 )
                 data_processor.wrap(model)
                 trainer = _make_trainer(config, model, data_processor, device, logger)
@@ -2793,6 +3053,9 @@ def main() -> int:
                 logger=logger,
                 fgn_noise_dim=_opt(config, "gino", "fgn_noise_dim", 32) if use_fgn else None,
                 n_ensemble_samples=rollout_n_ensemble,
+                gaussian_mode=gaussian_mode,
+                gaussian_min_logvar=_opt_float(config, "opt", "gaussian_min_logvar", -9.0),
+                gaussian_max_logvar=_opt_float(config, "opt", "gaussian_max_logvar", 4.0),
             )
         else:
             _rollout_prediction_generic(
@@ -2810,6 +3073,9 @@ def main() -> int:
                 logger=logger,
                 fgn_noise_dim=_opt(config, "gino", "fgn_noise_dim", 32) if use_fgn else None,
                 n_ensemble_samples=rollout_n_ensemble,
+                gaussian_mode=gaussian_mode,
+                gaussian_min_logvar=_opt_float(config, "opt", "gaussian_min_logvar", -9.0),
+                gaussian_max_logvar=_opt_float(config, "opt", "gaussian_max_logvar", 4.0),
             )
     logger.info("Evaluation finished successfully.")
     return 0

@@ -32,7 +32,12 @@ if str(_REPO_ROOT) not in sys.path:
 from neuralop.training import setup, AdamW
 from neuralop.training.trainer import Trainer
 from neuralop.losses.data_losses import LpLoss
-from neuralop.losses.probabilistic_losses import CRPSLoss, fair_crps_univariate
+from neuralop.losses.probabilistic_losses import (
+    CRPSLoss,
+    GaussianNLLLoss,
+    fair_crps_univariate,
+    split_gaussian_packed,
+)
 from neuralop.data.transforms.data_processors import DataProcessor
 from neuralop.data.transforms.normalizers import (
     UnitGaussianNormalizer,
@@ -121,6 +126,16 @@ def parse_target_variables(target_variables):
     if not out:
         raise ValueError("target_variables must contain at least one of: wd, vx, vy.")
     return out
+
+
+def _safe_float(val, default: float) -> float:
+    """Convert config value to float with fallback for None/invalid inputs."""
+    if val is None:
+        return float(default)
+    try:
+        return float(val)
+    except (TypeError, ValueError):
+        return float(default)
 
 
 def dataloader_worker_init(worker_id: int, base_seed: int) -> None:
@@ -902,12 +917,24 @@ class FloodGINODataProcessor(DataProcessor):
     Training: pred and y are both in normalized space (same as dataset target).
     Eval (when inverse_test=True): pred and y are inverse-transformed so metrics are in physical space.
     """
-    def __init__(self, device="cuda", target_norm=None, inverse_test=True):
+    def __init__(
+        self,
+        device="cuda",
+        target_norm=None,
+        inverse_test=True,
+        output_distribution: str = "deterministic",
+    ):
         super().__init__()
         self.device = device
         self.model = None
         self.target_norm = target_norm
         self.inverse_test = inverse_test
+        self.output_distribution = str(output_distribution).strip().lower()
+        if self.output_distribution not in {"deterministic", "gaussian"}:
+            raise ValueError(
+                "output_distribution must be one of {'deterministic', 'gaussian'}, "
+                f"got {output_distribution!r}."
+            )
 
     def preprocess(self, sample: dict) -> dict:
         for k, v in sample.items():
@@ -963,9 +990,31 @@ class FloodGINODataProcessor(DataProcessor):
         sample["y"] = y_
         return sample
 
+    @staticmethod
+    def _match_stat_ndim(stat: torch.Tensor, val_ndim: int) -> torch.Tensor:
+        out = stat
+        while out.ndim > val_ndim and out.shape[0] == 1:
+            out = out.squeeze(0)
+        while out.ndim < val_ndim:
+            out = out.unsqueeze(0)
+        return out
+
     def postprocess(self, out: torch.Tensor, sample: dict):
         if (not self.training) and self.inverse_test and (self.target_norm is not None):
-            out = self.target_norm.inverse_transform(out)
+            if self.output_distribution == "gaussian":
+                y_ref = sample.get("y")
+                n_channels = y_ref.shape[-1] if y_ref is not None else (out.shape[-1] // 2)
+                mu, logvar = split_gaussian_packed(out, n_channels=n_channels)
+                mu = self.target_norm.inverse_transform(mu)
+
+                std_stat = self._match_stat_ndim(self.target_norm.std, logvar.ndim)
+                if std_stat.device != logvar.device:
+                    std_stat = std_stat.to(logvar.device)
+                eps = float(getattr(self.target_norm, "eps", 1e-7))
+                logvar = logvar + 2.0 * torch.log(std_stat + eps)
+                out = torch.cat([mu, logvar], dim=-1)
+            else:
+                out = self.target_norm.inverse_transform(out)
             if sample["y"] is not None:
                 sample["y"] = self.target_norm.inverse_transform(sample["y"])
         return out, sample
@@ -1183,6 +1232,30 @@ def _build_x_from_dynamic_boundary(static: torch.Tensor, boundary: torch.Tensor,
     bc_ = boundary.permute(0, 2, 1, 3).reshape(boundary.shape[0], boundary.shape[2], -1)
     x_ = torch.cat([static, bc_, dyn_], dim=2)
     return x_
+
+
+def _gaussian_mean_from_packed(out: torch.Tensor, n_channels: int) -> torch.Tensor:
+    """Extract Gaussian predictive mean from packed [mu, logvar] output."""
+    mu, _ = split_gaussian_packed(out, n_channels=n_channels)
+    return mu
+
+
+def _sample_from_packed_gaussian(
+    out: torch.Tensor,
+    n_channels: int,
+    min_logvar: float = -9.0,
+    max_logvar: float = 4.0,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """
+    Reparameterized sample from packed [mu, logvar] output.
+
+    Returns (sample, mu, logvar_clamped).
+    """
+    mu, logvar = split_gaussian_packed(out, n_channels=n_channels)
+    logvar = torch.clamp(logvar, min=float(min_logvar), max=float(max_logvar))
+    std = torch.exp(0.5 * logvar)
+    sample = mu + std * torch.randn_like(mu)
+    return sample, mu, logvar
 
 
 ###############################################################################
@@ -1470,6 +1543,182 @@ class FGNTrainer(Trainer):
 
         out = pred_mean if return_output else None
         return eval_step_losses, out
+
+
+class GaussianNLLTrainer(Trainer):
+    """
+    Trainer for heteroscedastic Gaussian outputs packed as [mu, logvar].
+
+    Supports single-step and autoregressive (AR) training.
+    AR updates are sampled via reparameterization to preserve trajectory diversity.
+    """
+
+    def __init__(
+        self,
+        rel_l2_loss_fn=None,
+        ar_finetune_start_epoch=0,
+        ar_rollout_steps=1,
+        ar_curriculum_epochs_per_step=0,
+        gaussian_min_logvar=-9.0,
+        gaussian_max_logvar=4.0,
+        **kwargs,
+    ):
+        super().__init__(**kwargs)
+        self.rel_l2_loss_fn = rel_l2_loss_fn
+        self.ar_finetune_start_epoch = max(0, int(ar_finetune_start_epoch))
+        self.ar_rollout_steps = max(1, int(ar_rollout_steps))
+        self.ar_curriculum_epochs_per_step = max(0, int(ar_curriculum_epochs_per_step))
+        self.gaussian_min_logvar = float(gaussian_min_logvar)
+        self.gaussian_max_logvar = float(gaussian_max_logvar)
+
+    def _train_one_batch_single_step(self, idx, sample, training_loss):
+        if self.mixed_precision:
+            with torch.autocast(device_type=self.autocast_device_type):
+                out = self.model(**sample)
+        else:
+            out = self.model(**sample)
+        if self.data_processor is not None:
+            out, sample = self.data_processor.postprocess(out, sample)
+
+        loss = training_loss(out, sample["y"])
+        metrics = {}
+        if self.rel_l2_loss_fn is not None:
+            with torch.no_grad():
+                pred_mean = _gaussian_mean_from_packed(out, sample["y"].shape[-1])
+                metrics["rel_l2"] = self.rel_l2_loss_fn(pred_mean, sample["y"])
+        if self.epoch == 0 and idx == 0 and self.verbose:
+            B = sample["y"].shape[0]
+            print(f"Gaussian NLL single-step: loss = {loss.item():.8f} (B={B})")
+        return loss, metrics
+
+    def train_one_batch(self, idx, sample, training_loss):
+        self.optimizer.zero_grad(set_to_none=True)
+        if self.regularizer:
+            self.regularizer.reset()
+        if self.data_processor is not None:
+            sample = self.data_processor.preprocess(sample)
+        else:
+            sample = {k: v.to(self.device) for k, v in sample.items() if torch.is_tensor(v)}
+
+        use_ar = (
+            self.ar_rollout_steps > 1
+            and self.epoch >= self.ar_finetune_start_epoch
+            and "target_sequence" in sample
+            and sample["target_sequence"] is not None
+        )
+        if use_ar:
+            target_sequence = sample["target_sequence"]
+            boundary_sequence = sample["boundary_sequence"]
+            if target_sequence.dim() == 5:
+                target_sequence = target_sequence.squeeze(1)
+            if boundary_sequence.dim() == 5:
+                boundary_sequence = boundary_sequence.squeeze(1)
+            max_available_steps = target_sequence.shape[1]
+            if self.ar_curriculum_epochs_per_step > 0:
+                ar_epoch_index = self.epoch - self.ar_finetune_start_epoch
+                curriculum_step_index = ar_epoch_index // self.ar_curriculum_epochs_per_step
+                effective_ar_steps = min(curriculum_step_index + 1, self.ar_rollout_steps)
+            else:
+                effective_ar_steps = self.ar_rollout_steps
+            n_ar_steps = min(effective_ar_steps, max_available_steps)
+            self.n_samples += sample["y"].shape[0] * n_ar_steps
+
+            n_history = sample["dynamic"].shape[1]
+            dynamic_sliding = sample["dynamic"].clone()
+            boundary_sliding = sample["boundary"].clone()
+            static = sample["static"]
+            geom = sample["input_geom"]
+            q = sample["latent_queries"]
+            out_q = sample["output_queries"]
+
+            total_loss = 0.0
+            last_rel_l2 = None
+            for s in range(n_ar_steps):
+                x = _build_x_from_dynamic_boundary(static, boundary_sliding, dynamic_sliding)
+                y_s = target_sequence[:, s]
+                if y_s.dim() == 2:
+                    y_s = y_s.unsqueeze(0)
+                kwargs_base = {
+                    "input_geom": geom,
+                    "latent_queries": q,
+                    "output_queries": out_q,
+                    "x": x,
+                }
+                if self.mixed_precision:
+                    with torch.autocast(device_type=self.autocast_device_type):
+                        out = self.model(**kwargs_base)
+                else:
+                    out = self.model(**kwargs_base)
+                if self.data_processor is not None:
+                    out, _ = self.data_processor.postprocess(out, {**sample, "y": y_s})
+
+                loss_s = training_loss(out, y_s)
+                total_loss = total_loss + loss_s
+
+                sampled_next, pred_mean, _ = _sample_from_packed_gaussian(
+                    out,
+                    n_channels=y_s.shape[-1],
+                    min_logvar=self.gaussian_min_logvar,
+                    max_logvar=self.gaussian_max_logvar,
+                )
+                if self.rel_l2_loss_fn is not None:
+                    with torch.no_grad():
+                        last_rel_l2 = self.rel_l2_loss_fn(pred_mean, y_s)
+
+                dynamic_sliding = torch.cat(
+                    [dynamic_sliding[:, 1:], sampled_next.unsqueeze(1)], dim=1
+                )
+                dynamic_sliding = dynamic_sliding[:, -n_history:]
+                if boundary_sequence.dim() == 5:
+                    time_dim = next(i for i, sz in enumerate(boundary_sequence.shape) if sz == max_available_steps)
+                    sl = [slice(None)] * boundary_sequence.dim()
+                    sl[time_dim] = slice(s, s + 1)
+                    bc_step = boundary_sequence[tuple(sl)].squeeze(time_dim)
+                else:
+                    bc_step = boundary_sequence[:, s : s + 1]
+                if bc_step.dim() == 3:
+                    bc_step = bc_step.unsqueeze(1)
+                boundary_sliding = torch.cat([boundary_sliding[:, 1:], bc_step], dim=1)[:, -n_history:]
+
+            loss = total_loss / n_ar_steps
+            metrics = {"rel_l2": last_rel_l2 if last_rel_l2 is not None else torch.tensor(0.0, device=self.device)}
+            if idx == 0 and self.logger is not None:
+                self.logger.info(
+                    "Gaussian AR fine-tuning: epoch=%s, rollout_steps=%s (max=%s)%s.",
+                    self.epoch,
+                    n_ar_steps,
+                    self.ar_rollout_steps,
+                    " [curriculum]" if self.ar_curriculum_epochs_per_step > 0 else "",
+                )
+        else:
+            self.n_samples += sample["y"].shape[0]
+            loss, metrics = self._train_one_batch_single_step(idx, sample, training_loss)
+
+        if self.regularizer:
+            loss = loss + self.regularizer.loss
+        return loss, metrics
+
+    def eval_one_batch(self, sample, eval_losses, return_output=False):
+        if self.data_processor is not None:
+            sample = self.data_processor.preprocess(sample)
+        else:
+            sample = {k: v.to(self.device) for k, v in sample.items() if torch.is_tensor(v)}
+
+        self.n_samples += sample["y"].size(0)
+        out = self.model(**sample)
+        if self.data_processor is not None:
+            out, sample = self.data_processor.postprocess(out, sample)
+        pred_mean = _gaussian_mean_from_packed(out, sample["y"].shape[-1])
+
+        eval_step_losses = {}
+        for loss_name, loss_fn in eval_losses.items():
+            if loss_name == "l2":
+                val = loss_fn(pred_mean, sample["y"])
+            else:
+                val = loss_fn(out, sample["y"])
+            eval_step_losses[loss_name] = val
+
+        return eval_step_losses, (pred_mean if return_output else None)
 
 
 ###############################################################################
@@ -1765,16 +2014,23 @@ def rollout_prediction(
         out_dir="./rollout_gifs",
         fgn_noise_dim=None,
         n_ensemble_samples=1,
+        gaussian_min_logvar: float = -9.0,
+        gaussian_max_logvar: float = 4.0,
 ):
     """
     Performs autoregressive rollout, computing and plotting metrics for water depth, VX, and VY.
-    When fgn_noise_dim is set and n_ensemble_samples > 1, runs an ensemble of forwards per step
-    with per-sample noise z shaped [B, D] and uses the mean prediction.
+    FGN mode: when fgn_noise_dim is set and n_ensemble_samples > 1, runs an ensemble of
+    forwards per step with per-sample noise z shaped [B, D] and uses the mean prediction.
+    Gaussian mode: samples members from packed [mu, logvar] outputs and propagates sampled
+    member states autoregressively.
     """
     model = trainer.model
     model.eval()
     dynamic_norm.to(device)
     target_norm.to(device)
+    output_distribution = str(getattr(model, "output_distribution", "deterministic")).strip().lower()
+    use_gaussian = output_distribution == "gaussian"
+    n_ens = max(1, int(n_ensemble_samples))
 
     def compute_csi(threshold, pred, gt):
         event_pred = pred >= threshold
@@ -1787,6 +2043,7 @@ def rollout_prediction(
     # Containers to aggregate metrics from all rollout samples
     aggregated_rmse, aggregated_csi_005, aggregated_csi_03 = [], [], []
     aggregated_rmse_vx, aggregated_rmse_vy = [], []
+    aggregated_spread_wd, aggregated_spread_vx, aggregated_spread_vy = [], [], []
 
     for idx, sample in enumerate(tqdm(rollout_dataset, desc="Performing rollout evaluation")):
         run_id = sample.get("run_id", f"sample_{idx}")
@@ -1805,43 +2062,96 @@ def rollout_prediction(
         # Containers for per-run metrics
         run_rmse, run_csi_005, run_csi_03 = [], [], []
         run_rmse_vx, run_rmse_vy = [], []
+        run_spread_wd, run_spread_vx, run_spread_vy = [], [], []
 
-        current_dynamic = full_dynamic[skip_before_timestep:start_pred_t].clone()
+        if use_gaussian and n_ens > 1:
+            current_dynamics = [
+                full_dynamic[skip_before_timestep:start_pred_t].clone() for _ in range(n_ens)
+            ]
+        else:
+            current_dynamic = full_dynamic[skip_before_timestep:start_pred_t].clone()
         current_boundary = full_boundary[skip_before_timestep:start_pred_t].clone()
+        n_target_channels = int(full_dynamic.shape[-1])
 
         for t in range(rollout_length):
-            dyn_flat = current_dynamic.permute(1, 0, 2).reshape(1, current_dynamic.shape[1], -1)
-            bc_flat = current_boundary.permute(1, 0, 2).reshape(1, current_boundary.shape[1], -1)
-            x = torch.cat([sample["static"].to(device).unsqueeze(0), bc_flat, dyn_flat], dim=2)
-
             with torch.no_grad():
-                if fgn_noise_dim is not None and n_ensemble_samples > 1:
-                    preds = []
-                    for _ in range(n_ensemble_samples):
-                        z = torch.randn(x.shape[0], fgn_noise_dim, device=device, dtype=x.dtype)
-                        p = model(
+                if use_gaussian:
+                    if n_ens > 1:
+                        sampled_members = []
+                        mean_members = []
+                        for ens_idx in range(n_ens):
+                            dyn_hist = current_dynamics[ens_idx]
+                            dyn_flat = dyn_hist.permute(1, 0, 2).reshape(1, dyn_hist.shape[1], -1)
+                            bc_flat = current_boundary.permute(1, 0, 2).reshape(1, current_boundary.shape[1], -1)
+                            x = torch.cat([sample["static"].to(device).unsqueeze(0), bc_flat, dyn_flat], dim=2)
+                            out = model(
+                                input_geom=geometry.to(device).unsqueeze(0),
+                                latent_queries=sample["query_points"].to(device).unsqueeze(0),
+                                output_queries=geometry.to(device).unsqueeze(0),
+                                x=x,
+                            )
+                            sampled, mu, _ = _sample_from_packed_gaussian(
+                                out,
+                                n_channels=n_target_channels,
+                                min_logvar=gaussian_min_logvar,
+                                max_logvar=gaussian_max_logvar,
+                            )
+                            sampled_members.append(sampled)
+                            mean_members.append(mu)
+                        pred_stack = torch.stack(sampled_members, dim=0)  # [E, 1, n_cells, C]
+                        pred = torch.stack(mean_members, dim=0).mean(dim=0)
+                    else:
+                        dyn_flat = current_dynamic.permute(1, 0, 2).reshape(1, current_dynamic.shape[1], -1)
+                        bc_flat = current_boundary.permute(1, 0, 2).reshape(1, current_boundary.shape[1], -1)
+                        x = torch.cat([sample["static"].to(device).unsqueeze(0), bc_flat, dyn_flat], dim=2)
+                        out = model(
                             input_geom=geometry.to(device).unsqueeze(0),
                             latent_queries=sample["query_points"].to(device).unsqueeze(0),
                             output_queries=geometry.to(device).unsqueeze(0),
                             x=x,
-                            ada_in=z,
                         )
-                        preds.append(p)
-                    pred = torch.stack(preds, dim=0).mean(dim=0)
+                        sampled_single, pred, _ = _sample_from_packed_gaussian(
+                            out,
+                            n_channels=n_target_channels,
+                            min_logvar=gaussian_min_logvar,
+                            max_logvar=gaussian_max_logvar,
+                        )
+                        pred_stack = sampled_single.unsqueeze(0)
                 else:
-                    pred = model(
-                        input_geom=geometry.to(device).unsqueeze(0),
-                        latent_queries=sample["query_points"].to(device).unsqueeze(0),
-                        output_queries=geometry.to(device).unsqueeze(0),
-                        x=x
-                    )
+                    dyn_flat = current_dynamic.permute(1, 0, 2).reshape(1, current_dynamic.shape[1], -1)
+                    bc_flat = current_boundary.permute(1, 0, 2).reshape(1, current_boundary.shape[1], -1)
+                    x = torch.cat([sample["static"].to(device).unsqueeze(0), bc_flat, dyn_flat], dim=2)
+                    if fgn_noise_dim is not None and n_ens > 1:
+                        preds = []
+                        for _ in range(n_ens):
+                            z = torch.randn(x.shape[0], fgn_noise_dim, device=device, dtype=x.dtype)
+                            p = model(
+                                input_geom=geometry.to(device).unsqueeze(0),
+                                latent_queries=sample["query_points"].to(device).unsqueeze(0),
+                                output_queries=geometry.to(device).unsqueeze(0),
+                                x=x,
+                                ada_in=z,
+                            )
+                            preds.append(p)
+                        pred_stack = torch.stack(preds, dim=0)
+                        pred = pred_stack.mean(dim=0)
+                    else:
+                        pred = model(
+                            input_geom=geometry.to(device).unsqueeze(0),
+                            latent_queries=sample["query_points"].to(device).unsqueeze(0),
+                            output_queries=geometry.to(device).unsqueeze(0),
+                            x=x
+                        )
+                        pred_stack = pred.unsqueeze(0)
 
             inv_pred = target_norm.inverse_transform(pred)
             inv_gt = dynamic_norm.inverse_transform(gt_rollout[t].unsqueeze(0))
+            inv_pred_ens = target_norm.inverse_transform(pred_stack.squeeze(1))
 
             # Extract all channels and convert to numpy
             wd_pred, vx_pred, vy_pred = [ch.cpu().numpy() for ch in inv_pred[0].T]
             wd_gt, vx_gt, vy_gt = [ch.cpu().numpy() for ch in inv_gt[0].T]
+            wd_ens, vx_ens, vy_ens = [ch.cpu().numpy() for ch in inv_pred_ens.permute(2, 0, 1)]
 
             # Append data to lists
             wd_pred_list.append(wd_pred)
@@ -1860,9 +2170,23 @@ def rollout_prediction(
             # Velocity metrics
             run_rmse_vx.append(np.sqrt(np.mean((vx_pred - vx_gt) ** 2)))
             run_rmse_vy.append(np.sqrt(np.mean((vy_pred - vy_gt) ** 2)))
+            run_spread_wd.append(float(np.mean(np.std(wd_ens, axis=0))))
+            run_spread_vx.append(float(np.mean(np.std(vx_ens, axis=0))))
+            run_spread_vy.append(float(np.mean(np.std(vy_ens, axis=0))))
 
             # Update state for next step
-            current_dynamic = torch.cat([current_dynamic[1:], pred.squeeze(0).unsqueeze(0)], dim=0)
+            if use_gaussian:
+                if n_ens > 1:
+                    for ens_idx in range(n_ens):
+                        current_dynamics[ens_idx] = torch.cat(
+                            [current_dynamics[ens_idx][1:], pred_stack[ens_idx, 0].unsqueeze(0)], dim=0
+                        )
+                else:
+                    current_dynamic = torch.cat(
+                        [current_dynamic[1:], sampled_single.squeeze(0).unsqueeze(0)], dim=0
+                    )
+            else:
+                current_dynamic = torch.cat([current_dynamic[1:], pred.squeeze(0).unsqueeze(0)], dim=0)
             current_boundary = torch.cat([current_boundary[1:], gt_boundary_rollout[t].unsqueeze(0)], dim=0)
 
         # Convert lists to numpy arrays
@@ -1876,6 +2200,9 @@ def rollout_prediction(
         aggregated_csi_03.append(np.array(run_csi_03))
         aggregated_rmse_vx.append(np.array(run_rmse_vx))
         aggregated_rmse_vy.append(np.array(run_rmse_vy))
+        aggregated_spread_wd.append(np.array(run_spread_wd))
+        aggregated_spread_vx.append(np.array(run_spread_vx))
+        aggregated_spread_vy.append(np.array(run_spread_vy))
 
         generate_publication_maps(
             geometry=geometry,
@@ -1904,13 +2231,16 @@ def rollout_prediction(
             'csi_005': np.stack(aggregated_csi_005),
             'csi_03': np.stack(aggregated_csi_03),
             'rmse_vx': np.stack(aggregated_rmse_vx),
-            'rmse_vy': np.stack(aggregated_rmse_vy)
+            'rmse_vy': np.stack(aggregated_rmse_vy),
+            'spread_wd': np.stack(aggregated_spread_wd),
+            'spread_vx': np.stack(aggregated_spread_vx),
+            'spread_vy': np.stack(aggregated_spread_vy),
         }
         stats = {key: {'mean': arr.mean(axis=0), 'std': arr.std(axis=0)} for key, arr in metrics.items()}
 
         time_hours = (np.arange(1, rollout_length + 1) * dt) / 3600.0
 
-        fig, axs = plt.subplots(3, 2, figsize=(16, 18), tight_layout=True)
+        fig, axs = plt.subplots(4, 2, figsize=(16, 24), tight_layout=True)
         axs = axs.flatten()
 
         plot_info = {
@@ -1918,7 +2248,10 @@ def rollout_prediction(
             1: ('rmse_vx', 'RMSE (VX)', 'RMSE (m/s)'),
             2: ('rmse_vy', 'RMSE (VY)', 'RMSE (m/s)'),
             3: ('csi_005', 'CSI (0.05m)', 'CSI'),
-            4: ('csi_03', 'CSI (0.3m)', 'CSI')
+            4: ('csi_03', 'CSI (0.3m)', 'CSI'),
+            5: ('spread_wd', 'Spread (Depth)', 'Std (m)'),
+            6: ('spread_vx', 'Spread (VX)', 'Std (m/s)'),
+            7: ('spread_vy', 'Spread (VY)', 'Std (m/s)'),
         }
 
         for i in range(len(axs)):
@@ -2176,8 +2509,41 @@ def main():
     # Loss (LpLoss(d=2,p=2): relative L2 by default; use 'l2_abs' if relative plateaus)
     # reduction='sum' so train_err = sum(loss)/n_samples = mean per sample (same scale as test_l2)
     l2loss = LpLoss(d=2, p=2)
-    use_fgn = getattr(config.gino, "use_fgn_noise", False)
-    if config.opt.training_loss == "l2":
+    use_fgn = bool(getattr(config.gino, "use_fgn_noise", False))
+    output_distribution = str(getattr(config.gino, "output_distribution", "deterministic")).strip().lower()
+    if output_distribution not in {"deterministic", "gaussian"}:
+        raise ValueError(
+            f"Unknown gino.output_distribution={output_distribution!r}. "
+            "Use 'deterministic' or 'gaussian'."
+        )
+    setattr(config.gino, "output_distribution", output_distribution)
+    training_loss_name = str(getattr(config.opt, "training_loss", "l2")).strip().lower()
+    setattr(config.opt, "training_loss", training_loss_name)
+
+    if training_loss_name == "gaussian_nll" and output_distribution != "gaussian":
+        raise ValueError(
+            "training_loss='gaussian_nll' requires gino.output_distribution='gaussian'."
+        )
+    fno_norm_mode = getattr(config.gino, "fno_norm", None)
+    fno_norm_mode = None if fno_norm_mode is None else str(fno_norm_mode).strip().lower()
+    if output_distribution == "gaussian" and use_fgn:
+        raise ValueError(
+            "gino.output_distribution='gaussian' requires gino.use_fgn_noise=false."
+        )
+    if output_distribution == "gaussian" and fno_norm_mode == "ada_in":
+        warnings.warn(
+            "gino.output_distribution='gaussian' with gino.fno_norm='ada_in' has no default "
+            "conditioning embedding in this pipeline. Overriding gino.fno_norm -> None.",
+            UserWarning,
+            stacklevel=2,
+        )
+        setattr(config.gino, "fno_norm", None)
+    if training_loss_name == "crps" and not use_fgn:
+        raise ValueError(
+            "training_loss='crps' requires gino.use_fgn_noise=true in this pipeline."
+        )
+
+    if training_loss_name == "l2":
         train_loss_fn = l2loss
         if use_fgn:
             warnings.warn(
@@ -2186,19 +2552,37 @@ def main():
                 UserWarning,
                 stacklevel=2,
             )
-    elif config.opt.training_loss == "crps" and use_fgn:
+    elif training_loss_name == "crps" and use_fgn:
         crps_n_samples = max(2, int(getattr(config.opt, "crps_n_samples", 2)))
         crps_channel_weights = getattr(config.opt, "crps_channel_weights", None)
-        train_loss_fn = CRPSLoss(n_samples=crps_n_samples, channel_weights=crps_channel_weights, reduction="mean")
-    elif config.opt.training_loss == "l2_abs":
+        train_loss_fn = CRPSLoss(
+            n_samples=crps_n_samples,
+            channel_weights=crps_channel_weights,
+            reduction="mean",
+        )
+    elif training_loss_name == "gaussian_nll":
+        train_loss_fn = GaussianNLLLoss(
+            channel_weights=getattr(config.opt, "crps_channel_weights", None),
+            reduction="mean",
+            min_logvar=_safe_float(getattr(config.opt, "gaussian_min_logvar", -9.0), -9.0),
+            max_logvar=_safe_float(getattr(config.opt, "gaussian_max_logvar", 4.0), 4.0),
+            logvar_reg_weight=_safe_float(
+                getattr(config.opt, "gaussian_logvar_reg_weight", 1e-6), 1e-6
+            ),
+        )
+    elif training_loss_name == "l2_abs":
         # Absolute L2 (||pred-y||) instead of relative (||pred-y||/||y||); can help if relative plateaus
         train_loss_fn = lambda y_pred, y, **kw: l2loss.abs(y_pred, y)
         if use_fgn:
-            warnings.warn("gino.use_fgn_noise is True but training_loss is 'l2_abs'. FGN will not be trained.", UserWarning, stacklevel=2)
+            warnings.warn(
+                "gino.use_fgn_noise is True but training_loss is 'l2_abs'. FGN will not be trained.",
+                UserWarning,
+                stacklevel=2,
+            )
     else:
         raise ValueError(
             f"Unknown training loss: {config.opt.training_loss}. "
-            "Use 'l2', 'l2_abs', or for FGN: 'crps' with gino.use_fgn_noise: true."
+            "Use 'l2', 'l2_abs', 'gaussian_nll', or for FGN: 'crps' with gino.use_fgn_noise: true."
         )
 
     if config.opt.testing_loss == "l2":
@@ -2206,8 +2590,21 @@ def main():
     else:
         test_loss_fn = l2loss
 
-    # Eval metrics: L2 (ensemble mean vs target) and, for FGN/CRPS, CRPS (proper score for the predictive distribution)
-    if use_fgn and config.opt.training_loss == "crps":
+    # Eval metrics:
+    # - FGN/CRPS: L2 on ensemble mean + CRPS.
+    # - Gaussian NLL: L2 on predictive mean + Gaussian NLL on packed output.
+    if output_distribution == "gaussian" and training_loss_name == "gaussian_nll":
+        eval_losses = {
+            "l2": test_loss_fn,
+            "gaussian_nll": GaussianNLLLoss(
+                channel_weights=getattr(config.opt, "crps_channel_weights", None),
+                reduction="mean",
+                min_logvar=_safe_float(getattr(config.opt, "gaussian_min_logvar", -9.0), -9.0),
+                max_logvar=_safe_float(getattr(config.opt, "gaussian_max_logvar", 4.0), 4.0),
+                logvar_reg_weight=0.0,
+            ),
+        }
+    elif use_fgn and training_loss_name == "crps":
         crps_n_samples = max(2, int(getattr(config.opt, "crps_n_samples", 2)))
         crps_channel_weights = getattr(config.opt, "crps_channel_weights", None)
         eval_losses = {
@@ -2224,6 +2621,7 @@ def main():
         device=device,
         target_norm=normalizers.get("target", None),
         inverse_test=inverse_test,
+        output_distribution=output_distribution,
     )
     data_processor.wrap(model)
 
@@ -2232,7 +2630,7 @@ def main():
     use_progress_bar = getattr(config, "use_progress_bar", True)
     scheduler_monitor = getattr(config.opt, "scheduler_monitor", "train_err")
     eval_interval = getattr(config.wandb, "eval_interval", 1)
-    if use_fgn and config.opt.training_loss == "crps":
+    if use_fgn and training_loss_name == "crps":
         crps_l2_weight = getattr(config.opt, "crps_l2_weight", 0.5)
         ar_finetune_start_epoch = max(0, int(getattr(config.opt, "ar_finetune_start_epoch", 0)))
         ar_curriculum_epochs_per_step = max(0, int(getattr(config.opt, "ar_curriculum_epochs_per_step", 0)))
@@ -2267,6 +2665,25 @@ def main():
             use_hazard_proxy_crps=getattr(config.opt, "hazard_proxy_crps", False),
             hazard_proxy_crps_weight=getattr(config.opt, "hazard_proxy_crps_weight", 0.15),
             ar_pooled_crps_gamma=getattr(config.opt, "ar_pooled_crps_gamma", 1.0),
+        )
+    elif output_distribution == "gaussian" and training_loss_name == "gaussian_nll":
+        trainer = GaussianNLLTrainer(
+            model=model,
+            n_epochs=config.opt.n_epochs,
+            data_processor=data_processor,
+            device=device,
+            wandb_log=config.wandb.log,
+            verbose=is_logger,
+            logger=logger,
+            use_progress_bar=use_progress_bar,
+            scheduler_monitor=scheduler_monitor,
+            eval_interval=eval_interval,
+            rel_l2_loss_fn=l2loss,
+            ar_finetune_start_epoch=max(0, int(getattr(config.opt, "ar_finetune_start_epoch", 0))),
+            ar_rollout_steps=ar_rollout_steps,
+            ar_curriculum_epochs_per_step=max(0, int(getattr(config.opt, "ar_curriculum_epochs_per_step", 0))),
+            gaussian_min_logvar=_safe_float(getattr(config.opt, "gaussian_min_logvar", -9.0), -9.0),
+            gaussian_max_logvar=_safe_float(getattr(config.opt, "gaussian_max_logvar", 4.0), 4.0),
         )
     else:
         trainer = Trainer(
@@ -2435,6 +2852,8 @@ def main():
         out_dir=config.rollout.out_dir,
         fgn_noise_dim=fgn_noise_dim if use_fgn else None,
         n_ensemble_samples=getattr(config.rollout, "n_ensemble_samples", 1),
+        gaussian_min_logvar=_safe_float(getattr(config.opt, "gaussian_min_logvar", -9.0), -9.0),
+        gaussian_max_logvar=_safe_float(getattr(config.opt, "gaussian_max_logvar", 4.0), 4.0),
     )
 
     if config.wandb.log:

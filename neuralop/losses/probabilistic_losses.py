@@ -29,6 +29,32 @@ from typing import Optional, Union
 import torch
 
 
+def split_gaussian_packed(
+    pred: torch.Tensor, n_channels: Optional[int] = None
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Split packed Gaussian output tensor into mean and log-variance.
+
+    Expected packed format along last dimension: [mu, logvar].
+    """
+    if pred.ndim < 1:
+        raise ValueError(f"pred must have at least 1 dimension, got shape {tuple(pred.shape)}.")
+    last = pred.shape[-1]
+    if n_channels is None:
+        if last % 2 != 0:
+            raise ValueError(
+                "Cannot infer n_channels from packed tensor with odd last dimension "
+                f"{last}. Expected 2*C."
+            )
+        n_channels = last // 2
+    if last != 2 * int(n_channels):
+        raise ValueError(
+            f"Packed Gaussian last dimension must be 2*n_channels={2*int(n_channels)}, got {last}."
+        )
+    mu, logvar = pred[..., :n_channels], pred[..., n_channels:]
+    return mu, logvar
+
+
 def fair_crps_univariate(samples: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
     """
     Fair CRPS estimator for univariate predictions (one location, one variable).
@@ -231,3 +257,87 @@ class CRPSLoss:
         if self.reduction == "mean":
             return crps_per_loc.mean()  # (1/(B*P*C)) sum_d sum_{p,c} a_c fCRPS
         return crps_per_loc.sum()
+
+
+class GaussianNLLLoss:
+    """
+    Diagonal Gaussian negative log-likelihood for packed model outputs [mu, logvar].
+    """
+
+    def __init__(
+        self,
+        channel_weights: Optional[Union[torch.Tensor, list]] = None,
+        reduction: str = "mean",
+        min_logvar: float = -9.0,
+        max_logvar: float = 4.0,
+        logvar_reg_weight: float = 0.0,
+    ):
+        allowed_reductions = {"mean", "sum"}
+        if reduction not in allowed_reductions:
+            raise ValueError(
+                f"reduction must be one of {allowed_reductions}, got {reduction!r}."
+            )
+        self.reduction = reduction
+        self.min_logvar = float(min_logvar)
+        self.max_logvar = float(max_logvar)
+        self.logvar_reg_weight = float(logvar_reg_weight)
+        if channel_weights is not None:
+            if isinstance(channel_weights, (list, tuple)):
+                channel_weights = torch.tensor(channel_weights, dtype=torch.float32)
+            self.channel_weights = channel_weights
+        else:
+            self.channel_weights = None
+
+    @property
+    def name(self) -> str:
+        return "GaussianNLLLoss"
+
+    def __call__(self, y_pred: torch.Tensor, y: torch.Tensor, **kwargs) -> torch.Tensor:
+        if y_pred.ndim != y.ndim:
+            raise ValueError(
+                f"y_pred and y must have same ndim, got {y_pred.ndim} and {y.ndim}."
+            )
+        mu, logvar = split_gaussian_packed(y_pred, n_channels=y.shape[-1])
+        if mu.shape != y.shape:
+            raise ValueError(
+                f"Gaussian mean shape must match y. Got mu={tuple(mu.shape)}, y={tuple(y.shape)}."
+            )
+
+        logvar = torch.clamp(logvar, min=self.min_logvar, max=self.max_logvar)
+        inv_var = torch.exp(-logvar)
+        nll = 0.5 * (
+            logvar
+            + (y - mu).pow(2) * inv_var
+            + torch.log(torch.tensor(2.0 * torch.pi, device=y.device, dtype=y.dtype))
+        )
+
+        if self.channel_weights is not None:
+            w = self.channel_weights.to(nll.device)
+            if w.shape[0] != y.shape[-1]:
+                raise ValueError(
+                    f"channel_weights length {w.shape[0]} != n_channels {y.shape[-1]}."
+                )
+            shape = [1] * (nll.ndim - 1) + [w.shape[0]]
+            nll = nll * w.view(*shape)
+
+        spatial_weights = kwargs.get("spatial_weights")
+        if spatial_weights is not None:
+            if spatial_weights.shape != y.shape:
+                raise ValueError(
+                    f"spatial_weights shape must match y: {tuple(y.shape)}, got {tuple(spatial_weights.shape)}."
+                )
+            sw = spatial_weights.to(nll.device)
+            weighted = nll * sw
+            if self.reduction == "mean":
+                denom = sw.sum().clamp_min(1e-10)
+                out = weighted.sum() / denom
+            else:
+                out = weighted.sum()
+        elif self.reduction == "mean":
+            out = nll.mean()
+        else:
+            out = nll.sum()
+
+        if self.logvar_reg_weight > 0.0:
+            out = out + self.logvar_reg_weight * torch.mean(logvar.pow(2))
+        return out

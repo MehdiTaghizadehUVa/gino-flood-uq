@@ -71,6 +71,10 @@ flood: &FLOOD
     fno_norm: 'ada_in'
     fno_ada_in_features: 16
     fno_ada_in_dim: 32
+    # Probabilistic output mode:
+    # - deterministic: standard point prediction (works with l2/l2_abs or FGN+crps)
+    # - gaussian: packed [mu, logvar] output (requires opt.training_loss: gaussian_nll and use_fgn_noise: false)
+    output_distribution: 'deterministic'
     use_fgn_noise: true
     fgn_noise_dim: 32
     fno_factorization: 'tucker'
@@ -112,10 +116,14 @@ flood: &FLOOD
     ar_finetune_start_epoch: 100
     ar_rollout_steps: 8
     ar_curriculum_epochs_per_step: 25
+    # Training loss options: 'l2', 'l2_abs', 'crps' (FGN), 'gaussian_nll' (Gaussian head)
     training_loss: 'crps'
     crps_n_samples: 2
     crps_l2_weight: 0.0
     crps_channel_weights: [1.0]   # single channel (WD)
+    gaussian_min_logvar: -9.0
+    gaussian_max_logvar: 4.0
+    gaussian_logvar_reg_weight: 1.0e-6
     flood_crps_spatial_weights: false
     wet_threshold: 0.01
     wet_smooth_scale: 0.02

@@ -115,6 +115,9 @@ class GINO(BaseModel):
     fgn_noise_dim : int, default=32
         Dimension of the FGN noise vector z when use_fgn_noise=True.
         Canonical runtime shape is [B, fgn_noise_dim] (with [fgn_noise_dim] also accepted).
+    output_distribution : {'deterministic','gaussian'}, default='deterministic'
+        Output head type. 'deterministic' returns out_channels values.
+        'gaussian' returns packed [mu, logvar] with size 2*out_channels.
     fno_preactivation : bool, default=False
         If True, use a pre-act style in the FNO blocks (like a pre-activation ResNet).
     fno_skip : str, default='linear'
@@ -220,6 +223,7 @@ class GINO(BaseModel):
         autoregressive=False,
         alpha: float = 1.0,
         beta:  float = 1.0,
+        output_distribution: str = "deterministic",
         **kwargs
     ):
         super().__init__()
@@ -233,6 +237,12 @@ class GINO(BaseModel):
         self.autoregressive = autoregressive  # controls residual skip
         self.alpha = alpha
         self.beta  = beta
+        self.output_distribution = str(output_distribution).strip().lower()
+        if self.output_distribution not in {"deterministic", "gaussian"}:
+            raise ValueError(
+                "output_distribution must be one of {'deterministic', 'gaussian'}, "
+                f"got {output_distribution!r}."
+            )
 
         # if in_gno_transform_type is 'linear' or 'nonlinear',
         # we assume out_channels = in_channels
@@ -269,6 +279,11 @@ class GINO(BaseModel):
             raise ValueError(
                 "FGN (use_fgn_noise=True) requires fno_norm='ada_in'. "
                 f"Got fno_norm={fno_norm!r}. Set fno_norm: 'ada_in' in config when using FGN."
+            )
+        if self.output_distribution == "gaussian" and use_fgn_noise:
+            raise ValueError(
+                "output_distribution='gaussian' is incompatible with use_fgn_noise=True. "
+                "Use one probabilistic path at a time."
             )
 
         # If we have "ada_in" normalization in FNO
@@ -385,14 +400,35 @@ class GINO(BaseModel):
         )
 
         # 5) Final projection => out_channels
-        self.projection = ChannelMLP(
-            in_channels=fno_hidden_channels,
-            out_channels=self.out_channels,
-            hidden_channels=projection_channels,
-            n_layers=2,
-            n_dim=1,
-            non_linearity=fno_non_linearity
-        )
+        if self.output_distribution == "gaussian":
+            self.projection = None
+            self.mu_head = ChannelMLP(
+                in_channels=fno_hidden_channels,
+                out_channels=self.out_channels,
+                hidden_channels=projection_channels,
+                n_layers=2,
+                n_dim=1,
+                non_linearity=fno_non_linearity,
+            )
+            self.logvar_head = ChannelMLP(
+                in_channels=fno_hidden_channels,
+                out_channels=self.out_channels,
+                hidden_channels=projection_channels,
+                n_layers=2,
+                n_dim=1,
+                non_linearity=fno_non_linearity,
+            )
+        else:
+            self.projection = ChannelMLP(
+                in_channels=fno_hidden_channels,
+                out_channels=self.out_channels,
+                hidden_channels=projection_channels,
+                n_layers=2,
+                n_dim=1,
+                non_linearity=fno_non_linearity
+            )
+            self.mu_head = None
+            self.logvar_head = None
 
     def latent_embedding(self, in_p, ada_in=None):
         """
@@ -491,8 +527,11 @@ class GINO(BaseModel):
 
         Returns
         -------
-        out : torch.Tensor, shape (batch, n_out, out_channels)
-        If self.autoregressive, out = x[..., :out_channels] + predicted_delta.
+        out : torch.Tensor
+            If output_distribution == 'deterministic': shape (batch, n_out, out_channels).
+            If output_distribution == 'gaussian': shape (batch, n_out, 2*out_channels),
+            packed as [mu, logvar] along the last dimension.
+            If self.autoregressive, mu is updated by skip connection.
         """
         if x is None:
             batch_size = 1
@@ -552,28 +591,59 @@ class GINO(BaseModel):
         # => shape (b, c, n_out) => permute => (b, n_out, c)
         out = out.permute(0, 2, 1)
 
-        # 5) final projection => (b, n_out, out_channels)
-        out = self.projection(out).permute(0, 2, 1)
+        # 5) final projection(s)
+        if self.output_distribution == "gaussian":
+            mu = self.mu_head(out).permute(0, 2, 1)
+            logvar = self.logvar_head(out).permute(0, 2, 1)
 
-        # Possibly apply tanh if out_gno_tanh == 'both'
-        if self.out_gno_tanh == 'both':
-            out = torch.tanh(out)
+            # Possibly apply tanh to mean branch when requested.
+            if self.out_gno_tanh == "both":
+                mu = torch.tanh(mu)
 
-        # 6) Autoregressive skip: out = previous + delta
-        if self.autoregressive and (x is not None):
-            if out.shape[1] != x.shape[1]:
-                raise ValueError(
-                    f"Autoregressive skip requires out.shape[1] == x.shape[1], "
-                    f"got {out.shape[1]} vs {x.shape[1]}."
-                )
-            if self.out_channels > x.shape[2]:
-                raise ValueError(
-                    f"Cannot skip-add: out_channels {self.out_channels} > in_channels {x.shape[2]}."
-                )
-            # skip with the final out_channels in x
-            prev_step = x[..., -self.out_channels:]  # shape (b, n_in, out_channels)
-            delta = out
-            out   = self.alpha * prev_step + self.beta * delta
+            # 6) Autoregressive skip on mean branch
+            if self.autoregressive and (x is not None):
+                if mu.shape[1] != x.shape[1]:
+                    raise ValueError(
+                        f"Autoregressive skip requires out.shape[1] == x.shape[1], "
+                        f"got {mu.shape[1]} vs {x.shape[1]}."
+                    )
+                if self.out_channels > x.shape[2]:
+                    raise ValueError(
+                        f"Cannot skip-add: out_channels {self.out_channels} > in_channels {x.shape[2]}."
+                    )
+                prev_step = x[..., -self.out_channels:]
+                mu = self.alpha * prev_step + self.beta * mu
+                # If mu is scaled by beta, variance scales by beta^2.
+                beta_abs = abs(float(self.beta))
+                if beta_abs > 0.0:
+                    logvar = logvar + (2.0 * torch.log(torch.tensor(beta_abs, device=logvar.device, dtype=logvar.dtype)))
+                else:
+                    logvar = torch.full_like(logvar, -30.0)
+
+            logvar = torch.nan_to_num(logvar, nan=0.0, posinf=20.0, neginf=-30.0)
+            out = torch.cat([mu, logvar], dim=-1)
+        else:
+            out = self.projection(out).permute(0, 2, 1)
+
+            # Possibly apply tanh if out_gno_tanh == 'both'
+            if self.out_gno_tanh == 'both':
+                out = torch.tanh(out)
+
+            # 6) Autoregressive skip: out = previous + delta
+            if self.autoregressive and (x is not None):
+                if out.shape[1] != x.shape[1]:
+                    raise ValueError(
+                        f"Autoregressive skip requires out.shape[1] == x.shape[1], "
+                        f"got {out.shape[1]} vs {x.shape[1]}."
+                    )
+                if self.out_channels > x.shape[2]:
+                    raise ValueError(
+                        f"Cannot skip-add: out_channels {self.out_channels} > in_channels {x.shape[2]}."
+                    )
+                # skip with the final out_channels in x
+                prev_step = x[..., -self.out_channels:]  # shape (b, n_in, out_channels)
+                delta = out
+                out   = self.alpha * prev_step + self.beta * delta
 
         return out
 
