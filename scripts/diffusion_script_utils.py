@@ -138,10 +138,19 @@ def save_checkpoint_sidecars(
     metadata: Dict[str, Any],
 ) -> Tuple[Path, Path]:
     """Save safe sidecar files: tensor-only weights and JSON metadata."""
+
+    # BaseModel.state_dict() can include a non-tensor "_metadata" payload.
+    # Strip non-tensor entries so the sidecar stays weights_only-loadable.
+    tensor_only_state: Dict[str, torch.Tensor] = {
+        k: v for k, v in denoiser_state_dict.items() if isinstance(v, torch.Tensor)
+    }
+    if not tensor_only_state:
+        raise ValueError("denoiser_state_dict did not contain any tensor entries.")
+
     weights_path, metadata_path = checkpoint_sidecar_paths(checkpoint_path)
     weights_path.parent.mkdir(parents=True, exist_ok=True)
     metadata_path.parent.mkdir(parents=True, exist_ok=True)
-    torch.save({"denoiser_state_dict": denoiser_state_dict}, weights_path)
+    torch.save({"denoiser_state_dict": tensor_only_state}, weights_path)
     with open(metadata_path, "w", encoding="utf-8") as f:
         json.dump(metadata, f, indent=2, sort_keys=True)
     return weights_path, metadata_path
@@ -170,21 +179,32 @@ def load_checkpoint_bundle(
     has_weights_sidecar = weights_path.exists()
     has_metadata_sidecar = metadata_path.exists()
     if has_weights_sidecar and has_metadata_sidecar:
-        weights = load_torch_checkpoint(
-            weights_path,
-            map_location=map_location,
-            allow_unsafe_legacy_load=False,
-            logger=logger,
-        )
-        if "denoiser_state_dict" not in weights:
-            raise KeyError(f"Missing denoiser_state_dict in sidecar file: {weights_path}")
-        with open(metadata_path, "r", encoding="utf-8") as f:
-            metadata = json.load(f)
-        if not isinstance(metadata, dict):
-            raise TypeError(f"Expected metadata dict in {metadata_path}, got {type(metadata)}")
-        merged = dict(metadata)
-        merged["denoiser_state_dict"] = weights["denoiser_state_dict"]
-        return merged
+        try:
+            weights = load_torch_checkpoint(
+                weights_path,
+                map_location=map_location,
+                allow_unsafe_legacy_load=False,
+                logger=logger,
+            )
+            if "denoiser_state_dict" not in weights:
+                raise KeyError(f"Missing denoiser_state_dict in sidecar file: {weights_path}")
+            with open(metadata_path, "r", encoding="utf-8") as f:
+                metadata = json.load(f)
+            if not isinstance(metadata, dict):
+                raise TypeError(f"Expected metadata dict in {metadata_path}, got {type(metadata)}")
+            merged = dict(metadata)
+            merged["denoiser_state_dict"] = weights["denoiser_state_dict"]
+            return merged
+        except Exception as exc:
+            if not allow_unsafe_legacy_load:
+                raise
+            if logger is not None:
+                logger.warning(
+                    "Sidecar safe-load failed for %s (%s). Falling back to legacy "
+                    "checkpoint load with unsafe semantics enabled.",
+                    weights_path,
+                    exc,
+                )
 
     if has_weights_sidecar != has_metadata_sidecar and logger is not None:
         logger.warning(
