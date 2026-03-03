@@ -112,7 +112,7 @@ class Trainer:
         training_loss=None,
         eval_losses=None,
         save_every: int=None,
-        save_best: int=None,
+        save_best: str=None,
         save_dir: Union[str, Path]="./ckpt",
         resume_from_dir: Union[str, Path]=None,
     ):
@@ -139,7 +139,7 @@ class Trainer:
         save_best: str, optional, default is None
             if provided, key of metric f"{loader_name}_{loss_name}"
             to monitor and save model with best eval result
-            Overrides save_every and saves on eval_interval
+            Saves best checkpoint on eval_interval in addition to save_every.
         save_dir: str | Path, default "./ckpt"
             directory at which to save training states if
             save_every and/or save_best is provided
@@ -197,8 +197,6 @@ class Trainer:
             assert self.save_best in metrics,\
                 f"Error: expected a metric of the form <loader_name>_<metric>, got {save_best}"
             best_metric_value = float('inf')
-            # either monitor metric or save on interval, exclusive for simplicity
-            self.save_every = None
 
         if self.verbose:
             msg = (
@@ -231,15 +229,15 @@ class Trainer:
 
                 epoch_metrics.update(**eval_metrics)
                 # save checkpoint if conditions are met
-                if save_best is not None:
-                    if eval_metrics[save_best] < best_metric_value:
-                        best_metric_value = eval_metrics[save_best]
-                        self.checkpoint(save_dir)
+                if self.save_best is not None:
+                    if eval_metrics[self.save_best] < best_metric_value:
+                        best_metric_value = eval_metrics[self.save_best]
+                        self.checkpoint(save_dir, save_name="best_model")
 
-            # save checkpoint if save_every and save_best is not set
+            # Save last checkpoint on schedule.
             if self.save_every is not None:
                 if epoch % self.save_every == 0:
-                    self.checkpoint(save_dir)
+                    self.checkpoint(save_dir, save_name="model")
 
         return epoch_metrics
 
@@ -660,11 +658,11 @@ class Trainer:
         if isinstance(save_dir, str):
             save_dir = Path(save_dir)
 
-        # check for save model exists
-        if (save_dir / "best_model_state_dict.pt").exists():
-            save_name = "best_model"
-        elif (save_dir / "model_state_dict.pt").exists():
+        # Prefer last checkpoint for resume; fall back to best if last is unavailable.
+        if (save_dir / "model_state_dict.pt").exists():
             save_name = "model"
+        elif (save_dir / "best_model_state_dict.pt").exists():
+            save_name = "best_model"
         else:
             raise FileNotFoundError("Error: resume_from_dir expects a model\
                                         state dict named model.pt or best_model.pt.")
@@ -687,7 +685,7 @@ class Trainer:
                         print(f"Trainer resuming from epoch {resume_epoch}")
 
 
-    def checkpoint(self, save_dir):
+    def checkpoint(self, save_dir, save_name: Optional[str]=None):
         """checkpoint saves current training state
         to a directory for resuming later. Only saves 
         training state on the first GPU. 
@@ -697,12 +695,16 @@ class Trainer:
         ----------
         save_dir : str | Path
             directory in which to save training state
+        save_name : str, optional
+            checkpoint prefix. Defaults to "best_model" if save_best is configured,
+            otherwise "model".
         """
         if comm.get_local_rank() == 0:
-            if self.save_best is not None:
-                save_name = 'best_model'
-            else:
-                save_name = "model"
+            if save_name is None:
+                if self.save_best is not None:
+                    save_name = "best_model"
+                else:
+                    save_name = "model"
             save_training_state(save_dir=save_dir, 
                                 save_name=save_name,
                                 model=self.model,

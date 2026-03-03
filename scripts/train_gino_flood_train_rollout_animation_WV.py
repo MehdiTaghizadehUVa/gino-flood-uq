@@ -2725,7 +2725,39 @@ def main():
         overfit_sanity_check(trainer, train_loader, train_loss_fn, optimizer, n_steps=15)
         logger.info("--- End verification ---")
 
-    # Train
+    # Train: always save a rolling "last" checkpoint and a metric-based "best" checkpoint.
+    save_every = int(getattr(config.checkpoint, "save_every", 1))
+    available_eval_metrics = [f"test_{k}" for k in eval_losses.keys()]
+    configured_best_metric = getattr(config.checkpoint, "save_best_metric", None)
+    if configured_best_metric is not None:
+        save_best_metric = str(configured_best_metric)
+    else:
+        if output_distribution == "gaussian" and training_loss_name == "gaussian_nll":
+            preferred_metric = "test_gaussian_nll"
+        elif use_fgn and training_loss_name == "crps":
+            preferred_metric = "test_crps"
+        else:
+            preferred_metric = "test_l2"
+        if preferred_metric in available_eval_metrics:
+            save_best_metric = preferred_metric
+        elif available_eval_metrics:
+            save_best_metric = available_eval_metrics[0]
+        else:
+            save_best_metric = None
+
+    if save_best_metric is not None and save_best_metric not in available_eval_metrics:
+        raise ValueError(
+            f"checkpoint.save_best_metric={save_best_metric!r} is not in available "
+            f"eval metrics: {available_eval_metrics}"
+        )
+
+    if logger is not None:
+        logger.info(
+            "Checkpointing policy: save_every=%s (last=model), save_best=%s",
+            save_every,
+            save_best_metric,
+        )
+
     trainer.train(
         train_loader=train_loader,
         test_loaders={'test': test_loader},
@@ -2734,7 +2766,8 @@ def main():
         training_loss=train_loss_fn,
         eval_losses=eval_losses,
         regularizer=None,
-        save_every=1,
+        save_every=save_every,
+        save_best=save_best_metric,
         save_dir=config.checkpoint.save_dir,
         resume_from_dir=config.checkpoint.resume_from_dir
     )
