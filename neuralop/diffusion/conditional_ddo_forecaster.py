@@ -27,6 +27,9 @@ class ConditionalDDOForecaster(nn.Module):
 
     The denoiser predicts epsilon on wd (depth-only v1) conditioned on context
     features assembled from static + boundary history + dynamic history.
+
+    Context layout contract: [static | flattened boundary history | flattened
+    dynamic history], all on native mesh points with shape [B, N, C_context].
     """
 
     def __init__(
@@ -38,7 +41,7 @@ class ConditionalDDOForecaster(nn.Module):
         lmbd0: float = 10.0,
         lmbd1: float = -10.0,
         weight_method: Optional[str] = "shifted_sigmoid_2",
-        conditioning: ConditioningConfig = ConditioningConfig(),
+        conditioning: Optional[ConditioningConfig] = None,
         sampler_method: str = "denoise",
         sampler_num_steps: int = 40,
         sampler_s_min: float = 1e-4,
@@ -57,11 +60,13 @@ class ConditionalDDOForecaster(nn.Module):
         self.lmbd0 = float(lmbd0)
         self.lmbd1 = float(lmbd1)
         self.weight_method = weight_method
-        self.conditioning = conditioning
+        self.conditioning = conditioning or ConditioningConfig()
         self.sampler_method = sampler_method
         self.sampler_num_steps = int(sampler_num_steps)
         self.sampler_s_min = float(sampler_s_min)
         self.sampler_return_mean_last = bool(sampler_return_mean_last)
+        if not (0.0 <= self.sampler_s_min < 1.0):
+            raise ValueError(f"sampler_s_min must be in [0, 1), got {self.sampler_s_min}")
 
     def diffusion_hparams(self) -> Dict[str, Any]:
         return {
@@ -125,6 +130,22 @@ class ConditionalDDOForecaster(nn.Module):
             parts.append(tf)
         return torch.cat(parts, dim=-1)
 
+    def _reverse_time_grid(self, n_steps: int, *, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
+        """
+        Reverse schedule grid from t=1.0 down to sampler_s_min.
+
+        Returns n_steps+1 values so each denoise step can consume (t_cur, t_prev).
+        """
+        if n_steps < 1:
+            raise ValueError("n_steps must be >= 1")
+        return torch.linspace(
+            1.0,
+            self.sampler_s_min,
+            steps=n_steps + 1,
+            device=device,
+            dtype=dtype,
+        )
+
     def _predict_eps(
         self,
         x_in: torch.Tensor,
@@ -148,7 +169,14 @@ class ConditionalDDOForecaster(nn.Module):
         return out[..., :1]
 
     def training_loss(self, sample: Dict[str, torch.Tensor]) -> Tuple[torch.Tensor, Dict[str, float]]:
-        """Compute weighted DSM epsilon loss."""
+        """
+        Compute weighted DSM epsilon loss.
+
+        Expected sample keys:
+        - context: [B, N, C_context], layout documented in class docstring
+        - target: [B, N, 1] (depth-only v1)
+        - input_geom/latent_queries/output_queries: geometry/query tensors
+        """
         context = sample["context"]
         target = sample["target"]
         input_geom = sample["input_geom"]
@@ -229,9 +257,11 @@ class ConditionalDDOForecaster(nn.Module):
 
         trace = [] if return_trace else None
         mu_last = None
-        for step in range(n_steps, 0, -1):
-            t = torch.full((bsz,), float(step) / float(n_steps), device=context.device, dtype=context.dtype)
-            x_in = self._build_denoiser_input(context=context, z_t=z_t, t=t)
+        t_grid = self._reverse_time_grid(n_steps=n_steps, device=context.device, dtype=context.dtype)
+        for step_idx in range(n_steps):
+            t_cur = t_grid[step_idx].expand(bsz)
+            t_prev = t_grid[step_idx + 1].expand(bsz)
+            x_in = self._build_denoiser_input(context=context, z_t=z_t, t=t_cur)
             eps_hat = self._predict_eps(
                 x_in=x_in,
                 input_geom=input_geom,
@@ -253,9 +283,10 @@ class ConditionalDDOForecaster(nn.Module):
             z_t, mu_t, _ = ddo_denoise_step_vp(
                 z_t=z_t,
                 eps_hat=eps_hat,
-                t=t,
+                t=t_cur,
                 num_steps=n_steps,
                 alpha_sigma_fn=lambda tt: self._alpha_sigma(tt)[3:5],
+                t_prev=t_prev,
                 stochastic=stochastic,
                 eps=eps,
             )

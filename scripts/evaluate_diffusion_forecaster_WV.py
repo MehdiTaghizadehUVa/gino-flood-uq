@@ -31,44 +31,16 @@ from neuralop.diffusion import (  # noqa: E402
     ConditionalDDOForecaster,
     PointRFFGaussianProcessSampler,
 )
+from scripts.diffusion_script_utils import (  # noqa: E402
+    load_checkpoint_bundle,
+    safe_get,
+    to_builtin,
+)
 from train_gino_flood_train_rollout_animation_WV import (  # noqa: E402
     parse_target_variables,
     set_seed,
     setup_logging,
 )
-
-
-def _to_builtin(obj: Any) -> Any:
-    if isinstance(obj, dict):
-        return {k: _to_builtin(v) for k, v in obj.items()}
-    if isinstance(obj, (list, tuple)):
-        return [_to_builtin(v) for v in obj]
-    if hasattr(obj, "items"):
-        try:
-            return {k: _to_builtin(v) for k, v in obj.items()}
-        except Exception:
-            pass
-    if hasattr(obj, "__dict__") and not isinstance(obj, type):
-        out = {}
-        for k, v in vars(obj).items():
-            if callable(v):
-                continue
-            out[k] = _to_builtin(v)
-        return out
-    return obj
-
-
-def _safe_get(obj: Any, key: str, default: Any) -> Any:
-    try:
-        return getattr(obj, key)
-    except Exception:
-        pass
-    if isinstance(obj, dict):
-        return obj.get(key, default)
-    try:
-        return obj[key]
-    except Exception:
-        return default
 
 
 def _parse_cli() -> argparse.Namespace:
@@ -110,21 +82,21 @@ def _load_config(config_path: Path) -> Any:
 
 
 def _resolve_device(config: Any) -> torch.device:
-    configured = str(_safe_get(_safe_get(config, "distributed", {}), "device", "cuda:0"))
+    configured = str(safe_get(safe_get(config, "distributed", {}), "device", "cuda:0"))
     if configured.startswith("cuda") and torch.cuda.is_available():
         return torch.device(configured)
     return torch.device("cpu")
 
 
 def _resolve_normalizer_path(config: Any, fallback: Optional[Path] = None) -> Optional[Path]:
-    norm_path = _safe_get(_safe_get(config, "data", {}), "normalizer_path", None)
+    norm_path = safe_get(safe_get(config, "data", {}), "normalizer_path", None)
     if norm_path is None and fallback is not None:
         return fallback
     if norm_path is None:
         return None
     p = Path(str(norm_path))
     if not p.is_absolute():
-        p = Path(str(_safe_get(_safe_get(config, "data", {}), "root", "."))) / p
+        p = Path(str(safe_get(safe_get(config, "data", {}), "root", "."))) / p
     return p.resolve()
 
 
@@ -169,9 +141,9 @@ def _discover_checkpoints(args: argparse.Namespace, config: Any) -> List[Path]:
     else:
         root_raw = args.checkpoint_root
         if root_raw is None:
-            root_raw = _safe_get(_safe_get(config, "checkpoint", {}), "resume_from_dir", None)
+            root_raw = safe_get(safe_get(config, "checkpoint", {}), "resume_from_dir", None)
         if root_raw is None:
-            root_raw = _safe_get(_safe_get(config, "checkpoint", {}), "save_dir", None)
+            root_raw = safe_get(safe_get(config, "checkpoint", {}), "save_dir", None)
         if root_raw is None:
             raise ValueError("No checkpoint source provided. Set --checkpoint_paths or --checkpoint_root.")
         root = Path(str(root_raw))
@@ -192,10 +164,22 @@ def _discover_checkpoints(args: argparse.Namespace, config: Any) -> List[Path]:
     return unique
 
 
-def _load_diffusion_model(ckpt_path: Path, config: Any, device: torch.device) -> ConditionalDDOForecaster:
-    ckpt = torch.load(ckpt_path, map_location="cpu")
+def _load_diffusion_model(
+    ckpt_path: Path,
+    config: Any,
+    device: torch.device,
+    *,
+    allow_unsafe_legacy_load: bool,
+    logger,
+) -> ConditionalDDOForecaster:
+    ckpt = load_checkpoint_bundle(
+        ckpt_path,
+        map_location="cpu",
+        allow_unsafe_legacy_load=allow_unsafe_legacy_load,
+        logger=logger,
+    )
 
-    gino_cfg = ckpt.get("gino_config", _to_builtin(_safe_get(config, "gino", {})))
+    gino_cfg = ckpt.get("gino_config", to_builtin(safe_get(config, "gino", {})))
     model_cfg = {"arch": "gino", "gino": copy.deepcopy(gino_cfg)}
     denoiser = get_model(model_cfg).to(device)
     denoiser.load_state_dict(ckpt["denoiser_state_dict"], strict=True)
@@ -207,38 +191,38 @@ def _load_diffusion_model(ckpt_path: Path, config: Any, device: torch.device) ->
     schedule_h = diff_hparams.get("schedule", {})
 
     # Allow runtime overrides from config.diffusion for evaluation.
-    diff_cfg = _safe_get(config, "diffusion", {})
-    gp_cfg = _safe_get(diff_cfg, "gp", {})
-    cond_cfg = _safe_get(diff_cfg, "conditioning", {})
-    sampler_cfg = _safe_get(diff_cfg, "sampler", {})
-    schedule_cfg = _safe_get(diff_cfg, "schedule", {})
+    diff_cfg = safe_get(config, "diffusion", {})
+    gp_cfg = safe_get(diff_cfg, "gp", {})
+    cond_cfg = safe_get(diff_cfg, "conditioning", {})
+    sampler_cfg = safe_get(diff_cfg, "sampler", {})
+    schedule_cfg = safe_get(diff_cfg, "schedule", {})
 
     gp_sampler = PointRFFGaussianProcessSampler(
         dim=2,
-        gp_type=str(_safe_get(gp_cfg, "type", gp_h.get("type", "rff_rbf"))),
-        sigma=float(_safe_get(gp_cfg, "sigma", gp_h.get("sigma", 1.0))),
-        length_scale=float(_safe_get(gp_cfg, "length_scale", gp_h.get("length_scale", 0.05))),
-        rff_features=int(_safe_get(gp_cfg, "rff_features", gp_h.get("rff_features", 256))),
-        seed=int(ckpt.get("seed", _safe_get(_safe_get(config, "distributed", {}), "seed", 123))),
+        gp_type=str(safe_get(gp_cfg, "type", gp_h.get("type", "rff_rbf"))),
+        sigma=float(safe_get(gp_cfg, "sigma", gp_h.get("sigma", 1.0))),
+        length_scale=float(safe_get(gp_cfg, "length_scale", gp_h.get("length_scale", 0.05))),
+        rff_features=int(safe_get(gp_cfg, "rff_features", gp_h.get("rff_features", 256))),
+        seed=int(ckpt.get("seed", safe_get(safe_get(config, "distributed", {}), "seed", 123))),
     ).to(device)
 
     forecaster = ConditionalDDOForecaster(
         denoiser=denoiser,
         gp_sampler=gp_sampler,
-        parameterization=str(_safe_get(diff_cfg, "parameterization", diff_hparams.get("parameterization", "epsilon"))),
-        timestep_sampler=str(_safe_get(diff_cfg, "timestep_sampler", diff_hparams.get("timestep_sampler", "low_discrepancy"))),
-        lmbd0=float(_safe_get(schedule_cfg, "lmbd0", schedule_h.get("lmbd0", 10.0))),
-        lmbd1=float(_safe_get(schedule_cfg, "lmbd1", schedule_h.get("lmbd1", -10.0))),
-        weight_method=_safe_get(schedule_cfg, "weight_method", schedule_h.get("weight_method", "shifted_sigmoid_2")),
+        parameterization=str(safe_get(diff_cfg, "parameterization", diff_hparams.get("parameterization", "epsilon"))),
+        timestep_sampler=str(safe_get(diff_cfg, "timestep_sampler", diff_hparams.get("timestep_sampler", "low_discrepancy"))),
+        lmbd0=float(safe_get(schedule_cfg, "lmbd0", schedule_h.get("lmbd0", 10.0))),
+        lmbd1=float(safe_get(schedule_cfg, "lmbd1", schedule_h.get("lmbd1", -10.0))),
+        weight_method=safe_get(schedule_cfg, "weight_method", schedule_h.get("weight_method", "shifted_sigmoid_2")),
         conditioning=ConditioningConfig(
-            add_noisy_target=bool(_safe_get(cond_cfg, "add_noisy_target", cond_h.get("add_noisy_target", True))),
-            add_time_features=bool(_safe_get(cond_cfg, "add_time_features", cond_h.get("add_time_features", True))),
-            time_feature_type=str(_safe_get(cond_cfg, "time_feature_type", cond_h.get("time_feature_type", "sincos"))),
+            add_noisy_target=bool(safe_get(cond_cfg, "add_noisy_target", cond_h.get("add_noisy_target", True))),
+            add_time_features=bool(safe_get(cond_cfg, "add_time_features", cond_h.get("add_time_features", True))),
+            time_feature_type=str(safe_get(cond_cfg, "time_feature_type", cond_h.get("time_feature_type", "sincos"))),
         ),
-        sampler_method=str(_safe_get(sampler_cfg, "method", sampler_h.get("method", "denoise"))),
-        sampler_num_steps=int(_safe_get(sampler_cfg, "num_steps", sampler_h.get("num_steps", 40))),
-        sampler_s_min=float(_safe_get(sampler_cfg, "s_min", sampler_h.get("s_min", 1e-4))),
-        sampler_return_mean_last=bool(_safe_get(sampler_cfg, "return_mean_last", sampler_h.get("return_mean_last", True))),
+        sampler_method=str(safe_get(sampler_cfg, "method", sampler_h.get("method", "denoise"))),
+        sampler_num_steps=int(safe_get(sampler_cfg, "num_steps", sampler_h.get("num_steps", 40))),
+        sampler_s_min=float(safe_get(sampler_cfg, "s_min", sampler_h.get("s_min", 1e-4))),
+        sampler_return_mean_last=bool(safe_get(sampler_cfg, "return_mean_last", sampler_h.get("return_mean_last", True))),
     ).to(device)
 
     forecaster.eval()
@@ -253,21 +237,29 @@ def main() -> int:
     config = _load_config(config_path)
 
     device = _resolve_device(config)
-    log_file = _safe_get(config, "log_file", "eval_diffusion.log")
+    log_file = safe_get(config, "log_file", "eval_diffusion.log")
     if not Path(str(log_file)).is_absolute():
         log_file = str((_SCRIPT_DIR / str(log_file)).resolve())
     logger = setup_logging(
-        log_level=str(_safe_get(config, "log_level", "INFO")),
+        log_level=str(safe_get(config, "log_level", "INFO")),
         log_file=log_file,
         logger_name="flood_diffusion_eval",
     )
 
-    seed = int(_safe_get(_safe_get(config, "distributed", {}), "seed", 123))
-    deterministic = bool(_safe_get(config, "deterministic", True))
+    seed = int(safe_get(safe_get(config, "distributed", {}), "seed", 123))
+    deterministic = bool(safe_get(config, "deterministic", True))
     set_seed(seed, deterministic=deterministic)
     logger.info("Using device=%s seed=%d", device, seed)
+    allow_unsafe_legacy_load = bool(
+        safe_get(safe_get(config, "checkpoint", {}), "allow_unsafe_legacy_load", True)
+    )
+    if allow_unsafe_legacy_load:
+        logger.warning(
+            "checkpoint.allow_unsafe_legacy_load=true. Legacy pickle checkpoints "
+            "must be treated as trusted inputs."
+        )
 
-    target_variables = parse_target_variables(_safe_get(_safe_get(config, "data", {}), "target_variables", ["wd"]))
+    target_variables = parse_target_variables(safe_get(safe_get(config, "data", {}), "target_variables", ["wd"]))
     if target_variables != ["wd"]:
         raise ValueError("Diffusion v1 evaluation supports target_variables=['wd'] only.")
 
@@ -276,7 +268,12 @@ def main() -> int:
     for p in checkpoint_paths:
         logger.info("  checkpoint: %s", p)
 
-    first_ckpt = torch.load(checkpoint_paths[0], map_location="cpu")
+    first_ckpt = load_checkpoint_bundle(
+        checkpoint_paths[0],
+        map_location="cpu",
+        allow_unsafe_legacy_load=allow_unsafe_legacy_load,
+        logger=logger,
+    )
     fallback_normalizer = first_ckpt.get("normalizer_path")
     fallback_normalizer_path = Path(str(fallback_normalizer)).resolve() if fallback_normalizer else None
     normalizer_path = _resolve_normalizer_path(config, fallback=fallback_normalizer_path)
@@ -289,11 +286,17 @@ def main() -> int:
 
     models: List[ConditionalDDOForecaster] = []
     for ckpt_path in checkpoint_paths:
-        model = _load_diffusion_model(ckpt_path, config=config, device=device)
+        model = _load_diffusion_model(
+            ckpt_path,
+            config=config,
+            device=device,
+            allow_unsafe_legacy_load=allow_unsafe_legacy_load,
+            logger=logger,
+        )
         models.append(model)
     logger.info("Loaded %d diffusion model(s)", len(models))
 
-    out_dir = Path(str(_safe_get(_safe_get(config, "rollout", {}), "out_dir", "./rollout_uq_WV_depth_only_diffusion")))
+    out_dir = Path(str(safe_get(safe_get(config, "rollout", {}), "out_dir", "./rollout_uq_WV_depth_only_diffusion")))
     if not out_dir.is_absolute():
         out_dir = (_SCRIPT_DIR / out_dir).resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -324,13 +327,13 @@ def main() -> int:
         _rollout_prediction_per_hydrograph(
             models=models,
             hydrograph_samples=hydrograph_samples,
-            rollout_length=int(_safe_get(_safe_get(config, "data", {}), "rollout_length", 78)),
-            history_steps=int(_safe_get(_safe_get(config, "data", {}), "n_history", 3)),
+            rollout_length=int(safe_get(safe_get(config, "data", {}), "rollout_length", 78)),
+            history_steps=int(safe_get(safe_get(config, "data", {}), "n_history", 3)),
             dynamic_norm=normalizers["dynamic"],
             target_norm=normalizers["target"],
             device=device,
             skip_before_timestep=int(_opt(config, "data", "skip_before_timestep", 0)),
-            dt=float(_safe_get(_safe_get(config, "data", {}), "dt", 1200.0)),
+            dt=float(safe_get(safe_get(config, "data", {}), "dt", 1200.0)),
             out_dir=str(out_dir),
             target_variables=target_variables,
             logger=logger,
@@ -344,13 +347,13 @@ def main() -> int:
         _rollout_prediction_generic(
             models=models,
             rollout_dataset=rollout_norm_ds,
-            rollout_length=int(_safe_get(_safe_get(config, "data", {}), "rollout_length", 78)),
-            history_steps=int(_safe_get(_safe_get(config, "data", {}), "n_history", 3)),
+            rollout_length=int(safe_get(safe_get(config, "data", {}), "rollout_length", 78)),
+            history_steps=int(safe_get(safe_get(config, "data", {}), "n_history", 3)),
             dynamic_norm=normalizers["dynamic"],
             target_norm=normalizers["target"],
             device=device,
             skip_before_timestep=int(_opt(config, "data", "skip_before_timestep", 0)),
-            dt=float(_safe_get(_safe_get(config, "data", {}), "dt", 1200.0)),
+            dt=float(safe_get(safe_get(config, "data", {}), "dt", 1200.0)),
             out_dir=str(out_dir),
             target_variables=target_variables,
             logger=logger,

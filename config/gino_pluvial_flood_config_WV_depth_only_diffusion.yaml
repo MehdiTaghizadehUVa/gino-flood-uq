@@ -14,7 +14,8 @@ flood: &FLOOD
   deterministic: true
 
   data:
-    root: "C:/Users/jrj6wm/Desktop/Data_Generation_UQ/Results/M40"
+    # Use job-time CLI overrides for cluster paths; this default is repo-relative.
+    root: "./data/Results/M40"
     resolution: 48
     n_history: 3
     batch_size: 32
@@ -40,7 +41,8 @@ flood: &FLOOD
     dt: 1200
 
   rollout_data:
-    root: "C:/Users/jrj6wm/Desktop/Data_Generation_UQ/Results/M40"
+    # Use job-time CLI overrides for cluster paths; this default is repo-relative.
+    root: "./data/Results/M40"
     test_txt: "test.txt"
     static_text_files:
       - "M40_CS.txt"
@@ -119,6 +121,9 @@ flood: &FLOOD
   checkpoint:
     save_dir: "./checkpoints_WV_depth_only_diffusion"
     resume_from_dir: null
+    # Legacy monolithic .pt checkpoints require pickle load semantics.
+    # Keep true only when checkpoint files are from trusted sources.
+    allow_unsafe_legacy_load: true
 
   rollout:
     run_after_training: false

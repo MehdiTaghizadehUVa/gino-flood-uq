@@ -20,6 +20,7 @@ def ddo_denoise_step_vp(
     t: torch.Tensor,
     num_steps: int,
     alpha_sigma_fn: Callable[[torch.Tensor], Tuple[torch.Tensor, torch.Tensor]],
+    t_prev: torch.Tensor | None = None,
     stochastic: bool = True,
     eps: torch.Tensor | None = None,
     delta: float = 1e-8,
@@ -44,7 +45,14 @@ def ddo_denoise_step_vp(
     if num_steps <= 0:
         raise ValueError("num_steps must be >= 1")
     t = t.reshape(-1)
-    t_prev = torch.clamp(t - 1.0 / float(num_steps), min=0.0, max=1.0)
+    if t_prev is None:
+        t_prev = torch.clamp(t - 1.0 / float(num_steps), min=0.0, max=1.0)
+    else:
+        t_prev = torch.clamp(t_prev.reshape(-1), min=0.0, max=1.0)
+        if t_prev.shape != t.shape:
+            raise ValueError(
+                f"t_prev must have shape {tuple(t.shape)}, got {tuple(t_prev.shape)}"
+            )
 
     alpha_s, sigma_s = alpha_sigma_fn(t_prev)
     alpha_t, sigma_t = alpha_sigma_fn(t)
