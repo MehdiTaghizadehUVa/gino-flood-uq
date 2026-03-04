@@ -406,6 +406,7 @@ def _evaluate_validation(
                 latent_queries=sample["latent_queries"],
                 output_queries=sample["output_queries"],
                 stochastic=False,
+                initial_latent=torch.zeros_like(sample["target"]),
             )
             tgt = sample["target"]
             rmse_norm.append(float(torch.sqrt(torch.mean((pred - tgt) ** 2)).item()))

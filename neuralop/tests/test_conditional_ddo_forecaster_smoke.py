@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import pytest
 
 from neuralop.diffusion import ConditioningConfig, ConditionalDDOForecaster, PointRFFGaussianProcessSampler
 
@@ -150,3 +151,60 @@ def test_conditional_ddo_forecaster_adain_timestep_changes_predictions():
         ada_in=ada2,
     )
     assert not torch.allclose(out1, out2)
+
+
+def test_conditional_ddo_forecaster_deterministic_sampling_is_repeatable():
+    denoiser = DummyDenoiser(in_features=5, adain_dim=0)
+    gp = PointRFFGaussianProcessSampler(gp_type="independent", sigma=1.0, rff_features=32)
+    model = ConditionalDDOForecaster(
+        denoiser=denoiser,
+        gp_sampler=gp,
+        conditioning=ConditioningConfig(
+            add_noisy_target=True,
+            add_time_features=False,
+            time_injection="channel",
+        ),
+        sampler_num_steps=6,
+    )
+    sample = _make_sample(b=2, n=10)
+    pred1 = model.sample_next(
+        context=sample["context"],
+        input_geom=sample["input_geom"],
+        latent_queries=sample["latent_queries"],
+        output_queries=sample["output_queries"],
+        stochastic=False,
+    )
+    pred2 = model.sample_next(
+        context=sample["context"],
+        input_geom=sample["input_geom"],
+        latent_queries=sample["latent_queries"],
+        output_queries=sample["output_queries"],
+        stochastic=False,
+    )
+    assert torch.allclose(pred1, pred2)
+
+
+def test_conditional_ddo_forecaster_initial_latent_shape_guard():
+    denoiser = DummyDenoiser(in_features=5, adain_dim=0)
+    gp = PointRFFGaussianProcessSampler(gp_type="independent", sigma=1.0, rff_features=16)
+    model = ConditionalDDOForecaster(
+        denoiser=denoiser,
+        gp_sampler=gp,
+        conditioning=ConditioningConfig(
+            add_noisy_target=True,
+            add_time_features=False,
+            time_injection="channel",
+        ),
+        sampler_num_steps=4,
+    )
+    sample = _make_sample(b=2, n=10)
+    bad_latent = torch.zeros(2, 9, 1)
+    with pytest.raises(ValueError, match="initial_latent"):
+        model.sample_next(
+            context=sample["context"],
+            input_geom=sample["input_geom"],
+            latent_queries=sample["latent_queries"],
+            output_queries=sample["output_queries"],
+            stochastic=False,
+            initial_latent=bad_latent,
+        )

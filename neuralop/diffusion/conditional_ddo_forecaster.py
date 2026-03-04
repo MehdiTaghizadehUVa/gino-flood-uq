@@ -325,20 +325,42 @@ class ConditionalDDOForecaster(nn.Module):
         stochastic: bool = True,
         return_trace: bool = False,
         ada_in: Optional[torch.Tensor] = None,
+        initial_latent: Optional[torch.Tensor] = None,
     ) -> torch.Tensor | Tuple[torch.Tensor, list]:
-        """Sample one-step next-state field from conditional reverse diffusion."""
+        """
+        Sample one-step next-state field from conditional reverse diffusion.
+
+        Notes
+        -----
+        - If ``initial_latent`` is provided, it is used as z_T and must be [B, N, 1].
+        - If ``initial_latent`` is not provided:
+          - stochastic=True: z_T is sampled from the configured GP prior.
+          - stochastic=False: z_T is initialized to zeros for deterministic output.
+        """
         bsz = context.shape[0]
         n_steps = int(self.sampler_num_steps if num_steps is None else num_steps)
         if n_steps <= 0:
             raise ValueError("num_steps must be >= 1")
 
-        z_t = self.gp_sampler.sample(
-            coords=input_geom,
-            batch_size=bsz,
-            n_channels=1,
-            device=context.device,
-            dtype=context.dtype,
-        )
+        n_points = int(context.shape[1])
+        if initial_latent is not None:
+            z_t = initial_latent.to(device=context.device, dtype=context.dtype)
+            if z_t.ndim != 3 or z_t.shape != (bsz, n_points, 1):
+                raise ValueError(
+                    "initial_latent must have shape [B, N, 1] matching context "
+                    f"({bsz}, {n_points}, 1), got {tuple(z_t.shape)}"
+                )
+        elif stochastic:
+            z_t = self.gp_sampler.sample(
+                coords=input_geom,
+                batch_size=bsz,
+                n_channels=1,
+                device=context.device,
+                dtype=context.dtype,
+            )
+        else:
+            # Deterministic path for validation/ablation reproducibility.
+            z_t = torch.zeros(bsz, n_points, 1, device=context.device, dtype=context.dtype)
 
         trace = [] if return_trace else None
         mu_last = None
