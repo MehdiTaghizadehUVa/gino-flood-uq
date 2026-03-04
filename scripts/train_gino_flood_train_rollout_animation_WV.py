@@ -2724,11 +2724,18 @@ def main():
         verify_training_gradient_flow(trainer, train_loader, train_loss_fn)
         overfit_sanity_check(trainer, train_loader, train_loss_fn, optimizer, n_steps=15)
         logger.info("--- End verification ---")
-
     # Train: always save a rolling "last" checkpoint and a metric-based "best" checkpoint.
-    save_every = int(getattr(config.checkpoint, "save_every", 1))
+    save_every_raw = _cfg_get(config.checkpoint, "save_every", 1)
+    try:
+        save_every = int(save_every_raw)
+    except (TypeError, ValueError):
+        logger.warning("Invalid checkpoint.save_every=%r; using 1.", save_every_raw)
+        save_every = 1
+    if save_every < 1:
+        logger.warning("checkpoint.save_every=%s is invalid; using 1.", save_every)
+        save_every = 1
     available_eval_metrics = [f"test_{k}" for k in eval_losses.keys()]
-    configured_best_metric = getattr(config.checkpoint, "save_best_metric", None)
+    configured_best_metric = _cfg_get(config.checkpoint, "save_best_metric", None)
     if configured_best_metric is not None:
         save_best_metric = str(configured_best_metric)
     else:
