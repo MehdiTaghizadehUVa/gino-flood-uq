@@ -179,7 +179,7 @@ def _load_diffusion_model(
         logger=logger,
     )
 
-    gino_cfg = ckpt.get("gino_config", to_builtin(safe_get(config, "gino", {})))
+    gino_cfg = copy.deepcopy(ckpt.get("gino_config", to_builtin(safe_get(config, "gino", {}))))
     model_cfg = {"arch": "gino", "gino": copy.deepcopy(gino_cfg)}
     denoiser = get_model(model_cfg).to(device)
     denoiser.load_state_dict(ckpt["denoiser_state_dict"], strict=True)

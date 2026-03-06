@@ -29,12 +29,15 @@ CONTAINER_PATH="/share/resources/containers/apptainer/archive/pytorch-2.0.1.sif"
 DATA_ROOT="/scratch/$USER/Data_Generation_UQ/Results/M40"
 
 ENSEMBLE_ID="${SLURM_ARRAY_TASK_ID}"
-BASE_SEED=123
+# Always use fresh seed blocks per submitted array job by default.
+# Optional override: sbatch --export=ALL,BASE_SEED=<value> ...
+BASE_SEED_DEFAULT=$((100000 + SLURM_ARRAY_JOB_ID * 10))
+BASE_SEED="${BASE_SEED:-${BASE_SEED_DEFAULT}}"
 SEED=$((BASE_SEED + ENSEMBLE_ID))
 SHORT_SHA="$(git -C "${PROJECT_DIR}" rev-parse --short HEAD)"
 
 RUN_TAG="ddofs_wv_m40_depth_e4_${SHORT_SHA}"
-RUN_GROUP="${RUN_TAG}_job${SLURM_ARRAY_JOB_ID}"
+RUN_GROUP="${RUN_TAG}_job${SLURM_ARRAY_JOB_ID}_sbase${BASE_SEED}"
 WANDB_NAME="${RUN_TAG}_ens${ENSEMBLE_ID}_seed${SEED}"
 CKPT_ROOT="/home/$USER/GINO_Model/neuraloperator_no_physics/scripts/checkpoints_WV_depth_only_diffusion"
 CKPT_DIR="${CKPT_ROOT}/${RUN_GROUP}/ens${ENSEMBLE_ID}"
@@ -65,6 +68,7 @@ echo "Training script: ${TRAIN_SCRIPT}"
 echo "Config:          ${TRAIN_CONFIG}"
 echo "Data root:       ${DATA_ROOT}"
 echo "Git commit:      $(git -C "${PROJECT_DIR}" rev-parse HEAD)"
+echo "Base seed:       ${BASE_SEED}"
 echo "Seed:            ${SEED}"
 echo "Ensemble ID:     ${ENSEMBLE_ID}"
 echo "Checkpoint dir:  ${CKPT_DIR}"

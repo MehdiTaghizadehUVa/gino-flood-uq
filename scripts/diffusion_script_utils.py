@@ -6,6 +6,7 @@ import inspect
 import json
 import logging
 import numbers
+import threading
 from pathlib import Path
 from typing import Any, Dict, Mapping, MutableMapping, Optional, Tuple
 
@@ -44,14 +45,16 @@ def safe_get(obj: Any, key: str, default: Any) -> Any:
     """Get attribute/dict/index key from mixed config objects safely."""
     if obj is None:
         return default
-    try:
-        return getattr(obj, key)
-    except AttributeError:
-        pass
+    # Mapping-like configs (including OmegaConf DictConfig) should prefer key
+    # access because getattr() on missing keys may raise KeyError.
     if isinstance(obj, Mapping):
         return obj.get(key, default)
     if isinstance(obj, MutableMapping):
         return obj.get(key, default)
+    try:
+        return getattr(obj, key)
+    except (AttributeError, KeyError, TypeError):
+        pass
     try:
         return obj[key]
     except (KeyError, IndexError, TypeError):
@@ -221,3 +224,65 @@ def load_checkpoint_bundle(
         allow_unsafe_legacy_load=allow_unsafe_legacy_load,
         logger=logger,
     )
+
+
+def shutdown_dataloader_workers(loader: Any, logger: Optional[logging.Logger] = None, name: str = "loader") -> None:
+    """
+    Best-effort shutdown for DataLoader worker processes.
+
+    Uses PyTorch private iterator hooks to prevent teardown hangs in long-running
+    jobs with multiprocessing workers.
+    """
+    if loader is None:
+        return
+    try:
+        iterator = getattr(loader, "_iterator", None)
+        if iterator is not None:
+            shutdown = getattr(iterator, "_shutdown_workers", None)
+            if callable(shutdown):
+                shutdown()
+            setattr(loader, "_iterator", None)
+    except Exception as exc:  # pragma: no cover - defensive cleanup
+        if logger is not None:
+            logger.warning("DataLoader cleanup failed for %s: %s", name, exc)
+
+
+def safe_wandb_finish(
+    run: Any,
+    *,
+    logger: Optional[logging.Logger] = None,
+    timeout_seconds: float = 120.0,
+) -> None:
+    """
+    Finish a W&B run with timeout protection.
+
+    W&B finalization can occasionally hang on cluster teardown/network. This
+    wrapper avoids stale Slurm jobs by bounding shutdown time.
+    """
+    if run is None:
+        return
+    timeout_seconds = max(1.0, float(timeout_seconds))
+    finish_error: Dict[str, Exception] = {}
+
+    def _finish() -> None:
+        try:
+            finish_fn = getattr(run, "finish", None)
+            if callable(finish_fn):
+                finish_fn()
+        except Exception as exc:  # pragma: no cover - defensive cleanup
+            finish_error["exc"] = exc
+
+    t = threading.Thread(target=_finish, name="wandb-finish", daemon=True)
+    t.start()
+    t.join(timeout_seconds)
+
+    if t.is_alive():
+        if logger is not None:
+            logger.warning(
+                "W&B finish exceeded %.1fs timeout; continuing shutdown to avoid stale job.",
+                timeout_seconds,
+            )
+        return
+
+    if finish_error and logger is not None:
+        logger.warning("W&B finish raised an exception during shutdown: %s", finish_error["exc"])

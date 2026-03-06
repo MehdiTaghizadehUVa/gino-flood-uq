@@ -34,42 +34,43 @@ class disable_logging(object):
 # dummy placeholders
 _DATA_PARALLEL_GROUP = None
 _MODEL_PARALLEL_GROUP = None
+_LOCAL_RANK = 0
+_GLOBAL_RANK = 0
+_WORLD_SIZE = 1
 
 # world comm
 def get_world_size():
-    if not dist.is_initialized():
-        return 1
-    else:
+    if dist.is_initialized():
         return dist.get_world_size()
+    return _WORLD_SIZE
 
 
 def get_local_rank():
-    if not dist.is_initialized():
-        return 0
-    else:
-        return dist.get_rank()
+    if dist.is_initialized():
+        return _LOCAL_RANK
+    return int(os.getenv("LOCAL_RANK", 0))
 
 
 def get_global_rank():
-    if not dist.is_initialized():
-        return 0
-    else:
-        return dist.get_global_rank(group=_DATA_PARALLEL_GROUP,
-                                   group_rank=get_local_rank())
+    if dist.is_initialized():
+        return dist.get_rank()
+    return int(os.getenv("RANK", 0))
 
 # data parallel
 def get_data_parallel_size():
     if not dist.is_initialized():
         return 1
-    else:
-        return dist.get_world_size(group=_DATA_PARALLEL_GROUP)
+    if _DATA_PARALLEL_GROUP is None:
+        return dist.get_world_size()
+    return dist.get_world_size(group=_DATA_PARALLEL_GROUP)
 
 
 def get_data_parallel_rank():
     if not dist.is_initialized():
         return 0
-    else:
-        return dist.get_rank(group=_DATA_PARALLEL_GROUP)
+    if _DATA_PARALLEL_GROUP is None:
+        return dist.get_rank()
+    return dist.get_rank(group=_DATA_PARALLEL_GROUP)
 
 def get_data_parallel_group():
     assert dist.is_initialized(), "Error, initialize torch.distributed first"
@@ -80,15 +81,13 @@ def get_data_parallel_group():
 def get_model_parallel_size():
     if not dist.is_initialized() or (_MODEL_PARALLEL_GROUP is None):
         return 1
-    else:
-        return dist.get_world_size(group=_MODEL_PARALLEL_GROUP)
+    return dist.get_world_size(group=_MODEL_PARALLEL_GROUP)
 
 
 def get_model_parallel_rank():
     if not dist.is_initialized() or (_MODEL_PARALLEL_GROUP is None):
         return 0
-    else:
-        return dist.get_rank(group=_MODEL_PARALLEL_GROUP)
+    return dist.get_rank(group=_MODEL_PARALLEL_GROUP)
 
 
 def get_model_parallel_group():
@@ -104,22 +103,39 @@ def init(model_parallel_size: int=1, verbose: bool=False):
 
     local_rank = int(os.getenv("LOCAL_RANK", 0))
     global_rank = int(os.getenv("RANK", 0))
-    world_size = torch.cuda.device_count()
-    
+    world_size = int(os.getenv("WORLD_SIZE", "1"))
+    backend = "nccl" if torch.cuda.is_available() else "gloo"
+    timeout_min = int(os.getenv("TORCH_DISTRIBUTED_TIMEOUT_MIN", "30"))
+
     if world_size > 1:
         with disable_logging():
-            # initialize process groups
-            dist.init_process_group(backend='nccl', rank=local_rank)
-        
-            # once initialized, get true values for rank and size using torch.distributed
-            world_size = get_world_size()
-            local_rank = get_local_rank()
+            if not dist.is_initialized():
+                dist.init_process_group(
+                    backend=backend,
+                    init_method="env://",
+                    rank=global_rank,
+                    world_size=world_size,
+                    timeout=dt.timedelta(minutes=timeout_min),
+                )
+        world_size = dist.get_world_size()
+        global_rank = dist.get_rank()
+        if torch.cuda.is_available():
+            torch.cuda.set_device(local_rank)
 
-            # set a barrier until all processes reach this point
+        if torch.cuda.is_available():
             dist.barrier(device_ids=[local_rank])
+        else:
+            dist.barrier()
 
-    # process 0 is logger 
-    is_logger = (get_local_rank() == 0)
+    global _LOCAL_RANK
+    global _GLOBAL_RANK
+    global _WORLD_SIZE
+    _LOCAL_RANK = local_rank
+    _GLOBAL_RANK = global_rank
+    _WORLD_SIZE = world_size
+
+    # process 0 is logger
+    is_logger = (global_rank == 0)
 
     # get model groups
     model_group_size = model_parallel_size
@@ -176,16 +192,17 @@ def init(model_parallel_size: int=1, verbose: bool=False):
                         _MODEL_PARALLEL_GROUP = tmp_group
                                 
         else:
-            # technically unnecessary but we do it to be clean
+            # Single model-parallel shard: one data-parallel group spanning all ranks.
             with disable_logging():
-                _MODEL_PARALLEL_GROUP = dist.new_group(ranks = [global_rank])
-                _SPATIAL_PARALLEL_GROUP = _MODEL_PARALLEL_GROUP
-                _MATMUL_PARALLEL_GROUP = _MODEL_PARALLEL_GROUP
                 _DATA_PARALLEL_GROUP = dist.new_group(ranks = list(range(world_size)))
+                _MODEL_PARALLEL_GROUP = None
 
     # barrier
     if dist.is_initialized():
-        dist.barrier(device_ids=[local_rank])
+        if torch.cuda.is_available():
+            dist.barrier(device_ids=[local_rank])
+        else:
+            dist.barrier()
 
     if is_logger:
         print("Finished Wireup")

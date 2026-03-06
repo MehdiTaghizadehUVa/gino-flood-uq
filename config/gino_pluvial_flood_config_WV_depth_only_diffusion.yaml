@@ -86,6 +86,7 @@ flood: &FLOOD
     fno_channel_mlp_expansion: 1.0
     fno_channel_mlp_dropout: 0.0
     fno_resolution_scaling_factor: 1
+    # Diffusion denoiser behavior follows this config/checkpoint setting directly.
     autoregressive: True
     gno_in_weighting_fn: 'edam'
     gno_in_wt_fn_scale: 1.0

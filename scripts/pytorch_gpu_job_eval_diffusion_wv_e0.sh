@@ -1,0 +1,59 @@
+#!/bin/bash
+#SBATCH -A uqgroup
+#SBATCH -p gpu
+#SBATCH --gres=gpu:1
+#SBATCH -c 8
+#SBATCH --mem=128G
+#SBATCH -t 24:00:00
+#SBATCH -J ddofs_wv_ev_e0
+#SBATCH -o logs/out/ddofs_wv_ev_e0-%j.out
+#SBATCH -e logs/err/ddofs_wv_ev_e0-%j.err
+
+set -euo pipefail
+module purge
+module load apptainer
+
+if [[ -n "${SLURM_SUBMIT_DIR:-}" ]]; then
+  SCRIPT_DIR="${SLURM_SUBMIT_DIR}"
+else
+  SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+fi
+cd "${SCRIPT_DIR}"
+mkdir -p logs/out logs/err
+
+PROJECT_DIR="/home/$USER/GINO_Model/neuraloperator_no_physics"
+EVAL_SCRIPT="${PROJECT_DIR}/scripts/evaluate_diffusion_forecaster_WV.py"
+EVAL_CONFIG="${PROJECT_DIR}/config/gino_pluvial_flood_config_WV_depth_only_diffusion.yaml"
+CONTAINER_PATH="/share/resources/containers/apptainer/archive/pytorch-2.0.1.sif"
+TEST_ROOT="/scratch/$USER/Data_Generation_UQ/Results_Test/M40"
+CHECKPOINT_DIR="/home/$USER/GINO_Model/neuraloperator_no_physics/scripts/checkpoints_WV_depth_only_diffusion/ddofs_wv_m40_depth_job9983082_ens0"
+OUT_DIR="/home/$USER/GINO_Model/neuraloperator_no_physics/scripts/rollout_uq_WV_depth_only_diffusion_e0"
+
+HOST_CA_BUNDLE=""
+for cand in /etc/pki/tls/certs/ca-bundle.crt /etc/ssl/certs/ca-certificates.crt; do
+  if [[ -f "$cand" ]]; then
+    HOST_CA_BUNDLE="$cand"
+    break
+  fi
+done
+APPTAINER_BIND_ARGS=(--nv)
+if [[ -n "${HOST_CA_BUNDLE}" ]]; then
+  APPTAINER_BIND_ARGS+=(--bind "${HOST_CA_BUNDLE}:/host_ca_bundle.crt:ro")
+  export APPTAINERENV_SSL_CERT_FILE=/host_ca_bundle.crt
+  export APPTAINERENV_REQUESTS_CA_BUNDLE=/host_ca_bundle.crt
+fi
+
+echo "Eval script:      ${EVAL_SCRIPT}"
+echo "Config:           ${EVAL_CONFIG}"
+echo "Checkpoint dir:   ${CHECKPOINT_DIR}"
+echo "Test data root:   ${TEST_ROOT}"
+echo "Output dir:       ${OUT_DIR}"
+echo "Host:             $(hostname)"
+
+apptainer exec "${APPTAINER_BIND_ARGS[@]}" "${CONTAINER_PATH}" \
+  python "${EVAL_SCRIPT}" \
+  --config_path "${EVAL_CONFIG}" \
+  --checkpoint_paths "${CHECKPOINT_DIR}" \
+  --data.root "${TEST_ROOT}" \
+  --rollout_data.root "${TEST_ROOT}" \
+  --rollout.out_dir "${OUT_DIR}"

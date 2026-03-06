@@ -1,5 +1,16 @@
 import torch
+import torch.distributed as dist
 import neuralop.mpu.comm as comm
+
+def _safe_get(obj, key, default):
+    try:
+        return getattr(obj, key)
+    except (AttributeError, KeyError, TypeError):
+        pass
+    try:
+        return obj[key]
+    except (TypeError, KeyError, IndexError):
+        return default
 
 
 def setup(config):
@@ -19,25 +30,29 @@ def setup(config):
         device : torch.device
         is_logger : bool
     """
-    if config.distributed.use_distributed:
+    use_distributed = bool(_safe_get(config.distributed, "use_distributed", False))
+    if use_distributed:
+        verbose = bool(_safe_get(config, "verbose", False))
         comm.init(model_parallel_size=config.distributed.get('model_parallel_size', 1),
-                  verbose=config.verbose)
+                  verbose=verbose)
 
-        #Set process 0 to log screen and wandb
-        is_logger = (comm.get_local_rank() == 0)
+        # Set global rank 0 to log screen and wandb.
+        is_logger = (comm.get_global_rank() == 0)
 
-        #Set device and random seed
+        # Set device and random seed.
         device = torch.device(f"cuda:{comm.get_local_rank()}")
         seed = config.distributed.seed + comm.get_data_parallel_rank()
 
         #Ensure batch can be evenly split among the model-parallel group
-        if config.patching.levels > 0:
+        patching = _safe_get(config, "patching", None)
+        patching_levels = int(_safe_get(patching, "levels", 0)) if patching is not None else 0
+        if patching_levels > 0:
             assert(config.data.batch_size*(2**(2*config.patching.levels)) % comm.get_model_parallel_size() == 0), (
                 f'With MG patching, total batch-size of {config.data.batch_size*(2**(2*config.patching.levels))}'
                 f' ({config.data.batch_size} times {(2**(2*config.patching.levels))}).'
                 f' However, this total batch-size cannot be evenly split among the {comm.get_model_parallel_size()} model-parallel groups.'
             )
-            for b_size in config.data.test_batch_sizes:
+            for j, b_size in enumerate(config.data.test_batch_sizes):
                 assert (b_size*(2**(2*config.patching.levels)) % comm.get_model_parallel_size() == 0), (
                 f'With MG patching, for test resolution of {config.data.test_resolutions[j]}'
                 f' the total batch-size is {config.data.batch_size*(2**(2*config.patching.levels))}'
@@ -57,7 +72,8 @@ def setup(config):
     #Set device, random seed and optimization
     if torch.cuda.is_available():
 
-        torch.cuda.set_device(device.index)
+        if device.type == "cuda":
+            torch.cuda.set_device(device.index)
 
         if 'seed' in config.distributed:
             torch.cuda.manual_seed(seed)
@@ -71,6 +87,13 @@ def setup(config):
 
     if 'seed' in config.distributed:
         torch.manual_seed(seed)
+
+    # Ensure all ranks see the same setup completion before data loading.
+    if dist.is_available() and dist.is_initialized():
+        if torch.cuda.is_available() and device.type == "cuda":
+            dist.barrier(device_ids=[device.index])
+        else:
+            dist.barrier()
 
     return device, is_logger
 

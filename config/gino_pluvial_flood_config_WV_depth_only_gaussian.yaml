@@ -106,7 +106,11 @@ flood: &FLOOD
   rollout:
     run_after_training: false
     out_dir: "./rollout_gifs_WV_depth_only_gaussian"
-    n_ensemble_samples: 2
+    n_ensemble_samples: 25
+    # Gaussian AR rollout state transition:
+    # - sample: x_{t+1} <- sampled member (current behavior)
+    # - mu:     x_{t+1} <- predictive mean (stability diagnostic)
+    gaussian_state_update: "sample"
 
   verify_training: true
   inverse_test: true

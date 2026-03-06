@@ -34,7 +34,9 @@ from neuralop.diffusion import (  # noqa: E402
 )
 from scripts.diffusion_script_utils import (  # noqa: E402
     save_checkpoint_sidecars,
+    safe_wandb_finish,
     safe_get,
+    shutdown_dataloader_workers,
     to_builtin,
 )
 from neuralop.utils import get_wandb_api_key  # noqa: E402
@@ -305,6 +307,7 @@ def _configure_denoiser(
     gino_cfg["out_channels"] = int(n_target_channels)
     gino_cfg["output_distribution"] = "deterministic"
     gino_cfg["use_fgn_noise"] = False
+    # Respect config-defined checkpoint/model behavior; no forced AR override here.
     if time_injection == "adain":
         gino_cfg["fno_norm"] = "ada_in"
         gino_cfg["fno_ada_in_dim"] = int(time_embedding_dim)
@@ -578,6 +581,9 @@ def main() -> int:
     scheduler = _init_scheduler(config, optimizer)
 
     run = _maybe_init_wandb(config, seed=seed, logger=logger)
+    wandb_finish_timeout_seconds = float(
+        safe_get(safe_get(config, "wandb", {}), "finish_timeout_seconds", 120.0)
+    )
 
     ckpt_dir = Path(str(safe_get(safe_get(config, "checkpoint", {}), "save_dir", "./checkpoints_WV_depth_only_diffusion")))
     if not ckpt_dir.is_absolute():
@@ -596,128 +602,111 @@ def main() -> int:
     first_batch_checked = False
     logger.info("Starting diffusion training for %d epochs", n_epochs)
 
-    for epoch in range(1, n_epochs + 1):
-        forecaster.train()
-        epoch_loss = 0.0
-        t0 = time.time()
+    try:
+        for epoch in range(1, n_epochs + 1):
+            forecaster.train()
+            epoch_loss = 0.0
+            t0 = time.time()
 
-        pbar = tqdm(train_loader, desc=f"Epoch {epoch}/{n_epochs}", leave=False)
-        for batch in pbar:
-            sample = _prepare_batch(batch, device)
-            if not first_batch_checked:
-                batch_size = sample["context"].shape[0]
-                t_probe = torch.full(
-                    (batch_size,),
-                    0.5,
-                    device=device,
-                    dtype=sample["context"].dtype,
-                )
-                if cond_cfg.time_injection == "adain":
-                    ada_probe = forecaster._build_time_adain(t_probe)
-                    expected_shape = (batch_size, cond_cfg.time_embedding_dim)
-                    if tuple(ada_probe.shape) != expected_shape:
-                        raise ValueError(
-                            f"AdaIN timestep embedding shape mismatch: got {tuple(ada_probe.shape)} "
-                            f"expected {expected_shape}"
-                        )
+            pbar = tqdm(train_loader, desc=f"Epoch {epoch}/{n_epochs}", leave=False)
+            for batch in pbar:
+                sample = _prepare_batch(batch, device)
+                if not first_batch_checked:
+                    batch_size = sample["context"].shape[0]
+                    t_probe = torch.full(
+                        (batch_size,),
+                        0.5,
+                        device=device,
+                        dtype=sample["context"].dtype,
+                    )
+                    if cond_cfg.time_injection == "adain":
+                        ada_probe = forecaster._build_time_adain(t_probe)
+                        expected_shape = (batch_size, cond_cfg.time_embedding_dim)
+                        if tuple(ada_probe.shape) != expected_shape:
+                            raise ValueError(
+                                f"AdaIN timestep embedding shape mismatch: got {tuple(ada_probe.shape)} "
+                                f"expected {expected_shape}"
+                            )
+                    else:
+                        if cond_cfg.time_injection != "channel":
+                            raise ValueError(
+                                f"Unexpected conditioning mode in first-batch check: {cond_cfg.time_injection!r}"
+                            )
+                    first_batch_checked = True
+                optimizer.zero_grad(set_to_none=True)
+
+                loss, stats = forecaster.training_loss(sample)
+                loss.backward()
+                if grad_clip is not None and grad_clip > 0:
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+                optimizer.step()
+
+                global_step += 1
+                epoch_loss += float(loss.item())
+                pbar.set_postfix(loss=f"{loss.item():.4e}")
+
+                if run is not None:
+                    wandb.log(
+                        {
+                            "train/loss": float(loss.item()),
+                            "train/mse_eps": stats["mse_eps"],
+                            "train/t_mean": stats["t_mean"],
+                            "train/lr": float(optimizer.param_groups[0]["lr"]),
+                        },
+                        step=global_step,
+                    )
+
+                if global_step % max(1, print_every) == 0:
+                    logger.info(
+                        "epoch=%d step=%d loss=%.6e lr=%.6e",
+                        epoch,
+                        global_step,
+                        float(loss.item()),
+                        float(optimizer.param_groups[0]["lr"]),
+                    )
+
+            train_loss_epoch = epoch_loss / max(1, len(train_loader))
+            val_stats = _evaluate_validation(
+                forecaster=forecaster,
+                loader=test_loader,
+                device=device,
+                target_norm=normalizers.get("target", None),
+                max_batches=max_val_batches,
+            )
+
+            if scheduler is not None:
+                if isinstance(scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
+                    scheduler.step(val_stats["val_loss"])
                 else:
-                    if cond_cfg.time_injection != "channel":
-                        raise ValueError(
-                            f"Unexpected conditioning mode in first-batch check: {cond_cfg.time_injection!r}"
-                        )
-                first_batch_checked = True
-            optimizer.zero_grad(set_to_none=True)
+                    scheduler.step()
 
-            loss, stats = forecaster.training_loss(sample)
-            loss.backward()
-            if grad_clip is not None and grad_clip > 0:
-                torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
-            optimizer.step()
-
-            global_step += 1
-            epoch_loss += float(loss.item())
-            pbar.set_postfix(loss=f"{loss.item():.4e}")
+            elapsed = time.time() - t0
+            logger.info(
+                "Epoch %d/%d | train_loss=%.6e | val_loss=%.6e | val_rmse_norm=%.6e | val_rmse_phys=%.6e | %.2fs",
+                epoch,
+                n_epochs,
+                train_loss_epoch,
+                val_stats["val_loss"],
+                val_stats["val_rmse_norm"],
+                val_stats["val_rmse_phys"],
+                elapsed,
+            )
 
             if run is not None:
                 wandb.log(
                     {
-                        "train/loss": float(loss.item()),
-                        "train/mse_eps": stats["mse_eps"],
-                        "train/t_mean": stats["t_mean"],
-                        "train/lr": float(optimizer.param_groups[0]["lr"]),
+                        "epoch": epoch,
+                        "train/loss_epoch": train_loss_epoch,
+                        "val/loss": val_stats["val_loss"],
+                        "val/rmse_norm": val_stats["val_rmse_norm"],
+                        "val/rmse_phys": val_stats["val_rmse_phys"],
                     },
                     step=global_step,
                 )
 
-            if global_step % max(1, print_every) == 0:
-                logger.info(
-                    "epoch=%d step=%d loss=%.6e lr=%.6e",
-                    epoch,
-                    global_step,
-                    float(loss.item()),
-                    float(optimizer.param_groups[0]["lr"]),
-                )
-
-        train_loss_epoch = epoch_loss / max(1, len(train_loader))
-        val_stats = _evaluate_validation(
-            forecaster=forecaster,
-            loader=test_loader,
-            device=device,
-            target_norm=normalizers.get("target", None),
-            max_batches=max_val_batches,
-        )
-
-        if scheduler is not None:
-            if isinstance(scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
-                scheduler.step(val_stats["val_loss"])
-            else:
-                scheduler.step()
-
-        elapsed = time.time() - t0
-        logger.info(
-            "Epoch %d/%d | train_loss=%.6e | val_loss=%.6e | val_rmse_norm=%.6e | val_rmse_phys=%.6e | %.2fs",
-            epoch,
-            n_epochs,
-            train_loss_epoch,
-            val_stats["val_loss"],
-            val_stats["val_rmse_norm"],
-            val_stats["val_rmse_phys"],
-            elapsed,
-        )
-
-        if run is not None:
-            wandb.log(
-                {
-                    "epoch": epoch,
-                    "train/loss_epoch": train_loss_epoch,
-                    "val/loss": val_stats["val_loss"],
-                    "val/rmse_norm": val_stats["val_rmse_norm"],
-                    "val/rmse_phys": val_stats["val_rmse_phys"],
-                },
-                step=global_step,
-            )
-
-        latest_path = ckpt_dir / "checkpoint.pt"
-        _save_checkpoint(
-            path=latest_path,
-            model=model,
-            optimizer=optimizer,
-            epoch=epoch,
-            global_step=global_step,
-            seed=seed,
-            best_val_loss=best_val_loss,
-            normalizer_path=normalizer_path,
-            target_variables=target_variables,
-            gino_cfg=gino_cfg,
-            forecaster=forecaster,
-            scheduler=scheduler,
-        )
-
-        if val_stats["val_loss"] < best_val_loss:
-            best_val_loss = float(val_stats["val_loss"])
-            best_path = ckpt_dir / "checkpoint_best.pt"
+            latest_path = ckpt_dir / "checkpoint.pt"
             _save_checkpoint(
-                path=best_path,
+                path=latest_path,
                 model=model,
                 optimizer=optimizer,
                 epoch=epoch,
@@ -730,24 +719,43 @@ def main() -> int:
                 forecaster=forecaster,
                 scheduler=scheduler,
             )
-            logger.info("Saved new best checkpoint: %s", best_path)
 
-    logger.info("Training complete. Best val_loss=%.6e | checkpoints=%s", best_val_loss, ckpt_dir)
+            if val_stats["val_loss"] < best_val_loss:
+                best_val_loss = float(val_stats["val_loss"])
+                best_path = ckpt_dir / "checkpoint_best.pt"
+                _save_checkpoint(
+                    path=best_path,
+                    model=model,
+                    optimizer=optimizer,
+                    epoch=epoch,
+                    global_step=global_step,
+                    seed=seed,
+                    best_val_loss=best_val_loss,
+                    normalizer_path=normalizer_path,
+                    target_variables=target_variables,
+                    gino_cfg=gino_cfg,
+                    forecaster=forecaster,
+                    scheduler=scheduler,
+                )
+                logger.info("Saved new best checkpoint: %s", best_path)
 
-    metadata = {
-        "checkpoint_dir": str(ckpt_dir),
-        "best_val_loss": best_val_loss,
-        "normalizer_path": str(normalizer_path),
-        "target_variables": target_variables,
-        "global_step": global_step,
-    }
-    with open(ckpt_dir / "training_summary.json", "w", encoding="utf-8") as f:
-        json.dump(metadata, f, indent=2)
+        logger.info("Training complete. Best val_loss=%.6e | checkpoints=%s", best_val_loss, ckpt_dir)
 
-    if run is not None:
-        run.finish()
-
-    return 0
+        metadata = {
+            "checkpoint_dir": str(ckpt_dir),
+            "best_val_loss": best_val_loss,
+            "normalizer_path": str(normalizer_path),
+            "target_variables": target_variables,
+            "global_step": global_step,
+        }
+        with open(ckpt_dir / "training_summary.json", "w", encoding="utf-8") as f:
+            json.dump(metadata, f, indent=2)
+        return 0
+    finally:
+        shutdown_dataloader_workers(train_loader, logger=logger, name="train_loader")
+        shutdown_dataloader_workers(test_loader, logger=logger, name="test_loader")
+        if run is not None:
+            safe_wandb_finish(run, logger=logger, timeout_seconds=wandb_finish_timeout_seconds)
 
 
 if __name__ == "__main__":

@@ -1,14 +1,19 @@
 #!/bin/bash
 #SBATCH -A uqgroup
-#SBATCH -p gpu-a100-80
-#SBATCH --gres=gpu:1
-#SBATCH -c 8
-#SBATCH --mem=128G
+#SBATCH -p gpu
+#SBATCH --nodes=2
+#SBATCH --ntasks-per-node=1
+#SBATCH --gres=gpu:2
+#SBATCH -c 16
+#SBATCH --mem=192G
 #SBATCH -t 72:00:00
-#SBATCH -J gino_gauss_e4
+#SBATCH -J gino_fgn_e4_ddp_mn
 #SBATCH --array=0-3
-#SBATCH -o logs/out/gino_gauss_e4-%A_%a.out
-#SBATCH -e logs/err/gino_gauss_e4-%A_%a.err
+#SBATCH -o logs/out/gino_fgn_e4_ddp_mn-%A_%a.out
+#SBATCH -e logs/err/gino_fgn_e4_ddp_mn-%A_%a.err
+
+# Multi-node template for FGN DDP training.
+# Tune partition/constraints to your cluster and remove this comment block before production use.
 
 set -euo pipefail
 module purge
@@ -24,25 +29,30 @@ mkdir -p logs/out logs/err
 
 PROJECT_DIR="/home/$USER/GINO_Model/neuraloperator_no_physics"
 TRAIN_SCRIPT="${PROJECT_DIR}/scripts/train_gino_flood_train_rollout_animation_WV.py"
-TRAIN_CONFIG="${PROJECT_DIR}/config/gino_pluvial_flood_config_WV_depth_only_gaussian.yaml"
+TRAIN_CONFIG="${PROJECT_DIR}/config/gino_pluvial_flood_config_WV_depth_only.yaml"
 CONTAINER_PATH="/share/resources/containers/apptainer/archive/pytorch-2.0.1.sif"
 DATA_ROOT="/scratch/$USER/Data_Generation_UQ/Results/M40"
 
 ENSEMBLE_ID="${SLURM_ARRAY_TASK_ID}"
-# Always use fresh seed blocks per submitted array job by default.
-# Optional override: sbatch --export=ALL,BASE_SEED=<value> ...
-BASE_SEED_DEFAULT=$((100000 + SLURM_ARRAY_JOB_ID * 10))
+GPUS_PER_NODE=2
+WORLD_SIZE=$((SLURM_NNODES * GPUS_PER_NODE))
+BASE_SEED_DEFAULT=$((200000 + SLURM_ARRAY_JOB_ID * 10))
 BASE_SEED="${BASE_SEED:-${BASE_SEED_DEFAULT}}"
 SEED=$((BASE_SEED + ENSEMBLE_ID))
 SHORT_SHA="$(git -C "${PROJECT_DIR}" rev-parse --short HEAD)"
 
-# Keep model/training config identical to latest full Gaussian run; vary only seed/member ID.
-RUN_TAG_BASE="wv_m40_gaussianNLL_ep150_lr1e-4_gr0.1_h64_wd1e-4_${SHORT_SHA}"
-WANDB_GROUP="${RUN_TAG_BASE}_job${SLURM_ARRAY_JOB_ID}_sbase${BASE_SEED}"
-WANDB_NAME="${RUN_TAG_BASE}_ens${ENSEMBLE_ID}_seed${SEED}"
-CKPT_ROOT="${PROJECT_DIR}/scripts/checkpoints_WV_depth_only_gaussian"
-CKPT_DIR="${CKPT_ROOT}/${WANDB_GROUP}/ens${ENSEMBLE_ID}"
+RUN_GROUP="wdonly_fgn_ddpMN_ep300_lr2e-4_gr0.1_h64_wd5e-4_${SHORT_SHA}_job${SLURM_ARRAY_JOB_ID}_sbase${BASE_SEED}"
+CKPT_ROOT="${PROJECT_DIR}/scripts/checkpoints_WV_depth_only_300ep"
+RUN_TAG="${RUN_GROUP}_ens${ENSEMBLE_ID}"
+CKPT_DIR="${CKPT_ROOT}/${RUN_TAG}"
 mkdir -p "${CKPT_DIR}"
+
+WANDB_GROUP="${RUN_GROUP}"
+WANDB_NAME="${RUN_GROUP}_ens${ENSEMBLE_ID}_seed${SEED}_ws${WORLD_SIZE}_aradaptive"
+
+MASTER_ADDR="$(scontrol show hostnames "$SLURM_JOB_NODELIST" | head -n 1)"
+MASTER_PORT=$((14000 + SLURM_JOB_ID % 20000))
+export MASTER_ADDR MASTER_PORT
 
 HOST_CA_BUNDLE=""
 for cand in /etc/pki/tls/certs/ca-bundle.crt /etc/ssl/certs/ca-certificates.crt; do
@@ -65,23 +75,25 @@ for key_path in "${PROJECT_DIR}/config/wandb_api_key.txt" "/scratch/$USER/Data_G
   fi
 done
 
-echo "Training script: ${TRAIN_SCRIPT}"
-echo "Config:          ${TRAIN_CONFIG}"
-echo "Data root:       ${DATA_ROOT}"
-echo "Git commit:      $(git -C "${PROJECT_DIR}" rev-parse HEAD)"
-echo "Ensemble ID:     ${ENSEMBLE_ID}"
-echo "Base seed:       ${BASE_SEED}"
-echo "Seed:            ${SEED}"
-echo "Checkpoint dir:  ${CKPT_DIR}"
-echo "W&B group:       ${WANDB_GROUP}"
-echo "W&B name:        ${WANDB_NAME}"
+export OMP_NUM_THREADS=8
 
-apptainer run ${APPTAINER_BIND_ARGS} "${CONTAINER_PATH}" "${TRAIN_SCRIPT}" \
+srun --ntasks=$SLURM_NNODES apptainer exec ${APPTAINER_BIND_ARGS} "${CONTAINER_PATH}" \
+  torchrun \
+  --nnodes=${SLURM_NNODES} \
+  --nproc_per_node=${GPUS_PER_NODE} \
+  --rdzv_backend=c10d \
+  --rdzv_endpoint=${MASTER_ADDR}:${MASTER_PORT} \
+  "${TRAIN_SCRIPT}" \
   --config_path "${TRAIN_CONFIG}" \
   --data.root "${DATA_ROOT}" \
   --rollout_data.root "${DATA_ROOT}" \
+  --distributed.use_distributed true \
   --distributed.seed "${SEED}" \
   --wandb.log true \
   --wandb.group "${WANDB_GROUP}" \
   --wandb.name "${WANDB_NAME}" \
+  --opt.ar_gradient_mode adaptive \
+  --opt.ar_truncation_steps 1 \
+  --opt.amp_autocast true \
+  --opt.grad_accum_steps 1 \
   --checkpoint.save_dir "${CKPT_DIR}"

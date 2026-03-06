@@ -1343,6 +1343,7 @@ def _rollout_prediction_per_hydrograph(
     gaussian_mode: bool = False,
     gaussian_min_logvar: float = -9.0,
     gaussian_max_logvar: float = 4.0,
+    gaussian_state_update: str = "sample",
 ) -> None:
     """
     Evaluate per hydrograph using all reference simulations as ground-truth uncertainty.
@@ -1370,10 +1371,21 @@ def _rollout_prediction_per_hydrograph(
     use_ensemble = n_ens > 1 or n_models > 1
     member_model_indices = _build_member_model_indices(n_models, n_ens)
     model_counts = [member_model_indices.count(i) for i in range(n_models)]
+    gaussian_state_update = str(gaussian_state_update).strip().lower()
+    if gaussian_mode and gaussian_state_update not in {"sample", "mu"}:
+        raise ValueError(
+            "rollout.gaussian_state_update must be one of {'sample', 'mu'} "
+            f"for gaussian mode, got {gaussian_state_update!r}."
+        )
     logger.info(
         "Hydrograph rollout ensemble members=%d across models=%d with per-model counts=%s",
         n_ens, n_models, model_counts,
     )
+    if gaussian_mode:
+        logger.info(
+            "Gaussian rollout state update mode='%s' (predictions are still sampled for ensemble metrics).",
+            gaussian_state_update,
+        )
     if not use_ensemble:
         logger.warning(
             "Per-hydrograph UQ run without ensemble spread (single model, single member)."
@@ -1467,11 +1479,13 @@ def _rollout_prediction_per_hydrograph(
         for t in range(rollout_length):
             mu_stack: Optional[torch.Tensor] = None
             logvar_stack: Optional[torch.Tensor] = None
+            state_stack: Optional[torch.Tensor] = None
             with torch.no_grad():
                 if use_ensemble:
                     pred_members: List[torch.Tensor] = []
                     mu_members: List[torch.Tensor] = []
                     logvar_members: List[torch.Tensor] = []
+                    state_members: List[torch.Tensor] = []
                     for ens_idx in range(n_ens):
                         dyn_hist = current_dynamics[ens_idx]
                         model_idx = member_model_indices[ens_idx]
@@ -1495,6 +1509,7 @@ def _rollout_prediction_per_hydrograph(
                             pred_members.append(sampled)
                             mu_members.append(mu)
                             logvar_members.append(logvar)
+                            state_members.append(mu if gaussian_state_update == "mu" else sampled)
                         elif fgn_noise_dim is not None:
                             z = torch.randn(x.shape[0], fgn_noise_dim, device=device, dtype=x.dtype)
                             pred_members.append(
@@ -1519,6 +1534,7 @@ def _rollout_prediction_per_hydrograph(
                     if gaussian_mode:
                         mu_stack = torch.stack(mu_members, dim=0)
                         logvar_stack = torch.stack(logvar_members, dim=0)
+                        state_stack = torch.stack(state_members, dim=0)
                 else:
                     model = models[0]
                     dyn_flat = current_dynamic.permute(1, 0, 2).reshape(
@@ -1544,6 +1560,7 @@ def _rollout_prediction_per_hydrograph(
                         pred_stack = sampled.unsqueeze(0)
                         mu_stack = mu.unsqueeze(0)
                         logvar_stack = logvar.unsqueeze(0)
+                        state_stack = (mu if gaussian_state_update == "mu" else sampled).unsqueeze(0)
                     elif fgn_noise_dim is not None:
                         z = torch.randn(x.shape[0], fgn_noise_dim, device=device, dtype=x.dtype)
                         pred = model(
@@ -1704,14 +1721,16 @@ def _rollout_prediction_per_hydrograph(
                         )
 
             if use_ensemble:
+                update_stack = state_stack if (gaussian_mode and state_stack is not None) else pred_stack
                 for ens_idx in range(n_ens):
                     current_dynamics[ens_idx] = torch.cat(
-                        [current_dynamics[ens_idx][1:], pred_stack[ens_idx, 0].unsqueeze(0)],
+                        [current_dynamics[ens_idx][1:], update_stack[ens_idx, 0].unsqueeze(0)],
                         dim=0,
                     )
             else:
+                update_stack = state_stack if (gaussian_mode and state_stack is not None) else pred_stack
                 current_dynamic = torch.cat(
-                    [current_dynamic[1:], pred_stack[0, 0].unsqueeze(0)],
+                    [current_dynamic[1:], update_stack[0, 0].unsqueeze(0)],
                     dim=0,
                 )
             current_boundary = torch.cat(
@@ -1984,6 +2003,7 @@ def _rollout_prediction_generic(
     gaussian_mode: bool = False,
     gaussian_min_logvar: float = -9.0,
     gaussian_max_logvar: float = 4.0,
+    gaussian_state_update: str = "sample",
 ) -> None:
     """
     Generic rollout mode (single reference trajectory per run).
@@ -2010,10 +2030,21 @@ def _rollout_prediction_generic(
     use_ensemble = n_ens > 1 or n_models > 1
     member_model_indices = _build_member_model_indices(n_models, n_ens)
     model_counts = [member_model_indices.count(i) for i in range(n_models)]
+    gaussian_state_update = str(gaussian_state_update).strip().lower()
+    if gaussian_mode and gaussian_state_update not in {"sample", "mu"}:
+        raise ValueError(
+            "rollout.gaussian_state_update must be one of {'sample', 'mu'} "
+            f"for gaussian mode, got {gaussian_state_update!r}."
+        )
     logger.info(
         "Generic rollout ensemble members=%d across models=%d with per-model counts=%s",
         n_ens, n_models, model_counts,
     )
+    if gaussian_mode:
+        logger.info(
+            "Gaussian rollout state update mode='%s' (predictions are still sampled for ensemble metrics).",
+            gaussian_state_update,
+        )
 
     per_channel_rmse: Dict[str, List[np.ndarray]] = {name: [] for name in target_variables}
     per_channel_gaussian_nll: Dict[str, List[np.ndarray]] = {name: [] for name in target_variables}
@@ -2056,11 +2087,13 @@ def _rollout_prediction_generic(
         for t in range(rollout_length):
             mu_stack: Optional[torch.Tensor] = None
             logvar_stack: Optional[torch.Tensor] = None
+            state_stack: Optional[torch.Tensor] = None
             with torch.no_grad():
                 if use_ensemble:
                     pred_members: List[torch.Tensor] = []
                     mu_members: List[torch.Tensor] = []
                     logvar_members: List[torch.Tensor] = []
+                    state_members: List[torch.Tensor] = []
                     for ens_idx in range(n_ens):
                         dyn_hist = current_dynamics[ens_idx]
                         model_idx = member_model_indices[ens_idx]
@@ -2084,6 +2117,7 @@ def _rollout_prediction_generic(
                             pred_members.append(sampled)
                             mu_members.append(mu)
                             logvar_members.append(logvar)
+                            state_members.append(mu if gaussian_state_update == "mu" else sampled)
                         elif fgn_noise_dim is not None:
                             z = torch.randn(x.shape[0], fgn_noise_dim, device=device, dtype=x.dtype)
                             pred_members.append(
@@ -2108,6 +2142,7 @@ def _rollout_prediction_generic(
                     if gaussian_mode:
                         mu_stack = torch.stack(mu_members, dim=0)
                         logvar_stack = torch.stack(logvar_members, dim=0)
+                        state_stack = torch.stack(state_members, dim=0)
                         pred = mu_stack.mean(dim=0)
                     else:
                         pred = pred_stack.mean(dim=0)
@@ -2136,6 +2171,9 @@ def _rollout_prediction_generic(
                         pred_stack = sampled_single.unsqueeze(0)
                         mu_stack = pred.unsqueeze(0)
                         logvar_stack = logvar_single.unsqueeze(0)
+                        state_stack = (
+                            pred if gaussian_state_update == "mu" else sampled_single
+                        ).unsqueeze(0)
                     elif fgn_noise_dim is not None:
                         z = torch.randn(x.shape[0], fgn_noise_dim, device=device, dtype=x.dtype)
                         pred = model(
@@ -2207,15 +2245,17 @@ def _rollout_prediction_generic(
                     run_csi_03.append(_compute_csi(0.3, ch_pred, ch_gt))
 
             if use_ensemble:
+                update_stack = state_stack if (gaussian_mode and state_stack is not None) else pred_stack
                 for ens_idx in range(n_ens):
                     current_dynamics[ens_idx] = torch.cat(
-                        [current_dynamics[ens_idx][1:], pred_stack[ens_idx, 0].unsqueeze(0)],
+                        [current_dynamics[ens_idx][1:], update_stack[ens_idx, 0].unsqueeze(0)],
                         dim=0,
                     )
             else:
                 if gaussian_mode:
+                    update_stack = state_stack if state_stack is not None else pred_stack
                     current_dynamic = torch.cat(
-                        [current_dynamic[1:], sampled_single.squeeze(0).unsqueeze(0)], dim=0
+                        [current_dynamic[1:], update_stack[0, 0].unsqueeze(0)], dim=0
                     )
                 else:
                     current_dynamic = torch.cat(
@@ -2647,6 +2687,17 @@ def _parse_args() -> argparse.Namespace:
         action="store_true",
         help="Skip rollout evaluation.",
     )
+    parser.add_argument(
+        "--gaussian_state_update",
+        type=str,
+        choices=("sample", "mu"),
+        default=None,
+        help=(
+            "Gaussian rollout state transition update mode. "
+            "'sample' uses sampled next-state, 'mu' uses Gaussian mean. "
+            "If omitted, uses rollout.gaussian_state_update from config (default: sample)."
+        ),
+    )
     args, remaining = parser.parse_known_args()
     sys.argv = [sys.argv[0]] + remaining
     return args
@@ -3007,6 +3058,26 @@ def main() -> int:
         return 0
 
     rollout_n_ensemble = int(_opt(config, "rollout", "n_ensemble_samples", 1))
+    gaussian_state_update_cfg = str(
+        _opt(config, "rollout", "gaussian_state_update", "sample")
+    ).strip().lower()
+    gaussian_state_update = (
+        str(args.gaussian_state_update).strip().lower()
+        if args.gaussian_state_update is not None
+        else gaussian_state_update_cfg
+    )
+    if gaussian_mode and gaussian_state_update not in {"sample", "mu"}:
+        raise ValueError(
+            "Invalid Gaussian rollout state update mode. Expected one of "
+            "{'sample', 'mu'}, got "
+            f"{gaussian_state_update!r}."
+        )
+    if gaussian_mode:
+        logger.info(
+            "Gaussian rollout state update mode resolved to '%s' (%s).",
+            gaussian_state_update,
+            "CLI override" if args.gaussian_state_update is not None else "config",
+        )
     ens_per_model = _opt(config, "rollout", "n_ensemble_samples_per_model", None)
     if ens_per_model is not None:
         ens_per_model_int = int(ens_per_model)
@@ -3058,6 +3129,7 @@ def main() -> int:
                 gaussian_mode=gaussian_mode,
                 gaussian_min_logvar=_opt_float(config, "opt", "gaussian_min_logvar", -9.0),
                 gaussian_max_logvar=_opt_float(config, "opt", "gaussian_max_logvar", 4.0),
+                gaussian_state_update=gaussian_state_update,
             )
         else:
             _rollout_prediction_generic(
@@ -3078,6 +3150,7 @@ def main() -> int:
                 gaussian_mode=gaussian_mode,
                 gaussian_min_logvar=_opt_float(config, "opt", "gaussian_min_logvar", -9.0),
                 gaussian_max_logvar=_opt_float(config, "opt", "gaussian_max_logvar", 4.0),
+                gaussian_state_update=gaussian_state_update,
             )
     logger.info("Evaluation finished successfully.")
     return 0

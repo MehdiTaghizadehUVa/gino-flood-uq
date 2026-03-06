@@ -79,10 +79,17 @@ def load_training_state(save_dir: Union[str, Path],
         optimizer_pth = save_dir / "optimizer.pt"
         if optimizer_pth.exists():
             optimizer.load_state_dict(torch.load(optimizer_pth.absolute().as_posix(), map_location=map_location))
+            target_device = None
+            if dist.is_initialized():
+                target_device = f"cuda:{get_local_rank()}" if torch.cuda.is_available() else "cpu"
+            elif torch.cuda.is_available():
+                target_device = "cuda:0"
+            else:
+                target_device = "cpu"
             for s in optimizer.state.values():
                 for k, v in s.items():
                     if torch.is_tensor(v):
-                        s[k] = v.to("cuda:0")
+                        s[k] = v.to(target_device)
 
         else:
             print(f"Warning: requested to load optimizer state, but no saved optimizer state exists in {save_dir}.")

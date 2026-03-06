@@ -10,11 +10,13 @@ from functools import partial
 from logging.handlers import RotatingFileHandler
 import numpy as np
 import torch
+import torch.distributed as dist
 import wandb
 import matplotlib.pyplot as plt
 import matplotlib.animation as animation
 from pathlib import Path
 from torch.utils.data import Dataset, DataLoader, random_split, Subset
+from torch.utils.data.distributed import DistributedSampler
 from tqdm import tqdm
 import math
 from scipy.spatial import cKDTree
@@ -136,6 +138,35 @@ def _safe_float(val, default: float) -> float:
         return float(val)
     except (TypeError, ValueError):
         return float(default)
+
+
+def _safe_int(val, default: int) -> int:
+    """Convert config value to int with fallback for None/invalid inputs."""
+    if val is None:
+        return int(default)
+    try:
+        return int(val)
+    except (TypeError, ValueError):
+        return int(default)
+
+
+def _is_power_of_two(n: int) -> bool:
+    n = int(n)
+    return n > 0 and (n & (n - 1)) == 0
+
+
+def _cfg_get(obj, key, default):
+    """Safe config access for ConfigPipeline nodes that may raise KeyError on missing attributes."""
+    if obj is None:
+        return default
+    try:
+        return getattr(obj, key)
+    except (AttributeError, KeyError, TypeError):
+        pass
+    try:
+        return obj[key]
+    except (TypeError, KeyError, IndexError):
+        return default
 
 
 def dataloader_worker_init(worker_id: int, base_seed: int) -> None:
@@ -1294,6 +1325,10 @@ class FGNTrainer(Trainer):
         use_hazard_proxy_crps=False,
         hazard_proxy_crps_weight=0.15,
         ar_pooled_crps_gamma=1.0,
+        ar_gradient_mode="full",
+        ar_truncation_steps=1,
+        crps_sample_chunk_size=1,
+        use_activation_checkpointing=False,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -1312,25 +1347,94 @@ class FGNTrainer(Trainer):
         self.use_hazard_proxy_crps = bool(use_hazard_proxy_crps)
         self.hazard_proxy_crps_weight = float(hazard_proxy_crps_weight)
         self.ar_pooled_crps_gamma = float(ar_pooled_crps_gamma)
+        self.ar_gradient_mode = str(ar_gradient_mode).strip().lower()
+        if self.ar_gradient_mode not in {"full", "adaptive", "truncated"}:
+            raise ValueError(
+                f"Unknown opt.ar_gradient_mode={ar_gradient_mode!r}. Use 'full', 'adaptive', or 'truncated'."
+            )
+        self.ar_truncation_steps = max(1, int(ar_truncation_steps))
+        self.crps_sample_chunk_size = max(1, int(crps_sample_chunk_size))
+        self.use_activation_checkpointing = bool(use_activation_checkpointing)
+        self._force_truncated_next_batch = False
+        self._oom_fallback_count = 0
+
+    def _forward_fgn(self, kwargs_base, z):
+        if not self.use_activation_checkpointing:
+            if self.mixed_precision:
+                with torch.autocast(device_type=self.autocast_device_type):
+                    return self.model(**kwargs_base, ada_in=z)
+            return self.model(**kwargs_base, ada_in=z)
+
+        def _forward_ckpt(x, input_geom, latent_queries, output_queries, ada_in):
+            if self.mixed_precision:
+                with torch.autocast(device_type=self.autocast_device_type):
+                    return self.model(
+                        x=x,
+                        input_geom=input_geom,
+                        latent_queries=latent_queries,
+                        output_queries=output_queries,
+                        ada_in=ada_in,
+                    )
+            return self.model(
+                x=x,
+                input_geom=input_geom,
+                latent_queries=latent_queries,
+                output_queries=output_queries,
+                ada_in=ada_in,
+            )
+
+        return torch.utils.checkpoint.checkpoint(
+            _forward_ckpt,
+            kwargs_base["x"],
+            kwargs_base["input_geom"],
+            kwargs_base["latent_queries"],
+            kwargs_base["output_queries"],
+            z,
+            use_reentrant=False,
+        )
+
+    def retry_batch_after_oom(self, idx, sample, training_loss):
+        is_ar_active = self.ar_rollout_steps > 1 and self.epoch >= self.ar_finetune_start_epoch
+        if self.ar_gradient_mode != "adaptive" or not is_ar_active:
+            raise RuntimeError("OOM retry requested but opt.ar_gradient_mode is not 'adaptive'.")
+        self._force_truncated_next_batch = True
+        try:
+            loss, metrics = self.train_one_batch(idx, sample, training_loss)
+        finally:
+            self._force_truncated_next_batch = False
+        self._oom_fallback_count += 1
+        if isinstance(metrics, dict):
+            metrics["oom_fallback"] = 1.0
+        if self.logger is not None:
+            self.logger.warning(
+                "Adaptive AR OOM fallback triggered at epoch=%s batch=%s (total=%s).",
+                getattr(self, "epoch", -1),
+                idx,
+                self._oom_fallback_count,
+            )
+        return loss, metrics
 
     def _train_one_batch_single_step(self, idx, sample, training_loss):
         """Single-step FGN: n_crps forward passes with different z, loss on (pred_samples, y)."""
         n_crps = self.crps_n_samples
         outs = []
         batch_size = sample["x"].shape[0]
-        for _ in range(n_crps):
-            z = torch.randn(
-                batch_size, self.fgn_noise_dim, device=self.device, dtype=sample["x"].dtype
-            )
-            samp = {**sample, "ada_in": z}
-            if self.mixed_precision:
-                with torch.autocast(device_type=self.autocast_device_type):
-                    out = self.model(**samp)
-            else:
-                out = self.model(**samp)
-            if self.data_processor is not None:
-                out, sample = self.data_processor.postprocess(out, sample)
-            outs.append(out)
+        kwargs_base = {
+            "x": sample["x"],
+            "input_geom": sample["input_geom"],
+            "latent_queries": sample["latent_queries"],
+            "output_queries": sample["output_queries"],
+        }
+        for _start in range(0, n_crps, self.crps_sample_chunk_size):
+            chunk_n = min(self.crps_sample_chunk_size, n_crps - _start)
+            for _ in range(chunk_n):
+                z = torch.randn(
+                    batch_size, self.fgn_noise_dim, device=self.device, dtype=sample["x"].dtype
+                )
+                out = self._forward_fgn(kwargs_base, z)
+                if self.data_processor is not None:
+                    out, sample = self.data_processor.postprocess(out, sample)
+                outs.append(out)
         pred_samples = torch.stack(outs, dim=0)
         pred_mean = pred_samples.mean(dim=0)
         y_target = sample["y"]
@@ -1371,8 +1475,126 @@ class FGNTrainer(Trainer):
                 metrics["rel_l2"] = self.rel_l2_loss_fn(pred_mean, sample["y"])
         return loss, metrics
 
+    def _train_one_batch_ar(self, idx, sample, training_loss):
+        target_sequence = sample["target_sequence"]
+        boundary_sequence = sample["boundary_sequence"]
+        # Normalize to (B, T, ...) only if collate produced 5D (B, 1, T, n_cells, C)
+        if target_sequence.dim() == 5:
+            target_sequence = target_sequence.squeeze(1)
+        if boundary_sequence.dim() == 5:
+            boundary_sequence = boundary_sequence.squeeze(1)
+        max_available_steps = target_sequence.shape[1]
+        if self.ar_curriculum_epochs_per_step > 0:
+            ar_epoch_index = self.epoch - self.ar_finetune_start_epoch
+            curriculum_step_index = ar_epoch_index // self.ar_curriculum_epochs_per_step
+            effective_ar_steps = min(curriculum_step_index + 1, self.ar_rollout_steps)
+        else:
+            effective_ar_steps = self.ar_rollout_steps
+        n_ar_steps = min(effective_ar_steps, max_available_steps)
+        self.n_samples += sample["y"].shape[0] * n_ar_steps
+
+        gradient_mode = self.ar_gradient_mode
+        if gradient_mode == "adaptive":
+            gradient_mode = "truncated" if self._force_truncated_next_batch else "full"
+        detach_every = self.ar_truncation_steps if gradient_mode == "truncated" else 0
+
+        n_history = sample["dynamic"].shape[1]
+        dynamic_sliding = sample["dynamic"].clone()
+        boundary_sliding = sample["boundary"].clone()
+        static = sample["static"]
+        geom = sample["input_geom"]
+        q = sample["latent_queries"]
+        out_q = sample["output_queries"]
+
+        total_loss = 0.0
+        last_rel_l2 = None
+        n_crps = self.crps_n_samples
+        for s in range(n_ar_steps):
+            x = _build_x_from_dynamic_boundary(static, boundary_sliding, dynamic_sliding)
+            y_s = target_sequence[:, s]
+            if y_s.dim() == 2:
+                y_s = y_s.unsqueeze(0)
+            kwargs_base = {"input_geom": geom, "latent_queries": q, "output_queries": out_q, "x": x}
+            outs_s = []
+            for _start in range(0, n_crps, self.crps_sample_chunk_size):
+                chunk_n = min(self.crps_sample_chunk_size, n_crps - _start)
+                for _ in range(chunk_n):
+                    z = torch.randn(
+                        x.shape[0], self.fgn_noise_dim, device=self.device, dtype=x.dtype
+                    )
+                    out = self._forward_fgn(kwargs_base, z)
+                    if self.data_processor is not None:
+                        out, _ = self.data_processor.postprocess(out, {**sample, "y": y_s})
+                    outs_s.append(out)
+            pred_samples = torch.stack(outs_s, dim=0)
+            pred_mean = pred_samples.mean(dim=0)
+            if self.use_flood_crps_spatial_weights and "static" in sample and y_s.shape[-1] >= 3:
+                spatial_weights_s = get_flood_crps_weights(
+                    static,
+                    y_s,
+                    wet_threshold=self.flood_crps_wet_threshold,
+                    wet_smooth_scale=self.flood_crps_wet_smooth_scale,
+                    dry_weight_alpha=self.flood_crps_dry_weight_alpha,
+                    static_normalizer=self.static_normalizer,
+                )
+                loss_s = training_loss(pred_samples, y_s, spatial_weights=spatial_weights_s)
+            else:
+                loss_s = training_loss(pred_samples, y_s)
+            if self.crps_l2_weight > 0 and self.rel_l2_loss_fn is not None:
+                loss_s = loss_s + self.crps_l2_weight * self.rel_l2_loss_fn(pred_mean, y_s)
+            if self.use_hazard_proxy_crps and y_s.shape[-1] >= 3:
+                pred_pooled_s = compute_hazard_proxy_pooled(
+                    static,
+                    pred_samples,
+                    wet_threshold=self.flood_crps_wet_threshold,
+                    wet_smooth_scale=self.flood_crps_wet_smooth_scale,
+                    static_normalizer=self.static_normalizer,
+                )
+                y_pooled_s = compute_hazard_proxy_pooled(
+                    static,
+                    y_s,
+                    wet_threshold=self.flood_crps_wet_threshold,
+                    wet_smooth_scale=self.flood_crps_wet_smooth_scale,
+                    static_normalizer=self.static_normalizer,
+                )
+                gamma_s = self.ar_pooled_crps_gamma ** s
+                loss_s = loss_s + gamma_s * self.hazard_proxy_crps_weight * fair_crps_univariate(pred_pooled_s, y_pooled_s).mean()
+            total_loss = total_loss + loss_s
+            if self.rel_l2_loss_fn is not None:
+                with torch.no_grad():
+                    last_rel_l2 = self.rel_l2_loss_fn(pred_mean, y_s)
+            dynamic_sliding = torch.cat([dynamic_sliding[:, 1:], pred_mean.unsqueeze(1)], dim=1)
+            dynamic_sliding = dynamic_sliding[:, -n_history:]
+            if detach_every > 0 and ((s + 1) % detach_every == 0):
+                dynamic_sliding = dynamic_sliding.detach()
+            if boundary_sequence.dim() == 5:
+                time_dim = next(i for i, sz in enumerate(boundary_sequence.shape) if sz == max_available_steps)
+                sl = [slice(None)] * boundary_sequence.dim()
+                sl[time_dim] = slice(s, s + 1)
+                bc_step = boundary_sequence[tuple(sl)].squeeze(time_dim)
+            else:
+                bc_step = boundary_sequence[:, s : s + 1]
+            if bc_step.dim() == 3:
+                bc_step = bc_step.unsqueeze(1)
+            boundary_sliding = torch.cat([boundary_sliding[:, 1:], bc_step], dim=1)[:, -n_history:]
+
+        loss = total_loss / n_ar_steps
+        metrics = {"rel_l2": last_rel_l2 if last_rel_l2 is not None else torch.tensor(0.0, device=self.device)}
+        if idx == 0 and self.logger is not None:
+            self.logger.info(
+                "AR fine-tuning: epoch=%s, rollout_steps=%s (max=%s)%s, mode=%s%s.",
+                self.epoch,
+                n_ar_steps,
+                self.ar_rollout_steps,
+                " [curriculum]" if self.ar_curriculum_epochs_per_step > 0 else "",
+                gradient_mode,
+                f", detach_every={detach_every}" if detach_every > 0 else "",
+            )
+        return loss, metrics
+
     def train_one_batch(self, idx, sample, training_loss):
-        self.optimizer.zero_grad(set_to_none=True)
+        if not getattr(self, "_skip_internal_zero_grad", False):
+            self.optimizer.zero_grad(set_to_none=True)
         if self.regularizer:
             self.regularizer.reset()
         if self.data_processor is not None:
@@ -1387,112 +1609,7 @@ class FGNTrainer(Trainer):
             and sample["target_sequence"] is not None
         )
         if use_ar:
-            target_sequence = sample["target_sequence"]
-            boundary_sequence = sample["boundary_sequence"]
-            # Normalize to (B, T, ...) only if collate produced 5D (B, 1, T, n_cells, C)
-            if target_sequence.dim() == 5:
-                target_sequence = target_sequence.squeeze(1)
-            if boundary_sequence.dim() == 5:
-                boundary_sequence = boundary_sequence.squeeze(1)
-            max_available_steps = target_sequence.shape[1]
-            if self.ar_curriculum_epochs_per_step > 0:
-                ar_epoch_index = self.epoch - self.ar_finetune_start_epoch
-                curriculum_step_index = ar_epoch_index // self.ar_curriculum_epochs_per_step
-                effective_ar_steps = min(curriculum_step_index + 1, self.ar_rollout_steps)
-            else:
-                effective_ar_steps = self.ar_rollout_steps
-            n_ar_steps = min(effective_ar_steps, max_available_steps)
-            self.n_samples += sample["y"].shape[0] * n_ar_steps
-
-            n_history = sample["dynamic"].shape[1]
-            dynamic_sliding = sample["dynamic"].clone()
-            boundary_sliding = sample["boundary"].clone()
-            static = sample["static"]
-            geom = sample["input_geom"]
-            q = sample["latent_queries"]
-            out_q = sample["output_queries"]
-
-            total_loss = 0.0
-            last_rel_l2 = None
-            n_crps = self.crps_n_samples
-            for s in range(n_ar_steps):
-                x = _build_x_from_dynamic_boundary(static, boundary_sliding, dynamic_sliding)
-                y_s = target_sequence[:, s]
-                if y_s.dim() == 2:
-                    y_s = y_s.unsqueeze(0)
-                kwargs_base = {"input_geom": geom, "latent_queries": q, "output_queries": out_q, "x": x}
-                outs_s = []
-                for _ in range(n_crps):
-                    z = torch.randn(
-                        x.shape[0], self.fgn_noise_dim, device=self.device, dtype=x.dtype
-                    )
-                    if self.mixed_precision:
-                        with torch.autocast(device_type=self.autocast_device_type):
-                            out = self.model(**kwargs_base, ada_in=z)
-                    else:
-                        out = self.model(**kwargs_base, ada_in=z)
-                    if self.data_processor is not None:
-                        out, _ = self.data_processor.postprocess(out, {**sample, "y": y_s})
-                    outs_s.append(out)
-                pred_samples = torch.stack(outs_s, dim=0)
-                pred_mean = pred_samples.mean(dim=0)
-                if self.use_flood_crps_spatial_weights and "static" in sample and y_s.shape[-1] >= 3:
-                    spatial_weights_s = get_flood_crps_weights(
-                        static,
-                        y_s,
-                        wet_threshold=self.flood_crps_wet_threshold,
-                        wet_smooth_scale=self.flood_crps_wet_smooth_scale,
-                        dry_weight_alpha=self.flood_crps_dry_weight_alpha,
-                        static_normalizer=self.static_normalizer,
-                    )
-                    loss_s = training_loss(pred_samples, y_s, spatial_weights=spatial_weights_s)
-                else:
-                    loss_s = training_loss(pred_samples, y_s)
-                if self.crps_l2_weight > 0 and self.rel_l2_loss_fn is not None:
-                    loss_s = loss_s + self.crps_l2_weight * self.rel_l2_loss_fn(pred_mean, y_s)
-                if self.use_hazard_proxy_crps and y_s.shape[-1] >= 3:
-                    pred_pooled_s = compute_hazard_proxy_pooled(
-                        static,
-                        pred_samples,
-                        wet_threshold=self.flood_crps_wet_threshold,
-                        wet_smooth_scale=self.flood_crps_wet_smooth_scale,
-                        static_normalizer=self.static_normalizer,
-                    )
-                    y_pooled_s = compute_hazard_proxy_pooled(
-                        static,
-                        y_s,
-                        wet_threshold=self.flood_crps_wet_threshold,
-                        wet_smooth_scale=self.flood_crps_wet_smooth_scale,
-                        static_normalizer=self.static_normalizer,
-                    )
-                    gamma_s = self.ar_pooled_crps_gamma ** s
-                    loss_s = loss_s + gamma_s * self.hazard_proxy_crps_weight * fair_crps_univariate(pred_pooled_s, y_pooled_s).mean()
-                total_loss = total_loss + loss_s
-                if self.rel_l2_loss_fn is not None:
-                    with torch.no_grad():
-                        last_rel_l2 = self.rel_l2_loss_fn(pred_mean, y_s)
-                dynamic_sliding = torch.cat([dynamic_sliding[:, 1:], pred_mean.unsqueeze(1)], dim=1)
-                dynamic_sliding = dynamic_sliding[:, -n_history:]
-                if boundary_sequence.dim() == 5:
-                    time_dim = next(i for i, sz in enumerate(boundary_sequence.shape) if sz == max_available_steps)
-                    sl = [slice(None)] * boundary_sequence.dim()
-                    sl[time_dim] = slice(s, s + 1)
-                    bc_step = boundary_sequence[tuple(sl)].squeeze(time_dim)
-                else:
-                    bc_step = boundary_sequence[:, s : s + 1]
-                if bc_step.dim() == 3:
-                    bc_step = bc_step.unsqueeze(1)
-                boundary_sliding = torch.cat([boundary_sliding[:, 1:], bc_step], dim=1)[:, -n_history:]
-            loss = total_loss / n_ar_steps
-            metrics = {"rel_l2": last_rel_l2 if last_rel_l2 is not None else torch.tensor(0.0, device=self.device)}
-            if idx == 0 and self.logger is not None:
-                self.logger.info(
-                    "AR fine-tuning: epoch=%s, rollout_steps=%s (max=%s)%s, loss averaged over steps, backprop through rollout.",
-                    self.epoch,
-                    n_ar_steps,
-                    self.ar_rollout_steps,
-                    " [curriculum]" if self.ar_curriculum_epochs_per_step > 0 else "",
-                )
+            loss, metrics = self._train_one_batch_ar(idx, sample, training_loss)
         else:
             self.n_samples += sample["y"].shape[0]
             loss, metrics = self._train_one_batch_single_step(idx, sample, training_loss)
@@ -1592,7 +1709,8 @@ class GaussianNLLTrainer(Trainer):
         return loss, metrics
 
     def train_one_batch(self, idx, sample, training_loss):
-        self.optimizer.zero_grad(set_to_none=True)
+        if not getattr(self, "_skip_internal_zero_grad", False):
+            self.optimizer.zero_grad(set_to_none=True)
         if self.regularizer:
             self.regularizer.reset()
         if self.data_processor is not None:
@@ -2293,15 +2411,19 @@ def main():
     config, device, is_logger = load_config_and_setup()
 
     # Logging: file (rotating) + console, config-driven level and path
-    log_level = getattr(config, "log_level", "INFO")
-    log_file = getattr(config, "log_file", None)
+    log_level = _cfg_get(config, "log_level", "INFO")
+    log_file = _cfg_get(config, "log_file", None)
     if log_file is not None:
         log_path = Path(log_file)
         if not log_path.is_absolute():
-            save_dir = getattr(config.checkpoint, "save_dir", ".")
+            save_dir = _cfg_get(config.checkpoint, "save_dir", ".")
+            if save_dir is None:
+                save_dir = "."
             log_path = Path(save_dir) / log_path
     else:
-        save_dir = getattr(config.checkpoint, "save_dir", ".")
+        save_dir = _cfg_get(config.checkpoint, "save_dir", ".")
+        if save_dir is None:
+            save_dir = "."
         log_path = Path(save_dir) / "training.log"
     logger = setup_logging(
         log_level=log_level,
@@ -2311,10 +2433,20 @@ def main():
     logger.info("Config loaded; device=%s", device)
 
     # Reproducibility: set all RNG seeds and deterministic CuDNN (override setup() for full reproducibility)
-    seed = getattr(config.distributed, "seed", 123)
-    deterministic = getattr(config, "deterministic", True)
-    set_seed(seed, deterministic=deterministic)
-    logger.info("Random seed set to %s (deterministic=%s)", seed, deterministic)
+    seed = _cfg_get(config.distributed, "seed", 123)
+    deterministic = _cfg_get(config, "deterministic", True)
+    global_rank = dist.get_rank() if dist.is_available() and dist.is_initialized() else 0
+    world_size = dist.get_world_size() if dist.is_available() and dist.is_initialized() else 1
+    effective_seed = int(seed) + int(global_rank)
+    set_seed(effective_seed, deterministic=deterministic)
+    logger.info(
+        "Random seed set to %s (base=%s, rank=%s, world_size=%s, deterministic=%s)",
+        effective_seed,
+        seed,
+        global_rank,
+        world_size,
+        deterministic,
+    )
 
     # Possibly adjust FNO modes
     if hasattr(config.data, "resolution") and (config.data.resolution < config.gino.fno_n_modes[0]):
@@ -2324,7 +2456,7 @@ def main():
     wandb_init_args = {}
     if config.wandb.log and is_logger:
         wandb.login(key=get_wandb_api_key())
-        wandb_name = config.wandb.name if config.wandb.name else f"flood-run_{getattr(config.data, 'resolution', 64)}"
+        wandb_name = config.wandb.name if config.wandb.name else f"flood-run_{_cfg_get(config.data, 'resolution', 64)}"
         wandb_init_args = dict(
             config=config,
             name=wandb_name,
@@ -2338,18 +2470,18 @@ def main():
         wandb.init(**wandb_init_args)
 
     # ---------------------- Setup training dataset (HDF only) -----------------------------
-    skip_before_timestep = getattr(config.data, "skip_before_timestep", 0)
-    noise_type = getattr(config.data, "noise_type", "none")
-    noise_std = getattr(config.data, "noise_std", None)
-    static_text_files = getattr(config.data, "static_text_files", ["M40_CS.txt", "M40_CU.txt", "M40_FA.txt"])
+    skip_before_timestep = _cfg_get(config.data, "skip_before_timestep", 0)
+    noise_type = _cfg_get(config.data, "noise_type", "none")
+    noise_std = _cfg_get(config.data, "noise_std", None)
+    static_text_files = _cfg_get(config.data, "static_text_files", ["M40_CS.txt", "M40_CU.txt", "M40_FA.txt"])
     n_history = config.data.n_history
-    target_variables = parse_target_variables(getattr(config.data, "target_variables", ["wd", "vx", "vy"]))
+    target_variables = parse_target_variables(_cfg_get(config.data, "target_variables", ["wd", "vx", "vy"]))
     n_target_channels = len(target_variables)
     # Optionally (over)write train.txt with all existing *\.hdf run IDs in data.root
-    if getattr(config.data, "write_train_txt", False):
+    if _cfg_get(config.data, "write_train_txt", False):
         run_ids = write_train_txt_from_data_root(
             config.data.root,
-            train_txt=getattr(config.data, "train_txt", "train.txt"),
+            train_txt=_cfg_get(config.data, "train_txt", "train.txt"),
             hdf_suffix=".hdf",
         )
         logger.info("Wrote train.txt with %s run IDs from %s", len(run_ids), config.data.root)
@@ -2359,13 +2491,13 @@ def main():
     if hasattr(config, "gino"):
         setattr(config.gino, "data_channels", data_channels)
         setattr(config.gino, "out_channels", n_target_channels)
-    ar_rollout_steps = max(1, int(getattr(config.opt, "ar_rollout_steps", 1)))
+    ar_rollout_steps = max(1, _safe_int(_cfg_get(config.opt, "ar_rollout_steps", 1), 1))
     full_dataset = FloodDatasetHDF(
         data_root=config.data.root,
         n_history=config.data.n_history,
-        query_res=getattr(config.data, "query_res", [64, 64]),
+        query_res=_cfg_get(config.data, "query_res", [64, 64]),
         run_ids=None,
-        train_txt=getattr(config.data, "train_txt", "train.txt"),
+        train_txt=_cfg_get(config.data, "train_txt", "train.txt"),
         static_text_files=static_text_files,
         hdf_suffix=".hdf",
         raise_on_smaller=True,
@@ -2375,7 +2507,7 @@ def main():
         ar_rollout_steps=ar_rollout_steps,
         target_variables=target_variables,
     )
-    n_samples_max = getattr(config.data, "n_samples_max", None)
+    n_samples_max = _cfg_get(config.data, "n_samples_max", None)
     if n_samples_max is not None:
         total_avail = len(full_dataset)
         n_samples_max = int(n_samples_max)  # CLI may pass str
@@ -2395,7 +2527,7 @@ def main():
     # No leakage: normalizers are fit only on train_data_raw. Test data is transformed with
     # train-fit stats in NormalizedDatasetOnTheFly; evaluation uses model.eval() and torch.no_grad().
     # Normalizers: load from disk if path exists and is set; otherwise fit and optionally save
-    normalizer_path = getattr(config.data, "normalizer_path", None)
+    normalizer_path = _cfg_get(config.data, "normalizer_path", None)
     if normalizer_path is not None:
         normalizer_path = Path(normalizer_path)
         if not normalizer_path.is_absolute():
@@ -2404,7 +2536,7 @@ def main():
         normalizers = load_normalizers(normalizer_path, device=None)
         logger.info("Loaded normalizers from %s", normalizer_path)
     else:
-        norm_chunk_size = getattr(config.data, "normalizer_chunk_size", 10000)
+        norm_chunk_size = _cfg_get(config.data, "normalizer_chunk_size", 10000)
         normalizers = fit_normalizers_streaming(
             train_data_raw, chunk_size=norm_chunk_size, expect_target=True
         )
@@ -2415,13 +2547,7 @@ def main():
     train_normalized_dataset = NormalizedDatasetOnTheFly(
         train_data_raw, normalizers, query_res=config.data.query_res
     )
-    num_workers = getattr(config.data, "num_workers", 0)
-
-    def _cfg_get(obj, key, default):
-        try:
-            return getattr(obj, key)
-        except (AttributeError, KeyError):
-            return default
+    num_workers = _cfg_get(config.data, "num_workers", 0)
 
     pin_memory = bool(_cfg_get(config.data, "pin_memory", torch.cuda.is_available()))
     persistent_workers = bool(_cfg_get(config.data, "persistent_workers", True))
@@ -2438,7 +2564,9 @@ def main():
         )
         persistent_workers = False
 
-    worker_init_fn = partial(dataloader_worker_init, base_seed=seed) if num_workers > 0 else None
+    use_distributed = bool(_cfg_get(config.distributed, "use_distributed", False)) and dist.is_available() and dist.is_initialized()
+    worker_seed_base = int(seed) + int(global_rank) * 100_000
+    worker_init_fn = partial(dataloader_worker_init, base_seed=worker_seed_base) if num_workers > 0 else None
     loader_kwargs = {
         "num_workers": num_workers,
         "pin_memory": pin_memory,
@@ -2448,11 +2576,23 @@ def main():
         loader_kwargs["persistent_workers"] = persistent_workers
         loader_kwargs["prefetch_factor"] = prefetch_factor
 
+    train_sampler = None
+    if use_distributed:
+        train_sampler = DistributedSampler(
+            train_normalized_dataset,
+            num_replicas=world_size,
+            rank=global_rank,
+            shuffle=True,
+            seed=int(seed),
+            drop_last=False,
+        )
+
     train_loader = DataLoader(
         train_normalized_dataset,
         batch_size=config.data.batch_size,
-        shuffle=True,
-        generator=make_dataloader_generator(seed),
+        shuffle=(train_sampler is None),
+        sampler=train_sampler,
+        generator=make_dataloader_generator(effective_seed) if train_sampler is None else None,
         **loader_kwargs,
     )
 
@@ -2468,8 +2608,16 @@ def main():
     )
 
     logger.info(
-        "Data: device=%s, train_samples=%s, test_samples=%s, batch_size=%s, noise=%s std=%s",
-        device, train_sz, len(test_normalized_dataset), config.data.batch_size, noise_type, noise_std,
+        "Data: device=%s, train_samples=%s, test_samples=%s, batch_size=%s, noise=%s std=%s, distributed=%s, rank=%s/%s",
+        device,
+        train_sz,
+        len(test_normalized_dataset),
+        config.data.batch_size,
+        noise_type,
+        noise_std,
+        use_distributed,
+        global_rank,
+        world_size,
     )
 
     # Model
@@ -2483,25 +2631,25 @@ def main():
     if config.opt.scheduler == 'ReduceLROnPlateau':
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
             optimizer,
-            factor=getattr(config.opt, "gamma", 0.5),
-            patience=getattr(config.opt, "scheduler_patience", 5),
-            mode=getattr(config.opt, "scheduler_mode", "min"),
-            threshold=getattr(config.opt, "scheduler_threshold", 1e-4),
-            threshold_mode=getattr(config.opt, "scheduler_threshold_mode", "rel"),
-            cooldown=getattr(config.opt, "scheduler_cooldown", 0),
-            min_lr=getattr(config.opt, "scheduler_min_lr", 0.0),
+            factor=_cfg_get(config.opt, "gamma", 0.5),
+            patience=_cfg_get(config.opt, "scheduler_patience", 5),
+            mode=_cfg_get(config.opt, "scheduler_mode", "min"),
+            threshold=_cfg_get(config.opt, "scheduler_threshold", 1e-4),
+            threshold_mode=_cfg_get(config.opt, "scheduler_threshold_mode", "rel"),
+            cooldown=_cfg_get(config.opt, "scheduler_cooldown", 0),
+            min_lr=_cfg_get(config.opt, "scheduler_min_lr", 0.0),
         )
     elif config.opt.scheduler == 'CosineAnnealingLR':
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
             optimizer,
-            T_max=getattr(config.opt, "scheduler_T_max", 200),
-            eta_min=getattr(config.opt, "scheduler_eta_min", 0.0),
+            T_max=_cfg_get(config.opt, "scheduler_T_max", 200),
+            eta_min=_cfg_get(config.opt, "scheduler_eta_min", 0.0),
         )
     elif config.opt.scheduler == 'StepLR':
         scheduler = torch.optim.lr_scheduler.StepLR(
             optimizer,
-            step_size=getattr(config.opt, "step_size", 50),
-            gamma=getattr(config.opt, "gamma", 0.5),
+            step_size=_cfg_get(config.opt, "step_size", 50),
+            gamma=_cfg_get(config.opt, "gamma", 0.5),
         )
     else:
         raise ValueError(f"Unknown scheduler {config.opt.scheduler}")
@@ -2509,22 +2657,22 @@ def main():
     # Loss (LpLoss(d=2,p=2): relative L2 by default; use 'l2_abs' if relative plateaus)
     # reduction='sum' so train_err = sum(loss)/n_samples = mean per sample (same scale as test_l2)
     l2loss = LpLoss(d=2, p=2)
-    use_fgn = bool(getattr(config.gino, "use_fgn_noise", False))
-    output_distribution = str(getattr(config.gino, "output_distribution", "deterministic")).strip().lower()
+    use_fgn = bool(_cfg_get(config.gino, "use_fgn_noise", False))
+    output_distribution = str(_cfg_get(config.gino, "output_distribution", "deterministic")).strip().lower()
     if output_distribution not in {"deterministic", "gaussian"}:
         raise ValueError(
             f"Unknown gino.output_distribution={output_distribution!r}. "
             "Use 'deterministic' or 'gaussian'."
         )
     setattr(config.gino, "output_distribution", output_distribution)
-    training_loss_name = str(getattr(config.opt, "training_loss", "l2")).strip().lower()
+    training_loss_name = str(_cfg_get(config.opt, "training_loss", "l2")).strip().lower()
     setattr(config.opt, "training_loss", training_loss_name)
 
     if training_loss_name == "gaussian_nll" and output_distribution != "gaussian":
         raise ValueError(
             "training_loss='gaussian_nll' requires gino.output_distribution='gaussian'."
         )
-    fno_norm_mode = getattr(config.gino, "fno_norm", None)
+    fno_norm_mode = _cfg_get(config.gino, "fno_norm", None)
     fno_norm_mode = None if fno_norm_mode is None else str(fno_norm_mode).strip().lower()
     if output_distribution == "gaussian" and use_fgn:
         raise ValueError(
@@ -2561,8 +2709,8 @@ def main():
                 stacklevel=2,
             )
     elif training_loss_name == "crps" and use_fgn:
-        crps_n_samples = max(2, int(getattr(config.opt, "crps_n_samples", 2)))
-        crps_channel_weights = getattr(config.opt, "crps_channel_weights", None)
+        crps_n_samples = max(2, _safe_int(_cfg_get(config.opt, "crps_n_samples", 2), 2))
+        crps_channel_weights = _cfg_get(config.opt, "crps_channel_weights", None)
         train_loss_fn = CRPSLoss(
             n_samples=crps_n_samples,
             channel_weights=crps_channel_weights,
@@ -2570,12 +2718,12 @@ def main():
         )
     elif training_loss_name == "gaussian_nll":
         train_loss_fn = GaussianNLLLoss(
-            channel_weights=getattr(config.opt, "crps_channel_weights", None),
+            channel_weights=_cfg_get(config.opt, "crps_channel_weights", None),
             reduction="mean",
-            min_logvar=_safe_float(getattr(config.opt, "gaussian_min_logvar", -9.0), -9.0),
-            max_logvar=_safe_float(getattr(config.opt, "gaussian_max_logvar", 4.0), 4.0),
+            min_logvar=_safe_float(_cfg_get(config.opt, "gaussian_min_logvar", -9.0), -9.0),
+            max_logvar=_safe_float(_cfg_get(config.opt, "gaussian_max_logvar", 4.0), 4.0),
             logvar_reg_weight=_safe_float(
-                getattr(config.opt, "gaussian_logvar_reg_weight", 1e-6), 1e-6
+                _cfg_get(config.opt, "gaussian_logvar_reg_weight", 1e-6), 1e-6
             ),
         )
     elif training_loss_name == "l2_abs":
@@ -2605,16 +2753,16 @@ def main():
         eval_losses = {
             "l2": test_loss_fn,
             "gaussian_nll": GaussianNLLLoss(
-                channel_weights=getattr(config.opt, "crps_channel_weights", None),
+                channel_weights=_cfg_get(config.opt, "crps_channel_weights", None),
                 reduction="mean",
-                min_logvar=_safe_float(getattr(config.opt, "gaussian_min_logvar", -9.0), -9.0),
-                max_logvar=_safe_float(getattr(config.opt, "gaussian_max_logvar", 4.0), 4.0),
+                min_logvar=_safe_float(_cfg_get(config.opt, "gaussian_min_logvar", -9.0), -9.0),
+                max_logvar=_safe_float(_cfg_get(config.opt, "gaussian_max_logvar", 4.0), 4.0),
                 logvar_reg_weight=0.0,
             ),
         }
     elif use_fgn and training_loss_name == "crps":
-        crps_n_samples = max(2, int(getattr(config.opt, "crps_n_samples", 2)))
-        crps_channel_weights = getattr(config.opt, "crps_channel_weights", None)
+        crps_n_samples = max(2, _safe_int(_cfg_get(config.opt, "crps_n_samples", 2), 2))
+        crps_channel_weights = _cfg_get(config.opt, "crps_channel_weights", None)
         eval_losses = {
             "l2": test_loss_fn,
             "crps": CRPSLoss(n_samples=crps_n_samples, channel_weights=crps_channel_weights, reduction="mean"),
@@ -2624,7 +2772,7 @@ def main():
 
     # DataProcessor: training loss is always in normalized space (pred and y from dataset are normalized).
     # Eval: when inverse_test=True, pred and y are inverse-transformed so test_l2/test_crps are in physical space.
-    inverse_test = getattr(config, "inverse_test", True)
+    inverse_test = _cfg_get(config, "inverse_test", True)
     data_processor = FloodGINODataProcessor(
         device=device,
         target_norm=normalizers.get("target", None),
@@ -2634,19 +2782,39 @@ def main():
     data_processor.wrap(model)
 
     # Trainer (FGN: two forwards + CRPS per batch)
-    fgn_noise_dim = getattr(config.gino, "fgn_noise_dim", 32)  # used for rollout ensemble when use_fgn
-    use_progress_bar = getattr(config, "use_progress_bar", True)
-    scheduler_monitor = getattr(config.opt, "scheduler_monitor", "train_err")
-    eval_interval = getattr(config.wandb, "eval_interval", 1)
+    fgn_noise_dim = _cfg_get(config.gino, "fgn_noise_dim", 32)  # used for rollout ensemble when use_fgn
+    use_progress_bar = _cfg_get(config, "use_progress_bar", True)
+    scheduler_monitor = _cfg_get(config.opt, "scheduler_monitor", "train_err")
+    eval_interval = _cfg_get(config.wandb, "eval_interval", 1)
+    mixed_precision = bool(_cfg_get(config.opt, "amp_autocast", False))
+    query_res = _cfg_get(config.data, "query_res", None)
+    if query_res is None:
+        query_res = [_cfg_get(config.data, "resolution", None), _cfg_get(config.data, "resolution", None)]
+    try:
+        spatial_dims = [int(query_res[0]), int(query_res[1])]
+    except Exception:
+        spatial_dims = []
+    if mixed_precision and spatial_dims and any(not _is_power_of_two(d) for d in spatial_dims):
+        logger.warning(
+            "Disabling AMP autocast: cuFFT half-precision requires power-of-two spatial sizes, "
+            "but got query_res=%s.",
+            spatial_dims,
+        )
+        mixed_precision = False
+    grad_accum_steps = max(1, _safe_int(_cfg_get(config.opt, "grad_accum_steps", 1), 1))
     if use_fgn and training_loss_name == "crps":
-        crps_l2_weight = getattr(config.opt, "crps_l2_weight", 0.5)
-        ar_finetune_start_epoch = max(0, int(getattr(config.opt, "ar_finetune_start_epoch", 0)))
-        ar_curriculum_epochs_per_step = max(0, int(getattr(config.opt, "ar_curriculum_epochs_per_step", 0)))
-        use_flood_crps_spatial_weights = getattr(config.opt, "flood_crps_spatial_weights", False)
-        flood_crps_wet_threshold = getattr(config.opt, "wet_threshold", 0.01)
-        flood_crps_wet_smooth_scale = getattr(config.opt, "wet_smooth_scale", 0.02)
-        flood_crps_dry_weight_alpha = getattr(config.opt, "dry_weight_alpha", 0.1)
-        crps_n_samples = max(2, int(getattr(config.opt, "crps_n_samples", 2)))
+        crps_l2_weight = _cfg_get(config.opt, "crps_l2_weight", 0.5)
+        ar_finetune_start_epoch = max(0, _safe_int(_cfg_get(config.opt, "ar_finetune_start_epoch", 0), 0))
+        ar_curriculum_epochs_per_step = max(0, _safe_int(_cfg_get(config.opt, "ar_curriculum_epochs_per_step", 0), 0))
+        use_flood_crps_spatial_weights = _cfg_get(config.opt, "flood_crps_spatial_weights", False)
+        flood_crps_wet_threshold = _cfg_get(config.opt, "wet_threshold", 0.01)
+        flood_crps_wet_smooth_scale = _cfg_get(config.opt, "wet_smooth_scale", 0.02)
+        flood_crps_dry_weight_alpha = _cfg_get(config.opt, "dry_weight_alpha", 0.1)
+        crps_n_samples = max(2, _safe_int(_cfg_get(config.opt, "crps_n_samples", 2), 2))
+        ar_gradient_mode = str(_cfg_get(config.opt, "ar_gradient_mode", "adaptive")).strip().lower()
+        ar_truncation_steps = max(1, _safe_int(_cfg_get(config.opt, "ar_truncation_steps", 1), 1))
+        crps_sample_chunk_size = max(1, _safe_int(_cfg_get(config.opt, "crps_sample_chunk_size", 1), 1))
+        use_activation_checkpointing = bool(_cfg_get(config.opt, "use_activation_checkpointing", False))
         trainer = FGNTrainer(
             model=model,
             n_epochs=config.opt.n_epochs,
@@ -2658,6 +2826,9 @@ def main():
             use_progress_bar=use_progress_bar,
             scheduler_monitor=scheduler_monitor,
             eval_interval=eval_interval,
+            use_distributed=use_distributed,
+            mixed_precision=mixed_precision,
+            grad_accum_steps=grad_accum_steps,
             fgn_noise_dim=fgn_noise_dim,
             crps_n_samples=crps_n_samples,
             rel_l2_loss_fn=l2loss,
@@ -2670,9 +2841,13 @@ def main():
             flood_crps_wet_smooth_scale=flood_crps_wet_smooth_scale,
             flood_crps_dry_weight_alpha=flood_crps_dry_weight_alpha,
             static_normalizer=normalizers.get("static") if use_flood_crps_spatial_weights else None,
-            use_hazard_proxy_crps=getattr(config.opt, "hazard_proxy_crps", False),
-            hazard_proxy_crps_weight=getattr(config.opt, "hazard_proxy_crps_weight", 0.15),
-            ar_pooled_crps_gamma=getattr(config.opt, "ar_pooled_crps_gamma", 1.0),
+            use_hazard_proxy_crps=_cfg_get(config.opt, "hazard_proxy_crps", False),
+            hazard_proxy_crps_weight=_cfg_get(config.opt, "hazard_proxy_crps_weight", 0.15),
+            ar_pooled_crps_gamma=_cfg_get(config.opt, "ar_pooled_crps_gamma", 1.0),
+            ar_gradient_mode=ar_gradient_mode,
+            ar_truncation_steps=ar_truncation_steps,
+            crps_sample_chunk_size=crps_sample_chunk_size,
+            use_activation_checkpointing=use_activation_checkpointing,
         )
     elif output_distribution == "gaussian" and training_loss_name == "gaussian_nll":
         trainer = GaussianNLLTrainer(
@@ -2686,12 +2861,15 @@ def main():
             use_progress_bar=use_progress_bar,
             scheduler_monitor=scheduler_monitor,
             eval_interval=eval_interval,
+            use_distributed=use_distributed,
+            mixed_precision=mixed_precision,
+            grad_accum_steps=grad_accum_steps,
             rel_l2_loss_fn=l2loss,
-            ar_finetune_start_epoch=max(0, int(getattr(config.opt, "ar_finetune_start_epoch", 0))),
+            ar_finetune_start_epoch=max(0, _safe_int(_cfg_get(config.opt, "ar_finetune_start_epoch", 0), 0)),
             ar_rollout_steps=ar_rollout_steps,
-            ar_curriculum_epochs_per_step=max(0, int(getattr(config.opt, "ar_curriculum_epochs_per_step", 0))),
-            gaussian_min_logvar=_safe_float(getattr(config.opt, "gaussian_min_logvar", -9.0), -9.0),
-            gaussian_max_logvar=_safe_float(getattr(config.opt, "gaussian_max_logvar", 4.0), 4.0),
+            ar_curriculum_epochs_per_step=max(0, _safe_int(_cfg_get(config.opt, "ar_curriculum_epochs_per_step", 0), 0)),
+            gaussian_min_logvar=_safe_float(_cfg_get(config.opt, "gaussian_min_logvar", -9.0), -9.0),
+            gaussian_max_logvar=_safe_float(_cfg_get(config.opt, "gaussian_max_logvar", 4.0), 4.0),
         )
     else:
         trainer = Trainer(
@@ -2705,12 +2883,30 @@ def main():
             use_progress_bar=use_progress_bar,
             scheduler_monitor=scheduler_monitor,
             eval_interval=eval_interval,
+            use_distributed=use_distributed,
+            mixed_precision=mixed_precision,
+            grad_accum_steps=grad_accum_steps,
         )
+    logger.info(
+        "Trainer settings: distributed=%s, mixed_precision=%s, grad_accum_steps=%s%s",
+        use_distributed,
+        mixed_precision,
+        grad_accum_steps,
+        (
+            f", ar_gradient_mode={_cfg_get(config.opt, 'ar_gradient_mode', 'adaptive')}, "
+            f"ar_truncation_steps={_cfg_get(config.opt, 'ar_truncation_steps', 1)}, "
+            f"use_activation_checkpointing={_cfg_get(config.opt, 'use_activation_checkpointing', False)}"
+            if use_fgn and training_loss_name == "crps"
+            else ""
+        ),
+    )
 
     # Optional: verify gradient flow and overfit one batch (set verify_training: true in config)
     try:
         do_verify = config.verify_training
     except (KeyError, AttributeError):
+        do_verify = False
+    if use_distributed and global_rank != 0:
         do_verify = False
     if do_verify:
         logger.info("--- Training verification ---")
@@ -2737,7 +2933,7 @@ def main():
     available_eval_metrics = [f"test_{k}" for k in eval_losses.keys()]
     configured_best_metric = _cfg_get(config.checkpoint, "save_best_metric", None)
     if configured_best_metric is not None:
-        save_best_metric = str(configured_best_metric)
+        save_best_metric = str(configured_best_metric).strip() or None
     else:
         if output_distribution == "gaussian" and training_loss_name == "gaussian_nll":
             preferred_metric = "test_gaussian_nll"
@@ -2765,6 +2961,11 @@ def main():
             save_best_metric,
         )
 
+    checkpoint_save_dir = _cfg_get(config.checkpoint, "save_dir", ".")
+    if checkpoint_save_dir is None:
+        checkpoint_save_dir = "."
+    checkpoint_resume_dir = _cfg_get(config.checkpoint, "resume_from_dir", None)
+
     trainer.train(
         train_loader=train_loader,
         test_loaders={'test': test_loader},
@@ -2775,12 +2976,12 @@ def main():
         regularizer=None,
         save_every=save_every,
         save_best=save_best_metric,
-        save_dir=config.checkpoint.save_dir,
-        resume_from_dir=config.checkpoint.resume_from_dir
+        save_dir=checkpoint_save_dir,
+        resume_from_dir=checkpoint_resume_dir
     )
 
     # ----------------- Optional: rollout evaluation on new data -----------------------
-    run_rollout = getattr(config.rollout, "run_after_training", False)
+    run_rollout = _cfg_get(config.rollout, "run_after_training", False)
     if not run_rollout:
         if is_logger:
             logger.info("Skipping rollout (run_after_training: false).")
@@ -2800,7 +3001,7 @@ def main():
 
     rollout_length = config.data.rollout_length
     history_steps = config.data.n_history
-    rollout_skip_before_timestep = getattr(config.data, "skip_before_timestep", 0)
+    rollout_skip_before_timestep = _cfg_get(config.data, "skip_before_timestep", 0)
 
     rollout_data_root = config.rollout_data.root
     rollout_test_dataset = FloodRolloutTestDatasetHDF(
@@ -2808,8 +3009,8 @@ def main():
         n_history=history_steps,
         rollout_length=rollout_length,
         run_ids=None,
-        test_txt=getattr(config.rollout_data, "test_txt", "test.txt"),
-        static_text_files=getattr(config.rollout_data, "static_text_files", ["M40_CS.txt", "M40_CU.txt", "M40_FA.txt"]),
+        test_txt=_cfg_get(config.rollout_data, "test_txt", "test.txt"),
+        static_text_files=_cfg_get(config.rollout_data, "static_text_files", ["M40_CS.txt", "M40_CU.txt", "M40_FA.txt"]),
         hdf_suffix=".hdf",
         raise_on_smaller=True,
         skip_before_timestep=rollout_skip_before_timestep,
@@ -2899,9 +3100,9 @@ def main():
         dt=config.data.dt,
         out_dir=config.rollout.out_dir,
         fgn_noise_dim=fgn_noise_dim if use_fgn else None,
-        n_ensemble_samples=getattr(config.rollout, "n_ensemble_samples", 1),
-        gaussian_min_logvar=_safe_float(getattr(config.opt, "gaussian_min_logvar", -9.0), -9.0),
-        gaussian_max_logvar=_safe_float(getattr(config.opt, "gaussian_max_logvar", 4.0), 4.0),
+        n_ensemble_samples=_cfg_get(config.rollout, "n_ensemble_samples", 1),
+        gaussian_min_logvar=_safe_float(_cfg_get(config.opt, "gaussian_min_logvar", -9.0), -9.0),
+        gaussian_max_logvar=_safe_float(_cfg_get(config.opt, "gaussian_max_logvar", 4.0), 4.0),
     )
 
     if config.wandb.log:

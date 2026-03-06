@@ -3,6 +3,7 @@ from pathlib import Path
 from typing import Union, Optional
 import logging
 import sys
+import os
 
 import torch
 from torch.cuda import amp
@@ -17,7 +18,6 @@ try:
 except ModuleNotFoundError:
     wandb_available = False
 
-import neuralop.mpu.comm as comm
 from neuralop.losses import LpLoss
 from .training_state import load_training_state, save_training_state
 
@@ -47,6 +47,7 @@ class Trainer:
         logger: Optional[logging.Logger]=None,
         use_progress_bar: bool=True,
         scheduler_monitor: str="train_err",
+        grad_accum_steps: int=1,
     ):
         """
         Parameters
@@ -88,6 +89,7 @@ class Trainer:
         self.scheduler_monitor = str(scheduler_monitor).strip().lower()
         self.use_distributed = use_distributed
         self.device = device
+        self.grad_accum_steps = max(1, int(grad_accum_steps))
         # handle autocast device
         if isinstance(self.device, torch.device):
             self.autocast_device_type = self.device.type
@@ -98,6 +100,7 @@ class Trainer:
                 self.autocast_device_type = "cpu"
         self.mixed_precision = mixed_precision
         self.data_processor = data_processor
+        self.scaler = amp.GradScaler(enabled=(self.mixed_precision and self.autocast_device_type == "cuda"))
 
         # Track starting epoch for checkpointing/resuming
         self.start_epoch = 0
@@ -182,8 +185,11 @@ class Trainer:
         self.model = self.model.to(self.device)
 
         if self.use_distributed and dist.is_initialized():
-            device_id = dist.get_rank()
-            self.model = DDP(self.model, device_ids=[device_id], output_device=device_id)
+            local_rank = int(os.getenv("LOCAL_RANK", "0"))
+            if isinstance(self.device, torch.device) and self.device.type == "cuda":
+                self.model = DDP(self.model, device_ids=[local_rank], output_device=local_rank)
+            else:
+                self.model = DDP(self.model)
 
         if self.data_processor is not None:
             self.data_processor = self.data_processor.to(self.device)
@@ -267,9 +273,12 @@ class Trainer:
             self.data_processor.train()
         t1 = default_timer()
         train_err = 0.0
-        
+
         # track number of training examples in batch
         self.n_samples = 0
+
+        if self.use_distributed and hasattr(train_loader, "sampler") and hasattr(train_loader.sampler, "set_epoch"):
+            train_loader.sampler.set_epoch(epoch)
 
         use_pbar = (
             self.verbose
@@ -288,42 +297,89 @@ class Trainer:
                 ncols=100,
             )
 
-        for idx, sample in enumerate(batch_iter):
-            result = self.train_one_batch(idx, sample, training_loss)
-            if isinstance(result, tuple) and len(result) == 2:
-                loss, metrics = result
-            else:
-                loss, metrics = result, {}
+        n_batches = len(train_loader)
+        grad_accum = max(1, int(self.grad_accum_steps))
+        oom_fallback_batches = 0
+        self._skip_internal_zero_grad = True
+        self.optimizer.zero_grad(set_to_none=True)
 
-            loss.backward()
-            self.optimizer.step()
+        try:
+            for idx, sample in enumerate(batch_iter):
+                did_oom_retry = False
+                result = None
+                for attempt in range(2):
+                    try:
+                        if did_oom_retry and hasattr(self, "retry_batch_after_oom"):
+                            result = self.retry_batch_after_oom(idx, sample, training_loss)
+                        else:
+                            result = self.train_one_batch(idx, sample, training_loss)
+                        if isinstance(result, tuple) and len(result) == 2:
+                            loss, metrics = result
+                        else:
+                            loss, metrics = result, {}
 
-            # train_err: use relative L2 when provided, else training loss
-            err_val = metrics.get("rel_l2", loss)
-            train_err += err_val.item() if hasattr(err_val, "item") else err_val
-            with torch.no_grad():
-                avg_loss += loss.item()
-                if self.regularizer:
-                    avg_lasso_loss += self.regularizer.loss
+                        is_last_batch = (idx + 1 == n_batches)
+                        if is_last_batch and ((idx + 1) % grad_accum != 0):
+                            accum_divisor = (idx % grad_accum) + 1
+                        else:
+                            accum_divisor = grad_accum
+                        scaled_loss = loss / accum_divisor
+                        if self.scaler.is_enabled():
+                            self.scaler.scale(scaled_loss).backward()
+                        else:
+                            scaled_loss.backward()
+                        break
+                    except RuntimeError as exc:
+                        can_retry = (
+                            self._is_cuda_oom(exc)
+                            and (not did_oom_retry)
+                            and hasattr(self, "retry_batch_after_oom")
+                        )
+                        if not can_retry:
+                            raise
+                        did_oom_retry = True
+                        oom_fallback_batches += 1
+                        self._clear_cuda_oom_state()
+                        continue
 
-            if use_pbar and hasattr(batch_iter, "set_postfix"):
-                err_scalar = err_val.item() if hasattr(err_val, "item") else err_val
-                loss_scalar = loss.item() if hasattr(loss, "item") else loss
-                batch_size = None
-                if isinstance(sample, dict):
-                    if "y" in sample and torch.is_tensor(sample["y"]):
-                        batch_size = sample["y"].shape[0]
-                    elif "target" in sample and torch.is_tensor(sample["target"]):
-                        batch_size = sample["target"].shape[0]
-                # Display per-sample batch error so pbar train_err is comparable to epoch-end train_err.
-                err_display = (err_scalar / batch_size) if (batch_size is not None and batch_size > 0) else err_scalar
-                # Display per-sample batch loss so pbar loss is comparable to epoch-end avg_loss.
-                loss_display = (loss_scalar / batch_size) if (batch_size is not None and batch_size > 0) else loss_scalar
-                batch_iter.set_postfix(
-                    loss=f"{loss_display:.8f}",
-                    train_err=f"{err_display:.6f}",
-                    refresh=False,
-                )
+                should_step = ((idx + 1) % grad_accum == 0) or (idx + 1 == n_batches)
+                if should_step:
+                    if self.scaler.is_enabled():
+                        self.scaler.step(self.optimizer)
+                        self.scaler.update()
+                    else:
+                        self.optimizer.step()
+                    self.optimizer.zero_grad(set_to_none=True)
+
+                # train_err: use relative L2 when provided, else training loss
+                err_val = metrics.get("rel_l2", loss)
+                train_err += err_val.item() if hasattr(err_val, "item") else err_val
+                with torch.no_grad():
+                    avg_loss += loss.item()
+                    if self.regularizer:
+                        avg_lasso_loss += self.regularizer.loss
+
+                if use_pbar and hasattr(batch_iter, "set_postfix"):
+                    err_scalar = err_val.item() if hasattr(err_val, "item") else err_val
+                    loss_scalar = loss.item() if hasattr(loss, "item") else loss
+                    batch_size = None
+                    if isinstance(sample, dict):
+                        if "y" in sample and torch.is_tensor(sample["y"]):
+                            batch_size = sample["y"].shape[0]
+                        elif "target" in sample and torch.is_tensor(sample["target"]):
+                            batch_size = sample["target"].shape[0]
+                    # Display per-sample batch error so pbar train_err is comparable to epoch-end train_err.
+                    err_display = (err_scalar / batch_size) if (batch_size is not None and batch_size > 0) else err_scalar
+                    # Display per-sample batch loss so pbar loss is comparable to epoch-end avg_loss.
+                    loss_display = (loss_scalar / batch_size) if (batch_size is not None and batch_size > 0) else loss_scalar
+                    batch_iter.set_postfix(
+                        loss=f"{loss_display:.8f}",
+                        train_err=f"{err_display:.6f}",
+                        oom_retry=oom_fallback_batches,
+                        refresh=False,
+                    )
+        finally:
+            self._skip_internal_zero_grad = False
 
         epoch_train_time = default_timer() - t1
 
@@ -353,6 +409,20 @@ class Trainer:
                 train_err=train_err,
                 avg_lasso_loss=avg_lasso_loss,
                 lr=lr
+            )
+            if oom_fallback_batches > 0:
+                msg = f"Epoch {epoch}: adaptive OOM fallback used on {oom_fallback_batches} batch(es)."
+                if self.logger:
+                    self.logger.warning(msg)
+                else:
+                    print(msg)
+                    sys.stdout.flush()
+
+        if self.wandb_log and wandb_available and oom_fallback_batches > 0:
+            wandb.log(
+                data={"train_oom_fallback_batches": float(oom_fallback_batches)},
+                step=epoch + 1,
+                commit=False,
             )
 
         return train_err, avg_loss, avg_lasso_loss, epoch_train_time
@@ -446,6 +516,20 @@ class Trainer:
         self.epoch = epoch
         return None
 
+    @staticmethod
+    def _is_cuda_oom(exc: RuntimeError) -> bool:
+        msg = str(exc).lower()
+        return (
+            ("cuda out of memory" in msg)
+            or ("out of memory" in msg)
+            or ("cublas_status_alloc_failed" in msg)
+        )
+
+    def _clear_cuda_oom_state(self):
+        self.optimizer.zero_grad(set_to_none=True)
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
     def train_one_batch(self, idx, sample, training_loss):
         """Run one batch of input through model
            and return training loss on outputs
@@ -463,7 +547,8 @@ class Trainer:
             float value of training loss
         """
 
-        self.optimizer.zero_grad(set_to_none=True)
+        if not getattr(self, "_skip_internal_zero_grad", False):
+            self.optimizer.zero_grad(set_to_none=True)
         if self.regularizer:
             self.regularizer.reset()
         if self.data_processor is not None:
@@ -699,7 +784,8 @@ class Trainer:
             checkpoint prefix. Defaults to "best_model" if save_best is configured,
             otherwise "model".
         """
-        if comm.get_local_rank() == 0:
+        is_rank0 = (not dist.is_initialized()) or (dist.get_rank() == 0)
+        if is_rank0:
             if save_name is None:
                 if self.save_best is not None:
                     save_name = "best_model"
