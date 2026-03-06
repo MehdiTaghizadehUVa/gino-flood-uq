@@ -8,6 +8,8 @@ flood: &FLOOD
     wireup_info: 'mpi'
     wireup_store: 'tcp'
     model_parallel_size: 1
+    ddp_timeout_min: 30
+    find_unused_parameters: false
     seed: 123
     device: 'cuda:0'
 

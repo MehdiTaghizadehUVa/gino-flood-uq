@@ -5,19 +5,24 @@
 from __future__ import annotations
 
 import copy
+import datetime as dt
 import inspect
 import json
+import logging
 import os
 import sys
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
-import numpy as np
 import torch
+import torch.distributed as dist
 import wandb
 from configmypy import ArgparseConfig, ConfigPipeline, YamlConfig
+from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader, Subset, random_split
+from torch.utils.data.distributed import DistributedSampler
 from tqdm import tqdm
 
 _SCRIPT_DIR = Path(__file__).resolve().parent
@@ -33,6 +38,7 @@ from neuralop.diffusion import (  # noqa: E402
     PointRFFGaussianProcessSampler,
 )
 from scripts.diffusion_script_utils import (  # noqa: E402
+    load_checkpoint_bundle,
     save_checkpoint_sidecars,
     safe_wandb_finish,
     safe_get,
@@ -58,6 +64,100 @@ DEFAULT_MAX_VAL_BATCHES = 64
 DEFAULT_BOUNDARY_CHANNELS = 1
 TIME_FEATURE_DIM_SINCOS = 2
 TIME_FEATURE_DIM_RAW = 1
+
+
+@dataclass
+class DistContext:
+    use_distributed: bool = False
+    rank: int = 0
+    local_rank: int = 0
+    world_size: int = 1
+
+    @property
+    def is_rank0(self) -> bool:
+        return int(self.rank) == 0
+
+
+def _cfg_dist(config: Any) -> Any:
+    return safe_get(config, "distributed", {})
+
+
+def _should_use_distributed(config: Any) -> bool:
+    return bool(safe_get(_cfg_dist(config), "use_distributed", False))
+
+
+def _init_distributed(config: Any) -> DistContext:
+    dist_cfg = _cfg_dist(config)
+    requested = _should_use_distributed(config)
+    world_size = int(os.environ.get("WORLD_SIZE", "1"))
+    rank = int(os.environ.get("RANK", "0"))
+    local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+    if not requested and world_size > 1:
+        raise ValueError(
+            "WORLD_SIZE>1 detected but distributed.use_distributed=false. "
+            "Set --distributed.use_distributed true for torchrun launches."
+        )
+    if not requested or world_size <= 1:
+        return DistContext(use_distributed=False, rank=0, local_rank=0, world_size=1)
+
+    if not dist.is_initialized():
+        backend = "nccl" if torch.cuda.is_available() else "gloo"
+        timeout_min = int(safe_get(dist_cfg, "ddp_timeout_min", 30))
+        dist.init_process_group(
+            backend=backend,
+            init_method="env://",
+            timeout=dt.timedelta(minutes=timeout_min),
+        )
+    rank = dist.get_rank()
+    world_size = dist.get_world_size()
+    if torch.cuda.is_available():
+        torch.cuda.set_device(local_rank)
+    return DistContext(
+        use_distributed=(world_size > 1),
+        rank=int(rank),
+        local_rank=int(local_rank),
+        world_size=int(world_size),
+    )
+
+
+def _dist_barrier(dist_ctx: DistContext) -> None:
+    if dist_ctx.use_distributed and dist.is_initialized():
+        dist.barrier()
+
+
+def _reduce_sum(value: float, *, device: torch.device, dist_ctx: DistContext) -> float:
+    t = torch.tensor(float(value), device=device, dtype=torch.float64)
+    if dist_ctx.use_distributed and dist.is_initialized():
+        dist.all_reduce(t, op=dist.ReduceOp.SUM)
+    return float(t.item())
+
+
+def _unwrap_module(module: torch.nn.Module) -> torch.nn.Module:
+    return module.module if isinstance(module, DDP) else module
+
+
+def _load_state_dict_compat(module: torch.nn.Module, state_dict: Dict[str, Any], *, name: str) -> None:
+    """Load state dict with fallback for legacy DDP `module.` prefixes."""
+    try:
+        module.load_state_dict(state_dict, strict=True)
+        return
+    except RuntimeError:
+        pass
+
+    stripped = {}
+    for key, value in state_dict.items():
+        if key.startswith("module."):
+            stripped[key[len("module."):]] = value
+        else:
+            raise RuntimeError(
+                f"Could not load {name}: mixed/non-DDP keys detected (first key={key!r})."
+            )
+    module.load_state_dict(stripped, strict=True)
+
+
+def _rank0_info(logger, dist_ctx: DistContext, msg: str, *args) -> None:
+    if dist_ctx.is_rank0:
+        logger.info(msg, *args)
 
 
 def _load_config(config_default: Path) -> Any:
@@ -89,7 +189,9 @@ def _load_config(config_default: Path) -> Any:
     return config
 
 
-def _resolve_device(config: Any) -> torch.device:
+def _resolve_device(config: Any, dist_ctx: DistContext) -> torch.device:
+    if dist_ctx.use_distributed and torch.cuda.is_available():
+        return torch.device(f"cuda:{dist_ctx.local_rank}")
     configured = str(safe_get(safe_get(config, "distributed", {}), "device", "cuda:0"))
     if configured.startswith("cuda") and torch.cuda.is_available():
         return torch.device(configured)
@@ -110,7 +212,17 @@ def _prepare_datasets(
     config: Any,
     target_variables: list[str],
     logger,
-) -> Tuple[DataLoader, DataLoader, Dict[str, Any], Path, int, int]:
+    dist_ctx: DistContext,
+) -> Tuple[
+    DataLoader,
+    DataLoader,
+    Optional[DistributedSampler],
+    Optional[DistributedSampler],
+    Dict[str, Any],
+    Path,
+    int,
+    int,
+]:
     data_cfg = safe_get(config, "data", {})
     seed = int(safe_get(safe_get(config, "distributed", {}), "seed", 123))
     static_text_files = list(safe_get(data_cfg, "static_text_files", ["M40_CS.txt", "M40_CU.txt", "M40_FA.txt"]))
@@ -129,9 +241,23 @@ def _prepare_datasets(
     )
     # Backward compatibility: only pass write_train_txt if this FloodDatasetHDF
     # implementation supports it.
-    if "write_train_txt" in inspect.signature(FloodDatasetHDF.__init__).parameters:
-        dataset_kwargs["write_train_txt"] = bool(safe_get(data_cfg, "write_train_txt", False))
-    full_dataset = FloodDatasetHDF(**dataset_kwargs)
+    supports_write_train_txt = "write_train_txt" in inspect.signature(FloodDatasetHDF.__init__).parameters
+    write_train_txt = bool(safe_get(data_cfg, "write_train_txt", False))
+    if supports_write_train_txt:
+        dataset_kwargs["write_train_txt"] = write_train_txt and dist_ctx.is_rank0
+
+    # Avoid train.txt write/read races in distributed mode by letting rank 0
+    # perform any write-side initialization before other ranks instantiate.
+    if dist_ctx.use_distributed and supports_write_train_txt and write_train_txt:
+        if dist_ctx.is_rank0:
+            full_dataset = FloodDatasetHDF(**dataset_kwargs)
+        _dist_barrier(dist_ctx)
+        if not dist_ctx.is_rank0:
+            dataset_kwargs["write_train_txt"] = False
+            full_dataset = FloodDatasetHDF(**dataset_kwargs)
+    else:
+        full_dataset = FloodDatasetHDF(**dataset_kwargs)
+    _dist_barrier(dist_ctx)
 
     n_samples_max = safe_get(data_cfg, "n_samples_max", None)
     if n_samples_max is not None and int(n_samples_max) > 0:
@@ -146,21 +272,33 @@ def _prepare_datasets(
         [train_sz, test_sz],
         generator=make_split_generator(seed),
     )
-    logger.info("Split dataset: total=%d train=%d test=%d", total_len, train_sz, test_sz)
+    _rank0_info(logger, dist_ctx, "Split dataset: total=%d train=%d test=%d", total_len, train_sz, test_sz)
 
     normalizer_path = _resolve_normalizer_path(config)
     if normalizer_path is not None and normalizer_path.exists():
         normalizers = load_normalizers(normalizer_path, device=None)
-        logger.info("Loaded normalizers from %s", normalizer_path)
+        _rank0_info(logger, dist_ctx, "Loaded normalizers from %s", normalizer_path)
     else:
-        normalizers = fit_normalizers_streaming(
-            train_raw,
-            chunk_size=int(safe_get(data_cfg, "normalizer_chunk_size", 10000)),
-            expect_target=True,
-        )
-        if normalizer_path is not None:
-            save_normalizers(normalizers, normalizer_path)
-            logger.info("Saved normalizers to %s", normalizer_path)
+        normalizers = None
+        if dist_ctx.is_rank0:
+            normalizers = fit_normalizers_streaming(
+                train_raw,
+                chunk_size=int(safe_get(data_cfg, "normalizer_chunk_size", 10000)),
+                expect_target=True,
+            )
+            if normalizer_path is not None:
+                save_normalizers(normalizers, normalizer_path)
+                logger.info("Saved normalizers to %s", normalizer_path)
+        if dist_ctx.use_distributed:
+            obj = [normalizers]
+            dist.broadcast_object_list(obj, src=0)
+            normalizers = obj[0]
+            if normalizer_path is not None:
+                _dist_barrier(dist_ctx)
+                if not dist_ctx.is_rank0 and normalizer_path.exists():
+                    normalizers = load_normalizers(normalizer_path, device=None)
+        if normalizers is None:
+            raise RuntimeError("Failed to initialize normalizers in distributed setup.")
 
     query_res = list(safe_get(data_cfg, "query_res", [48, 48]))
     train_norm = NormalizedDatasetOnTheFly(train_raw, normalizers, query_res=query_res)
@@ -172,11 +310,30 @@ def _prepare_datasets(
     persistent_workers = bool(safe_get(data_cfg, "persistent_workers", False)) and num_workers > 0
     prefetch_factor = safe_get(data_cfg, "prefetch_factor", 2)
 
+    train_sampler: Optional[DistributedSampler] = None
+    test_sampler: Optional[DistributedSampler] = None
+    if dist_ctx.use_distributed:
+        train_sampler = DistributedSampler(
+            train_norm,
+            num_replicas=dist_ctx.world_size,
+            rank=dist_ctx.rank,
+            shuffle=True,
+            seed=seed,
+        )
+        test_sampler = DistributedSampler(
+            test_norm,
+            num_replicas=dist_ctx.world_size,
+            rank=dist_ctx.rank,
+            shuffle=False,
+            seed=seed,
+        )
+
     loader_seed = seed
     train_loader_kwargs = dict(
         dataset=train_norm,
         batch_size=batch_size,
-        shuffle=True,
+        shuffle=(train_sampler is None),
+        sampler=train_sampler,
         num_workers=num_workers,
         pin_memory=pin_memory,
         generator=make_dataloader_generator(loader_seed),
@@ -191,6 +348,7 @@ def _prepare_datasets(
     test_loader = DataLoader(
         test_norm,
         batch_size=batch_size,
+        sampler=test_sampler,
         shuffle=False,
         num_workers=0,
         pin_memory=pin_memory,
@@ -212,6 +370,8 @@ def _prepare_datasets(
     return (
         train_loader,
         test_loader,
+        train_sampler,
+        test_sampler,
         normalizers,
         normalizer_path,
         n_static,
@@ -357,7 +517,9 @@ def _build_wandb_names(config: Any, seed: int) -> Tuple[str, str]:
     return group, name
 
 
-def _maybe_init_wandb(config: Any, seed: int, logger) -> Optional[Any]:
+def _maybe_init_wandb(config: Any, seed: int, logger, *, is_rank0: bool) -> Optional[Any]:
+    if not is_rank0:
+        return None
     wb_cfg = safe_get(config, "wandb", {})
     if not bool(safe_get(wb_cfg, "log", False)):
         return None
@@ -385,12 +547,16 @@ def _evaluate_validation(
     loader: DataLoader,
     device: torch.device,
     target_norm: Optional[Any],
+    dist_ctx: DistContext,
     max_batches: int = DEFAULT_MAX_VAL_BATCHES,
 ) -> Dict[str, float]:
     forecaster.eval()
-    losses = []
-    rmse_norm = []
-    rmse_phys = []
+    loss_sum = torch.tensor(0.0, device=device, dtype=torch.float64)
+    loss_count = torch.tensor(0.0, device=device, dtype=torch.float64)
+    rmse_norm_sum = torch.tensor(0.0, device=device, dtype=torch.float64)
+    rmse_norm_count = torch.tensor(0.0, device=device, dtype=torch.float64)
+    rmse_phys_sum = torch.tensor(0.0, device=device, dtype=torch.float64)
+    rmse_phys_count = torch.tensor(0.0, device=device, dtype=torch.float64)
 
     if target_norm is not None:
         target_norm.to(device)
@@ -401,7 +567,8 @@ def _evaluate_validation(
                 break
             sample = _prepare_batch(batch, device)
             loss, _ = forecaster.training_loss(sample)
-            losses.append(float(loss.item()))
+            loss_sum += float(loss.item())
+            loss_count += 1.0
 
             pred = forecaster.sample_next(
                 context=sample["context"],
@@ -412,17 +579,30 @@ def _evaluate_validation(
                 initial_latent=torch.zeros_like(sample["target"]),
             )
             tgt = sample["target"]
-            rmse_norm.append(float(torch.sqrt(torch.mean((pred - tgt) ** 2)).item()))
+            rmse_norm_sum += float(torch.sqrt(torch.mean((pred - tgt) ** 2)).item())
+            rmse_norm_count += 1.0
 
             if target_norm is not None:
                 pred_phys = target_norm.inverse_transform(pred)
                 tgt_phys = target_norm.inverse_transform(tgt)
-                rmse_phys.append(float(torch.sqrt(torch.mean((pred_phys - tgt_phys) ** 2)).item()))
+                rmse_phys_sum += float(torch.sqrt(torch.mean((pred_phys - tgt_phys) ** 2)).item())
+                rmse_phys_count += 1.0
+
+    if dist_ctx.use_distributed and dist.is_initialized():
+        for t in (
+            loss_sum,
+            loss_count,
+            rmse_norm_sum,
+            rmse_norm_count,
+            rmse_phys_sum,
+            rmse_phys_count,
+        ):
+            dist.all_reduce(t, op=dist.ReduceOp.SUM)
 
     out = {
-        "val_loss": float(np.mean(losses)) if losses else float("nan"),
-        "val_rmse_norm": float(np.mean(rmse_norm)) if rmse_norm else float("nan"),
-        "val_rmse_phys": float(np.mean(rmse_phys)) if rmse_phys else float("nan"),
+        "val_loss": float((loss_sum / torch.clamp(loss_count, min=1.0)).item()),
+        "val_rmse_norm": float((rmse_norm_sum / torch.clamp(rmse_norm_count, min=1.0)).item()),
+        "val_rmse_phys": float((rmse_phys_sum / torch.clamp(rmse_phys_count, min=1.0)).item()),
     }
     forecaster.train()
     return out
@@ -431,6 +611,7 @@ def _evaluate_validation(
 def _save_checkpoint(
     path: Path,
     model: torch.nn.Module,
+    time_mlp: Optional[torch.nn.Module],
     optimizer: torch.optim.Optimizer,
     epoch: int,
     global_step: int,
@@ -442,6 +623,9 @@ def _save_checkpoint(
     forecaster: ConditionalDDOForecaster,
     scheduler: Optional[Any] = None,
 ) -> None:
+    denoiser_state = _unwrap_module(model).state_dict()
+    time_mlp_state = _unwrap_module(time_mlp).state_dict() if time_mlp is not None else None
+
     metadata = {
         "epoch": int(epoch),
         "global_step": int(global_step),
@@ -451,25 +635,51 @@ def _save_checkpoint(
         "target_variables": list(target_variables),
         "gino_config": gino_cfg,
         "diffusion_hparams": forecaster.diffusion_hparams(),
+        "has_time_mlp_state_dict": time_mlp_state is not None,
     }
     payload = {
         **metadata,
-        "denoiser_state_dict": model.state_dict(),
+        "denoiser_state_dict": denoiser_state,
+        "time_mlp_state_dict": time_mlp_state,
         "optimizer_state_dict": optimizer.state_dict(),
         "scheduler_state_dict": scheduler.state_dict() if scheduler is not None else None,
     }
     path.parent.mkdir(parents=True, exist_ok=True)
     torch.save(payload, path)
+    extra_sidecars: Dict[str, Dict[str, Any]] = {}
+    if time_mlp_state is not None:
+        extra_sidecars["time_mlp_state_dict"] = time_mlp_state
     save_checkpoint_sidecars(
         path,
-        denoiser_state_dict=model.state_dict(),
+        denoiser_state_dict=denoiser_state,
         metadata=metadata,
+        extra_state_dicts=extra_sidecars,
     )
+
+
+def _resolve_resume_checkpoint(config: Any) -> Optional[Path]:
+    ckpt_cfg = safe_get(config, "checkpoint", {})
+    resume_raw = safe_get(ckpt_cfg, "resume_from_dir", None)
+    if not resume_raw:
+        return None
+    p = Path(str(resume_raw))
+    if not p.is_absolute():
+        p = (_SCRIPT_DIR / p).resolve()
+    if p.is_file():
+        return p
+    if not p.exists():
+        return None
+    for name in ("checkpoint.pt", "checkpoint_best.pt"):
+        cand = p / name
+        if cand.exists():
+            return cand
+    return None
 
 
 def main() -> int:
     config = _load_config(_REPO_ROOT / "config" / "gino_pluvial_flood_config_WV_depth_only_diffusion.yaml")
-    device = _resolve_device(config)
+    dist_ctx = _init_distributed(config)
+    device = _resolve_device(config, dist_ctx=dist_ctx)
 
     log_file = safe_get(config, "log_file", "train_diffusion.log")
     if not Path(log_file).is_absolute():
@@ -479,22 +689,52 @@ def main() -> int:
         log_file=log_file,
         logger_name="flood_diffusion_train",
     )
+    if dist_ctx.use_distributed and not dist_ctx.is_rank0:
+        logger.setLevel(logging.ERROR)
 
-    seed = int(safe_get(safe_get(config, "distributed", {}), "seed", 123))
+    base_seed = int(safe_get(safe_get(config, "distributed", {}), "seed", 123))
+    seed = int(base_seed + (dist_ctx.rank if dist_ctx.use_distributed else 0))
     deterministic = bool(safe_get(config, "deterministic", True))
     set_seed(seed, deterministic=deterministic)
-    logger.info("Using device=%s seed=%d deterministic=%s", device, seed, deterministic)
+    _rank0_info(
+        logger,
+        dist_ctx,
+        "Using device=%s base_seed=%d rank_seed=%d deterministic=%s distributed=%s rank=%d/%d",
+        device,
+        base_seed,
+        seed,
+        deterministic,
+        dist_ctx.use_distributed,
+        dist_ctx.rank,
+        dist_ctx.world_size,
+    )
 
     target_variables = parse_target_variables(safe_get(safe_get(config, "data", {}), "target_variables", ["wd"]))
     if target_variables != ["wd"]:
         raise ValueError("Diffusion v1 supports depth-only target_variables=['wd'].")
 
-    train_loader, test_loader, normalizers, normalizer_path, n_static, n_boundary_channels = _prepare_datasets(
+    (
+        train_loader,
+        test_loader,
+        train_sampler,
+        _test_sampler,
+        normalizers,
+        normalizer_path,
+        n_static,
+        n_boundary_channels,
+    ) = _prepare_datasets(
         config,
         target_variables=target_variables,
         logger=logger,
+        dist_ctx=dist_ctx,
     )
-    logger.info("Prepared loaders: train_batches=%d test_batches=%d", len(train_loader), len(test_loader))
+    _rank0_info(
+        logger,
+        dist_ctx,
+        "Prepared loaders: train_batches=%d test_batches=%d",
+        len(train_loader),
+        len(test_loader),
+    )
 
     gino_cfg, _, total_in_channels, time_injection, time_embedding_dim = _configure_denoiser(
         config,
@@ -506,7 +746,9 @@ def main() -> int:
     # get_model() consumes/mutates config keys (e.g., pops data_channels), so
     # pass an isolated model config copy to keep our saved metadata stable.
     model = get_model(model_cfg).to(device)
-    logger.info(
+    _rank0_info(
+        logger,
+        dist_ctx,
         "Initialized denoiser (GINO) with in_channels=%d (n_boundary_channels=%d)",
         total_in_channels,
         n_boundary_channels,
@@ -524,7 +766,9 @@ def main() -> int:
         time_embedding_hidden_dim=int(safe_get(cond_cfg_raw, "time_embedding_hidden_dim", 128)),
         time_embedding_scale=float(safe_get(cond_cfg_raw, "time_embedding_scale", 10000.0)),
     )
-    logger.info(
+    _rank0_info(
+        logger,
+        dist_ctx,
         (
             "Diffusion conditioning: time_injection=%s time_embedding_dim=%d "
             "add_noisy_target=%s add_time_features=%s total_in_channels=%d fno_norm=%s"
@@ -572,15 +816,42 @@ def main() -> int:
         sampler_return_mean_last=bool(safe_get(sampler_cfg, "return_mean_last", True)),
     ).to(device)
 
+    dist_cfg = _cfg_dist(config)
+    find_unused_parameters = bool(safe_get(dist_cfg, "find_unused_parameters", False))
+    if dist_ctx.use_distributed:
+        if device.type == "cuda":
+            ddp_kwargs = dict(
+                device_ids=[dist_ctx.local_rank],
+                output_device=dist_ctx.local_rank,
+                find_unused_parameters=find_unused_parameters,
+            )
+        else:
+            ddp_kwargs = dict(find_unused_parameters=find_unused_parameters)
+        model = DDP(model, **ddp_kwargs)
+        forecaster.denoiser = model
+        if forecaster.time_mlp is not None:
+            forecaster.time_mlp = DDP(forecaster.time_mlp, **ddp_kwargs)
+        _rank0_info(
+            logger,
+            dist_ctx,
+            "Enabled DDP: world_size=%d local_rank=%d find_unused_parameters=%s",
+            dist_ctx.world_size,
+            dist_ctx.local_rank,
+            find_unused_parameters,
+        )
+
     opt_cfg = safe_get(config, "opt", {})
+    optim_params = list(model.parameters())
+    if forecaster.time_mlp is not None:
+        optim_params.extend(list(forecaster.time_mlp.parameters()))
     optimizer = torch.optim.AdamW(
-        model.parameters(),
+        optim_params,
         lr=float(safe_get(opt_cfg, "learning_rate", 1e-4)),
         weight_decay=float(safe_get(opt_cfg, "weight_decay", 1e-4)),
     )
     scheduler = _init_scheduler(config, optimizer)
 
-    run = _maybe_init_wandb(config, seed=seed, logger=logger)
+    run = _maybe_init_wandb(config, seed=seed, logger=logger, is_rank0=dist_ctx.is_rank0)
     wandb_finish_timeout_seconds = float(
         safe_get(safe_get(config, "wandb", {}), "finish_timeout_seconds", 120.0)
     )
@@ -589,6 +860,14 @@ def main() -> int:
     if not ckpt_dir.is_absolute():
         ckpt_dir = (_SCRIPT_DIR / ckpt_dir).resolve()
     ckpt_dir.mkdir(parents=True, exist_ok=True)
+
+    allow_unsafe_legacy_load = bool(
+        safe_get(safe_get(config, "checkpoint", {}), "allow_unsafe_legacy_load", True)
+    )
+    if allow_unsafe_legacy_load and dist_ctx.is_rank0:
+        logger.warning(
+            "checkpoint.allow_unsafe_legacy_load=true. Legacy pickle checkpoints must be trusted."
+        )
 
     n_epochs = int(safe_get(opt_cfg, "n_epochs", 1))
     print_every = int(safe_get(config, "print_every", DEFAULT_PRINT_EVERY))
@@ -599,17 +878,74 @@ def main() -> int:
 
     best_val_loss = float("inf")
     global_step = 0
+    start_epoch = 1
+
+    resume_checkpoint = _resolve_resume_checkpoint(config)
+    if resume_checkpoint is not None:
+        resume_bundle = load_checkpoint_bundle(
+            resume_checkpoint,
+            map_location="cpu",
+            allow_unsafe_legacy_load=allow_unsafe_legacy_load,
+            logger=logger,
+        )
+        _load_state_dict_compat(
+            _unwrap_module(model),
+            resume_bundle["denoiser_state_dict"],
+            name="denoiser_state_dict",
+        )
+        resume_time_mlp = resume_bundle.get("time_mlp_state_dict", None)
+        if forecaster.time_mlp is not None:
+            if resume_time_mlp is not None:
+                _load_state_dict_compat(
+                    _unwrap_module(forecaster.time_mlp),
+                    resume_time_mlp,
+                    name="time_mlp_state_dict",
+                )
+            else:
+                _rank0_info(
+                    logger,
+                    dist_ctx,
+                    "Resume checkpoint %s has no time_mlp_state_dict; continuing with current initialization.",
+                    resume_checkpoint,
+                )
+        if resume_bundle.get("optimizer_state_dict") is not None:
+            optimizer.load_state_dict(resume_bundle["optimizer_state_dict"])
+        if scheduler is not None and resume_bundle.get("scheduler_state_dict") is not None:
+            scheduler.load_state_dict(resume_bundle["scheduler_state_dict"])
+        best_val_loss = float(resume_bundle.get("best_val_loss", best_val_loss))
+        global_step = int(resume_bundle.get("global_step", 0))
+        start_epoch = int(resume_bundle.get("epoch", 0)) + 1
+        _rank0_info(
+            logger,
+            dist_ctx,
+            "Resumed from %s: start_epoch=%d global_step=%d best_val_loss=%.6e",
+            resume_checkpoint,
+            start_epoch,
+            global_step,
+            best_val_loss,
+        )
+
+    _dist_barrier(dist_ctx)
     first_batch_checked = False
-    logger.info("Starting diffusion training for %d epochs", n_epochs)
+    _rank0_info(logger, dist_ctx, "Starting diffusion training for %d epochs", n_epochs)
 
     try:
-        for epoch in range(1, n_epochs + 1):
+        for epoch in range(start_epoch, n_epochs + 1):
             forecaster.train()
             epoch_loss = 0.0
+            epoch_batches = 0
             t0 = time.time()
 
-            pbar = tqdm(train_loader, desc=f"Epoch {epoch}/{n_epochs}", leave=False)
-            for batch in pbar:
+            if train_sampler is not None:
+                train_sampler.set_epoch(epoch)
+
+            train_iter = train_loader
+            pbar = None
+            if dist_ctx.is_rank0:
+                pbar = tqdm(train_loader, desc=f"Epoch {epoch}/{n_epochs}", leave=False)
+                train_iter = pbar
+
+            for batch in train_iter:
                 sample = _prepare_batch(batch, device)
                 if not first_batch_checked:
                     batch_size = sample["context"].shape[0]
@@ -638,12 +974,14 @@ def main() -> int:
                 loss, stats = forecaster.training_loss(sample)
                 loss.backward()
                 if grad_clip is not None and grad_clip > 0:
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+                    torch.nn.utils.clip_grad_norm_(optim_params, grad_clip)
                 optimizer.step()
 
                 global_step += 1
                 epoch_loss += float(loss.item())
-                pbar.set_postfix(loss=f"{loss.item():.4e}")
+                epoch_batches += 1
+                if pbar is not None:
+                    pbar.set_postfix(loss=f"{loss.item():.4e}")
 
                 if run is not None:
                     wandb.log(
@@ -657,7 +995,9 @@ def main() -> int:
                     )
 
                 if global_step % max(1, print_every) == 0:
-                    logger.info(
+                    _rank0_info(
+                        logger,
+                        dist_ctx,
                         "epoch=%d step=%d loss=%.6e lr=%.6e",
                         epoch,
                         global_step,
@@ -665,12 +1005,15 @@ def main() -> int:
                         float(optimizer.param_groups[0]["lr"]),
                     )
 
-            train_loss_epoch = epoch_loss / max(1, len(train_loader))
+            train_loss_epoch = _reduce_sum(epoch_loss, device=device, dist_ctx=dist_ctx)
+            train_batches_global = _reduce_sum(epoch_batches, device=device, dist_ctx=dist_ctx)
+            train_loss_epoch = train_loss_epoch / max(1.0, train_batches_global)
             val_stats = _evaluate_validation(
                 forecaster=forecaster,
                 loader=test_loader,
                 device=device,
                 target_norm=normalizers.get("target", None),
+                dist_ctx=dist_ctx,
                 max_batches=max_val_batches,
             )
 
@@ -681,7 +1024,9 @@ def main() -> int:
                     scheduler.step()
 
             elapsed = time.time() - t0
-            logger.info(
+            _rank0_info(
+                logger,
+                dist_ctx,
                 "Epoch %d/%d | train_loss=%.6e | val_loss=%.6e | val_rmse_norm=%.6e | val_rmse_phys=%.6e | %.2fs",
                 epoch,
                 n_epochs,
@@ -704,28 +1049,12 @@ def main() -> int:
                     step=global_step,
                 )
 
-            latest_path = ckpt_dir / "checkpoint.pt"
-            _save_checkpoint(
-                path=latest_path,
-                model=model,
-                optimizer=optimizer,
-                epoch=epoch,
-                global_step=global_step,
-                seed=seed,
-                best_val_loss=best_val_loss,
-                normalizer_path=normalizer_path,
-                target_variables=target_variables,
-                gino_cfg=gino_cfg,
-                forecaster=forecaster,
-                scheduler=scheduler,
-            )
-
-            if val_stats["val_loss"] < best_val_loss:
-                best_val_loss = float(val_stats["val_loss"])
-                best_path = ckpt_dir / "checkpoint_best.pt"
+            if dist_ctx.is_rank0:
+                latest_path = ckpt_dir / "checkpoint.pt"
                 _save_checkpoint(
-                    path=best_path,
+                    path=latest_path,
                     model=model,
+                    time_mlp=forecaster.time_mlp,
                     optimizer=optimizer,
                     epoch=epoch,
                     global_step=global_step,
@@ -737,9 +1066,36 @@ def main() -> int:
                     forecaster=forecaster,
                     scheduler=scheduler,
                 )
-                logger.info("Saved new best checkpoint: %s", best_path)
 
-        logger.info("Training complete. Best val_loss=%.6e | checkpoints=%s", best_val_loss, ckpt_dir)
+            if val_stats["val_loss"] < best_val_loss:
+                best_val_loss = float(val_stats["val_loss"])
+                if dist_ctx.is_rank0:
+                    best_path = ckpt_dir / "checkpoint_best.pt"
+                    _save_checkpoint(
+                        path=best_path,
+                        model=model,
+                        time_mlp=forecaster.time_mlp,
+                        optimizer=optimizer,
+                        epoch=epoch,
+                        global_step=global_step,
+                        seed=seed,
+                        best_val_loss=best_val_loss,
+                        normalizer_path=normalizer_path,
+                        target_variables=target_variables,
+                        gino_cfg=gino_cfg,
+                        forecaster=forecaster,
+                        scheduler=scheduler,
+                    )
+                    logger.info("Saved new best checkpoint: %s", best_path)
+            _dist_barrier(dist_ctx)
+
+        _rank0_info(
+            logger,
+            dist_ctx,
+            "Training complete. Best val_loss=%.6e | checkpoints=%s",
+            best_val_loss,
+            ckpt_dir,
+        )
 
         metadata = {
             "checkpoint_dir": str(ckpt_dir),
@@ -748,14 +1104,17 @@ def main() -> int:
             "target_variables": target_variables,
             "global_step": global_step,
         }
-        with open(ckpt_dir / "training_summary.json", "w", encoding="utf-8") as f:
-            json.dump(metadata, f, indent=2)
+        if dist_ctx.is_rank0:
+            with open(ckpt_dir / "training_summary.json", "w", encoding="utf-8") as f:
+                json.dump(metadata, f, indent=2)
         return 0
     finally:
         shutdown_dataloader_workers(train_loader, logger=logger, name="train_loader")
         shutdown_dataloader_workers(test_loader, logger=logger, name="test_loader")
         if run is not None:
             safe_wandb_finish(run, logger=logger, timeout_seconds=wandb_finish_timeout_seconds)
+        if dist_ctx.use_distributed and dist.is_initialized():
+            dist.destroy_process_group()
 
 
 if __name__ == "__main__":

@@ -134,26 +134,37 @@ def load_torch_checkpoint(
     return loaded
 
 
+def _tensor_only_state_dict(state_dict: Dict[str, Any], name: str) -> Dict[str, torch.Tensor]:
+    """Drop non-tensor entries (e.g. PyTorch internal metadata) from state_dict."""
+    tensor_only_state: Dict[str, torch.Tensor] = {
+        k: v for k, v in state_dict.items() if isinstance(v, torch.Tensor)
+    }
+    if not tensor_only_state:
+        raise ValueError(f"{name} did not contain any tensor entries.")
+    return tensor_only_state
+
+
 def save_checkpoint_sidecars(
     checkpoint_path: Path,
     *,
     denoiser_state_dict: Dict[str, Any],
     metadata: Dict[str, Any],
+    extra_state_dicts: Optional[Dict[str, Dict[str, Any]]] = None,
 ) -> Tuple[Path, Path]:
-    """Save safe sidecar files: tensor-only weights and JSON metadata."""
+    """Save safe sidecar files: tensor-only weights payload and JSON metadata."""
 
-    # BaseModel.state_dict() can include a non-tensor "_metadata" payload.
-    # Strip non-tensor entries so the sidecar stays weights_only-loadable.
-    tensor_only_state: Dict[str, torch.Tensor] = {
-        k: v for k, v in denoiser_state_dict.items() if isinstance(v, torch.Tensor)
+    weights_payload: Dict[str, Dict[str, torch.Tensor]] = {
+        "denoiser_state_dict": _tensor_only_state_dict(
+            denoiser_state_dict, name="denoiser_state_dict"
+        )
     }
-    if not tensor_only_state:
-        raise ValueError("denoiser_state_dict did not contain any tensor entries.")
+    for key, state_dict in (extra_state_dicts or {}).items():
+        weights_payload[str(key)] = _tensor_only_state_dict(state_dict, name=str(key))
 
     weights_path, metadata_path = checkpoint_sidecar_paths(checkpoint_path)
     weights_path.parent.mkdir(parents=True, exist_ok=True)
     metadata_path.parent.mkdir(parents=True, exist_ok=True)
-    torch.save({"denoiser_state_dict": tensor_only_state}, weights_path)
+    torch.save(weights_payload, weights_path)
     with open(metadata_path, "w", encoding="utf-8") as f:
         json.dump(metadata, f, indent=2, sort_keys=True)
     return weights_path, metadata_path
@@ -196,7 +207,8 @@ def load_checkpoint_bundle(
             if not isinstance(metadata, dict):
                 raise TypeError(f"Expected metadata dict in {metadata_path}, got {type(metadata)}")
             merged = dict(metadata)
-            merged["denoiser_state_dict"] = weights["denoiser_state_dict"]
+            for key, value in weights.items():
+                merged[key] = value
             return merged
         except Exception as exc:
             if not allow_unsafe_legacy_load:

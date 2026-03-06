@@ -43,6 +43,25 @@ from train_gino_flood_train_rollout_animation_WV import (  # noqa: E402
 )
 
 
+def _load_state_dict_compat(module: torch.nn.Module, state_dict: Dict[str, Any], *, name: str) -> None:
+    """Load state dict with fallback for legacy DDP `module.` prefixes."""
+    try:
+        module.load_state_dict(state_dict, strict=True)
+        return
+    except RuntimeError:
+        pass
+
+    stripped = {}
+    for key, value in state_dict.items():
+        if key.startswith("module."):
+            stripped[key[len("module."):]] = value
+        else:
+            raise RuntimeError(
+                f"Could not load {name}: mixed/non-DDP keys detected (first key={key!r})."
+            )
+    module.load_state_dict(stripped, strict=True)
+
+
 def _parse_cli() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Evaluate diffusion forecaster rollout UQ")
     parser.add_argument(
@@ -182,7 +201,7 @@ def _load_diffusion_model(
     gino_cfg = copy.deepcopy(ckpt.get("gino_config", to_builtin(safe_get(config, "gino", {}))))
     model_cfg = {"arch": "gino", "gino": copy.deepcopy(gino_cfg)}
     denoiser = get_model(model_cfg).to(device)
-    denoiser.load_state_dict(ckpt["denoiser_state_dict"], strict=True)
+    _load_state_dict_compat(denoiser, ckpt["denoiser_state_dict"], name="denoiser_state_dict")
 
     diff_hparams = ckpt.get("diffusion_hparams", {})
     gp_h = diff_hparams.get("gp", {})
@@ -267,6 +286,24 @@ def _load_diffusion_model(
         sampler_s_min=float(safe_get(sampler_cfg, "s_min", sampler_h.get("s_min", 1e-4))),
         sampler_return_mean_last=bool(safe_get(sampler_cfg, "return_mean_last", sampler_h.get("return_mean_last", True))),
     ).to(device)
+    time_mlp_state = ckpt.get("time_mlp_state_dict", None)
+    if forecaster.time_mlp is not None:
+        if time_mlp_state is not None:
+            _load_state_dict_compat(
+                forecaster.time_mlp,
+                time_mlp_state,
+                name="time_mlp_state_dict",
+            )
+        else:
+            logger.warning(
+                "Checkpoint %s has no time_mlp_state_dict; using current initialization for AdaIN time MLP.",
+                ckpt_path,
+            )
+    elif time_mlp_state is not None:
+        logger.warning(
+            "Checkpoint %s includes time_mlp_state_dict but runtime conditioning has no time_mlp; ignoring.",
+            ckpt_path,
+        )
     logger.info(
         (
             "Loaded diffusion model %s with time_injection=%s time_embedding_dim=%d "
