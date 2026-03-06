@@ -45,7 +45,6 @@ from train_gino_flood_train_rollout_animation_WV import (  # noqa: E402
     write_train_txt_from_data_root,
     make_split_generator,
     FloodDatasetHDF,
-    fit_normalizers_streaming,
     NormalizedDatasetOnTheFly,
     FloodGINODataProcessor,
     FGNTrainer,
@@ -66,7 +65,7 @@ from neuralop.losses.probabilistic_losses import (  # noqa: E402
     GaussianNLLLoss,
     split_gaussian_packed,
 )
-from neuralop.data.transforms.normalizers import load_normalizers, save_normalizers  # noqa: E402
+from neuralop.data.transforms.normalizers import load_normalizers  # noqa: E402
 from neuralop.training.training_state import load_training_state  # noqa: E402
 
 # -----------------------------------------------------------------------------
@@ -2717,25 +2716,38 @@ def _load_or_fit_normalizers(
     save_dir: Path,
     logger: logging.Logger,
 ) -> Dict[str, Any]:
-    """Load normalizers from config path or fit on train split and optionally save."""
+    """
+    Load pre-fit normalizers from training-data location only.
+
+    Evaluation must never fit/refit normalizers and must never resolve a
+    relative path against data.root (which is often test data in eval jobs).
+    """
+    del train_data, save_dir  # kept for backward-compatible call signature
     normalizer_path = _opt(config, "data", "normalizer_path", None)
-    if normalizer_path is not None:
-        normalizer_path = Path(normalizer_path)
-        if not normalizer_path.is_absolute():
-            normalizer_path = Path(config.data.root) / normalizer_path
-    if normalizer_path is not None and normalizer_path.exists():
-        with _PhaseTimer(logger, f"Loading normalizers from {normalizer_path}"):
-            return load_normalizers(normalizer_path, device=None)
-    with _PhaseTimer(logger, "Fitting normalizers on training split"):
-        normalizers = fit_normalizers_streaming(
-            train_data,
-            chunk_size=int(_opt(config, "data", "normalizer_chunk_size", 10000)),
-            expect_target=True,
+    if normalizer_path is None:
+        raise ValueError(
+            "Evaluation requires data.normalizer_path. "
+            "Provide training normalizer file path (prefer absolute)."
         )
-    if normalizer_path is not None:
-        save_normalizers(normalizers, normalizer_path)
-        logger.info("Saved normalizers to %s", normalizer_path)
-    return normalizers
+    normalizer_path = Path(str(normalizer_path))
+    if not normalizer_path.is_absolute():
+        normalizer_root = _opt(config, "data", "normalizer_root", None)
+        if normalizer_root is None:
+            normalizer_root = _opt(config, "data", "train_root", None)
+        if normalizer_root is None:
+            raise ValueError(
+                "Relative data.normalizer_path is not allowed without "
+                "data.normalizer_root (or data.train_root). "
+                "Evaluator refuses to resolve normalizers against data.root."
+            )
+        normalizer_path = Path(str(normalizer_root)) / normalizer_path
+    normalizer_path = normalizer_path.resolve()
+    if not normalizer_path.exists():
+        raise FileNotFoundError(
+            f"Training normalizer file not found: {normalizer_path}"
+        )
+    with _PhaseTimer(logger, f"Loading normalizers from {normalizer_path}"):
+        return load_normalizers(normalizer_path, device=None)
 
 
 def _build_one_step_datasets(

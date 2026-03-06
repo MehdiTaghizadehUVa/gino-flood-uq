@@ -131,7 +131,16 @@ def main():
         return 1
     normalizer_path = Path(normalizer_path)
     if not normalizer_path.is_absolute():
-        normalizer_path = Path(config.data.root) / normalizer_path
+        normalizer_root = getattr(config.data, "normalizer_root", None)
+        if normalizer_root is None:
+            normalizer_root = getattr(config.data, "train_root", None)
+        if normalizer_root is None:
+            print(
+                "ERROR: Relative normalizer_path requires data.normalizer_root "
+                "(or data.train_root). Refusing to resolve against data.root."
+            )
+            return 1
+        normalizer_path = Path(normalizer_root) / normalizer_path
     if not normalizer_path.exists():
         print("ERROR: normalizers file not found.")
         return 1

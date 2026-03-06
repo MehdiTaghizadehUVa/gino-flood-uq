@@ -30,6 +30,9 @@ flood: &FLOOD
     persistent_workers: false
     prefetch_factor: 1
     normalizer_chunk_size: 10000
+    # Training-data base path for resolving relative normalizer_path in eval.
+    # Keep this pointed at training data even when data.root is overridden to test.
+    normalizer_root: "./data/Results/M40"
     normalizer_path: "normalizers_depth_only.pt"
     static_text_files:
       - "M40_CS.txt"

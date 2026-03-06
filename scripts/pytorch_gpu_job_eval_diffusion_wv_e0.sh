@@ -26,6 +26,8 @@ EVAL_SCRIPT="${PROJECT_DIR}/scripts/evaluate_diffusion_forecaster_WV.py"
 EVAL_CONFIG="${PROJECT_DIR}/config/gino_pluvial_flood_config_WV_depth_only_diffusion.yaml"
 CONTAINER_PATH="/share/resources/containers/apptainer/archive/pytorch-2.0.1.sif"
 TEST_ROOT="/scratch/$USER/Data_Generation_UQ/Results_Test/M40"
+TRAIN_ROOT="/scratch/$USER/Data_Generation_UQ/Results/M40"
+TRAIN_NORMALIZER="${TRAIN_ROOT}/normalizers_depth_only.pt"
 CHECKPOINT_DIR="/home/$USER/GINO_Model/neuraloperator_no_physics/scripts/checkpoints_WV_depth_only_diffusion/ddofs_wv_m40_depth_job9983082_ens0"
 OUT_DIR="/home/$USER/GINO_Model/neuraloperator_no_physics/scripts/rollout_uq_WV_depth_only_diffusion_e0"
 
@@ -47,6 +49,7 @@ echo "Eval script:      ${EVAL_SCRIPT}"
 echo "Config:           ${EVAL_CONFIG}"
 echo "Checkpoint dir:   ${CHECKPOINT_DIR}"
 echo "Test data root:   ${TEST_ROOT}"
+echo "Train normalizer: ${TRAIN_NORMALIZER}"
 echo "Output dir:       ${OUT_DIR}"
 echo "Host:             $(hostname)"
 
@@ -55,5 +58,6 @@ apptainer exec "${APPTAINER_BIND_ARGS[@]}" "${CONTAINER_PATH}" \
   --config_path "${EVAL_CONFIG}" \
   --checkpoint_paths "${CHECKPOINT_DIR}" \
   --data.root "${TEST_ROOT}" \
+  --data.normalizer_path "${TRAIN_NORMALIZER}" \
   --rollout_data.root "${TEST_ROOT}" \
   --rollout.out_dir "${OUT_DIR}"

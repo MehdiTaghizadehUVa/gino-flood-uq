@@ -136,6 +136,16 @@ def _unwrap_module(module: torch.nn.Module) -> torch.nn.Module:
     return module.module if isinstance(module, DDP) else module
 
 
+def _optimizer_to_device(optimizer: torch.optim.Optimizer, device: torch.device) -> None:
+    """Move optimizer state tensors to the target device after resume."""
+    for state in optimizer.state.values():
+        if not isinstance(state, dict):
+            continue
+        for key, value in list(state.items()):
+            if torch.is_tensor(value):
+                state[key] = value.to(device)
+
+
 def _load_state_dict_compat(module: torch.nn.Module, state_dict: Dict[str, Any], *, name: str) -> None:
     """Load state dict with fallback for legacy DDP `module.` prefixes."""
     try:
@@ -553,9 +563,9 @@ def _evaluate_validation(
     forecaster.eval()
     loss_sum = torch.tensor(0.0, device=device, dtype=torch.float64)
     loss_count = torch.tensor(0.0, device=device, dtype=torch.float64)
-    rmse_norm_sum = torch.tensor(0.0, device=device, dtype=torch.float64)
+    rmse_norm_sse = torch.tensor(0.0, device=device, dtype=torch.float64)
     rmse_norm_count = torch.tensor(0.0, device=device, dtype=torch.float64)
-    rmse_phys_sum = torch.tensor(0.0, device=device, dtype=torch.float64)
+    rmse_phys_sse = torch.tensor(0.0, device=device, dtype=torch.float64)
     rmse_phys_count = torch.tensor(0.0, device=device, dtype=torch.float64)
 
     if target_norm is not None:
@@ -567,8 +577,9 @@ def _evaluate_validation(
                 break
             sample = _prepare_batch(batch, device)
             loss, _ = forecaster.training_loss(sample)
-            loss_sum += float(loss.item())
-            loss_count += 1.0
+            bsz = float(sample["target"].shape[0])
+            loss_sum += float(loss.item()) * bsz
+            loss_count += bsz
 
             pred = forecaster.sample_next(
                 context=sample["context"],
@@ -579,30 +590,38 @@ def _evaluate_validation(
                 initial_latent=torch.zeros_like(sample["target"]),
             )
             tgt = sample["target"]
-            rmse_norm_sum += float(torch.sqrt(torch.mean((pred - tgt) ** 2)).item())
-            rmse_norm_count += 1.0
+            err_norm = pred - tgt
+            rmse_norm_sse += float(torch.sum(err_norm.pow(2)).item())
+            rmse_norm_count += float(err_norm.numel())
 
             if target_norm is not None:
                 pred_phys = target_norm.inverse_transform(pred)
                 tgt_phys = target_norm.inverse_transform(tgt)
-                rmse_phys_sum += float(torch.sqrt(torch.mean((pred_phys - tgt_phys) ** 2)).item())
-                rmse_phys_count += 1.0
+                err_phys = pred_phys - tgt_phys
+                rmse_phys_sse += float(torch.sum(err_phys.pow(2)).item())
+                rmse_phys_count += float(err_phys.numel())
 
     if dist_ctx.use_distributed and dist.is_initialized():
         for t in (
             loss_sum,
             loss_count,
-            rmse_norm_sum,
+            rmse_norm_sse,
             rmse_norm_count,
-            rmse_phys_sum,
+            rmse_phys_sse,
             rmse_phys_count,
         ):
             dist.all_reduce(t, op=dist.ReduceOp.SUM)
 
+    val_rmse_norm = torch.sqrt(rmse_norm_sse / torch.clamp(rmse_norm_count, min=1.0))
+    if torch.all(rmse_phys_count <= 0):
+        val_rmse_phys = torch.tensor(0.0, device=device, dtype=torch.float64)
+    else:
+        val_rmse_phys = torch.sqrt(rmse_phys_sse / torch.clamp(rmse_phys_count, min=1.0))
+
     out = {
         "val_loss": float((loss_sum / torch.clamp(loss_count, min=1.0)).item()),
-        "val_rmse_norm": float((rmse_norm_sum / torch.clamp(rmse_norm_count, min=1.0)).item()),
-        "val_rmse_phys": float((rmse_phys_sum / torch.clamp(rmse_phys_count, min=1.0)).item()),
+        "val_rmse_norm": float(val_rmse_norm.item()),
+        "val_rmse_phys": float(val_rmse_phys.item()),
     }
     forecaster.train()
     return out
@@ -910,6 +929,7 @@ def main() -> int:
                 )
         if resume_bundle.get("optimizer_state_dict") is not None:
             optimizer.load_state_dict(resume_bundle["optimizer_state_dict"])
+            _optimizer_to_device(optimizer, device)
         if scheduler is not None and resume_bundle.get("scheduler_state_dict") is not None:
             scheduler.load_state_dict(resume_bundle["scheduler_state_dict"])
         best_val_loss = float(resume_bundle.get("best_val_loss", best_val_loss))
