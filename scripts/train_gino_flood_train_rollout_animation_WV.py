@@ -6,6 +6,7 @@ import warnings
 import os
 import random
 import logging
+import json
 from functools import partial
 from logging.handlers import RotatingFileHandler
 import numpy as np
@@ -167,6 +168,248 @@ def _cfg_get(obj, key, default):
         return obj[key]
     except (TypeError, KeyError, IndexError):
         return default
+
+
+FGN_LATENT_TEMPORAL_MODES = {"stepwise", "persistent"}
+FGN_AR_STATE_UPDATE_MODES = {"mean_feedback", "member_feedback"}
+BOUNDARY_SOURCE_MODES = {"member_hdf", "clean_family"}
+DEFAULT_CLEAN_BOUNDARY_FILES = {
+    "train": "Hydrographs_Train_Clean.txt",
+    "val": "Hydrographs_Val_Clean.txt",
+    "test": "Hydrographs_Test_Clean.txt",
+}
+_CLEAN_BOUNDARY_CACHE = {}
+
+
+def _normalize_choice(value, default, allowed, label):
+    if value is None:
+        return default
+    normalized = str(value).strip().lower()
+    if normalized not in allowed:
+        raise ValueError(
+            f"Unknown {label}={value!r}. Expected one of {sorted(allowed)}."
+        )
+    return normalized
+
+
+def normalize_fgn_latent_temporal_mode(value, default="stepwise"):
+    return _normalize_choice(
+        value,
+        default=default,
+        allowed=FGN_LATENT_TEMPORAL_MODES,
+        label="gino.fgn_latent_temporal_mode",
+    )
+
+
+def normalize_fgn_ar_state_update(value, default="mean_feedback"):
+    return _normalize_choice(
+        value,
+        default=default,
+        allowed=FGN_AR_STATE_UPDATE_MODES,
+        label="opt.fgn_ar_state_update",
+    )
+
+
+def normalize_boundary_source(value, default="member_hdf"):
+    return _normalize_choice(
+        value,
+        default=default,
+        allowed=BOUNDARY_SOURCE_MODES,
+        label="boundary_source",
+    )
+
+
+def parse_family_id_from_run_id(run_id: str) -> str:
+    run_id = str(run_id).strip()
+    if "_sim" not in run_id:
+        raise ValueError(
+            f"run_id={run_id!r} does not match expected family-member convention '<family_id>_simNN'."
+        )
+    family_id, _, suffix = run_id.rpartition("_sim")
+    if not family_id or not suffix:
+        raise ValueError(
+            f"run_id={run_id!r} does not match expected family-member convention '<family_id>_simNN'."
+        )
+    return family_id
+
+
+def _resolve_clean_boundary_root(clean_boundary_root, section_root):
+    if clean_boundary_root is None:
+        raise ValueError(
+            "boundary_source='clean_family' requires clean_boundary_root to be set."
+        )
+    root_path = Path(str(clean_boundary_root))
+    if root_path.is_absolute():
+        return root_path.resolve()
+    if section_root is None:
+        raise ValueError(
+            "Relative clean_boundary_root requires the corresponding data root to be set."
+        )
+    return (Path(str(section_root)) / root_path).resolve()
+
+
+def get_dataset_boundary_kwargs(config_section, *, split=None):
+    section_root = _cfg_get(config_section, "root", None)
+    boundary_source = normalize_boundary_source(
+        _cfg_get(config_section, "boundary_source", "member_hdf")
+    )
+    kwargs = {"boundary_source": boundary_source}
+    if boundary_source != "clean_family":
+        return kwargs
+
+    clean_boundary_root = _resolve_clean_boundary_root(
+        _cfg_get(config_section, "clean_boundary_root", None),
+        section_root,
+    )
+    clean_boundary_file = _cfg_get(config_section, "clean_boundary_file", None)
+    if clean_boundary_file is None and split is not None:
+        clean_boundary_file = DEFAULT_CLEAN_BOUNDARY_FILES.get(str(split).strip().lower())
+    if clean_boundary_file is None:
+        raise ValueError(
+            "boundary_source='clean_family' requires clean_boundary_file to be set."
+        )
+    kwargs["clean_boundary_root"] = str(clean_boundary_root)
+    kwargs["clean_boundary_file"] = str(clean_boundary_file)
+    return kwargs
+
+
+def _load_clean_boundary_table(clean_boundary_root, clean_boundary_file):
+    table_path = (Path(str(clean_boundary_root)) / str(clean_boundary_file)).resolve()
+    cache_key = str(table_path)
+    cached = _CLEAN_BOUNDARY_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+    if not table_path.exists():
+        raise FileNotFoundError(f"Clean boundary file not found: {table_path}")
+
+    with open(table_path, "r", encoding="utf-8-sig") as handle:
+        header = handle.readline().strip()
+    if not header:
+        raise ValueError(f"Clean boundary file {table_path} is empty.")
+    family_ids = [col.strip() for col in header.split("\t") if col.strip()]
+    if not family_ids:
+        raise ValueError(f"Clean boundary file {table_path} has no family-id header columns.")
+
+    raw = np.loadtxt(str(table_path), delimiter="\t", skiprows=1, dtype=np.float32)
+    if raw.ndim == 1:
+        if len(family_ids) == 1:
+            raw = raw.reshape(-1, 1)
+        else:
+            raw = raw.reshape(1, -1)
+    if raw.shape[1] != len(family_ids):
+        raise ValueError(
+            f"Clean boundary file {table_path} has {len(family_ids)} headers but data shape {tuple(raw.shape)}."
+        )
+
+    boundary_by_family = {
+        str(family_id): np.asarray(raw[:, idx], dtype=np.float32).copy()
+        for idx, family_id in enumerate(family_ids)
+    }
+    out = {
+        "path": table_path,
+        "n_time": int(raw.shape[0]),
+        "boundary_by_family": boundary_by_family,
+    }
+    _CLEAN_BOUNDARY_CACHE[cache_key] = out
+    return out
+
+
+def sample_fgn_rollout_latent_bank(
+    num_members,
+    batch_size,
+    latent_dim,
+    device,
+    dtype,
+    temporal_mode="stepwise",
+):
+    temporal_mode = normalize_fgn_latent_temporal_mode(temporal_mode)
+    if temporal_mode != "persistent":
+        return None
+    return torch.randn(
+        int(num_members),
+        int(batch_size),
+        int(latent_dim),
+        device=device,
+        dtype=dtype,
+    )
+
+
+def get_fgn_rollout_latent(
+    latent_bank,
+    member_idx,
+    batch_size,
+    latent_dim,
+    device,
+    dtype,
+):
+    if latent_bank is not None:
+        return latent_bank[int(member_idx)]
+    return torch.randn(
+        int(batch_size),
+        int(latent_dim),
+        device=device,
+        dtype=dtype,
+    )
+
+
+def update_fgn_dynamic_members(
+    dynamic_members,
+    pred_samples,
+    pred_mean,
+    n_history,
+    state_update_mode="mean_feedback",
+):
+    state_update_mode = normalize_fgn_ar_state_update(state_update_mode)
+    if pred_samples.ndim != 4:
+        raise ValueError(
+            f"pred_samples must have shape [N, B, n_cells, C], got {tuple(pred_samples.shape)}."
+        )
+    if pred_mean.shape != pred_samples.shape[1:]:
+        raise ValueError(
+            f"pred_mean shape {tuple(pred_mean.shape)} must match pred_samples[0] shape "
+            f"{tuple(pred_samples.shape[1:])}."
+        )
+    if len(dynamic_members) != pred_samples.shape[0]:
+        raise ValueError(
+            f"dynamic_members length {len(dynamic_members)} must match ensemble size "
+            f"{pred_samples.shape[0]}."
+        )
+    updated_members = []
+    for member_idx, dyn_hist in enumerate(dynamic_members):
+        next_state = pred_samples[member_idx] if state_update_mode == "member_feedback" else pred_mean
+        updated_hist = torch.cat([dyn_hist[:, 1:], next_state.unsqueeze(1)], dim=1)
+        updated_members.append(updated_hist[:, -n_history:])
+    return updated_members
+
+
+def _to_builtin(obj):
+    if obj is None or isinstance(obj, (str, int, float, bool)):
+        return obj
+    if isinstance(obj, Path):
+        return obj.as_posix()
+    if isinstance(obj, dict):
+        return {str(k): _to_builtin(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple, set)):
+        return [_to_builtin(v) for v in obj]
+    if hasattr(obj, "__dict__"):
+        return {
+            str(k): _to_builtin(v)
+            for k, v in vars(obj).items()
+            if not str(k).startswith("_")
+        }
+    try:
+        return {str(k): _to_builtin(obj[k]) for k in obj}
+    except Exception:
+        return str(obj)
+
+
+def save_effective_config_snapshot(config, save_dir, logger=None):
+    save_path = Path(save_dir) / "effective_config.json"
+    save_path.parent.mkdir(parents=True, exist_ok=True)
+    with save_path.open("w", encoding="utf-8") as handle:
+        json.dump(_to_builtin(config), handle, indent=2, sort_keys=True)
+    if logger is not None:
+        logger.info("Saved effective config snapshot to %s", save_path)
 
 
 def dataloader_worker_init(worker_id: int, base_seed: int) -> None:
@@ -416,6 +659,9 @@ class FloodDatasetHDF(Dataset):
         hdf_paths=None,
         ar_rollout_steps=1,
         target_variables=None,
+        boundary_source="member_hdf",
+        clean_boundary_root=None,
+        clean_boundary_file=None,
     ):
         super().__init__()
         if h5py is None:
@@ -434,6 +680,14 @@ class FloodDatasetHDF(Dataset):
         self.target_variables = parse_target_variables(target_variables)
         self._channel_to_idx = {"wd": 0, "vx": 1, "vy": 2}
         self.target_indices = [self._channel_to_idx[v] for v in self.target_variables]
+        self.boundary_source = normalize_boundary_source(boundary_source)
+        self.clean_boundary_root = clean_boundary_root
+        self.clean_boundary_file = clean_boundary_file
+        self._clean_boundary_bundle = None
+        if self.boundary_source == "clean_family":
+            self._clean_boundary_bundle = _load_clean_boundary_table(
+                clean_boundary_root, clean_boundary_file
+            )
 
         if noise_std is None or (isinstance(noise_std, (list, tuple)) and len(noise_std) == 0):
             self.noise_type = "none"
@@ -481,6 +735,39 @@ class FloodDatasetHDF(Dataset):
 
     def _hdf_file(self, run_id: str) -> Path:
         return self.data_root / f"{run_id}{self.hdf_suffix}"
+
+    def _resolve_boundary_series(
+        self,
+        run_id: str,
+        inflow: np.ndarray,
+        *,
+        slice_start: int = 0,
+        slice_end: int | None = None,
+    ) -> np.ndarray:
+        if self.boundary_source == "member_hdf":
+            if inflow.ndim == 1:
+                inflow = inflow[:, None]
+            flow_col = inflow[:, -1] if inflow.shape[1] >= 2 else inflow[:, 0]
+            return np.asarray(flow_col, dtype=np.float32)
+
+        family_id = parse_family_id_from_run_id(run_id)
+        boundary_by_family = self._clean_boundary_bundle["boundary_by_family"]
+        if family_id not in boundary_by_family:
+            raise KeyError(
+                f"Family {family_id!r} not found in clean boundary file "
+                f"{self._clean_boundary_bundle['path']}."
+            )
+        clean_series = np.asarray(boundary_by_family[family_id], dtype=np.float32)
+        total_len = clean_series.shape[0]
+        if slice_end is None:
+            slice_end = total_len
+        if slice_start < 0 or slice_end < slice_start or slice_end > total_len:
+            raise ValueError(
+                f"Clean boundary slice [{slice_start}:{slice_end}] is invalid for family {family_id!r}: "
+                f"available length={total_len} in "
+                f"{self._clean_boundary_bundle['path']}."
+            )
+        return clean_series[slice_start:slice_end]
 
     def _load_static_and_build_indices(self):
         # Text-file static (CS, CU, FA)
@@ -563,15 +850,13 @@ class FloodDatasetHDF(Dataset):
             hpath, t0, t1, self.hdf_paths, cell_index=self.cell_point_index
         )
         n_cells = geom.shape[0]
+        boundary_series = self._resolve_boundary_series(run_id, inflow, slice_start=t0, slice_end=t1)
         # History: first n_history steps
         hist_all = [wd[: self.n_history], vx[: self.n_history], vy[: self.n_history]]
         dynamic_hist = np.stack([hist_all[i] for i in self.target_indices], axis=-1)
         dynamic_hist = torch.tensor(dynamic_hist, device="cpu", dtype=torch.float32)
         dynamic_hist = self._apply_noise(dynamic_hist)
-        inflow_hist = inflow[: self.n_history]
-        if inflow_hist.ndim == 1:
-            inflow_hist = inflow_hist[:, None]
-        flow_col = inflow_hist[:, -1:] if inflow_hist.shape[1] >= 2 else inflow_hist
+        flow_col = boundary_series[: self.n_history][:, None]
         flow_col = flow_col[:, np.newaxis, :]
         inflow_bc = np.broadcast_to(flow_col, (self.n_history, n_cells, 1))
         bc_hist = torch.tensor(inflow_bc, device="cpu", dtype=torch.float32)
@@ -592,8 +877,7 @@ class FloodDatasetHDF(Dataset):
                     dim=-1,
                 )
             )
-            inflow_s = np.asarray(inflow[self.n_history + s], dtype=np.float32).flatten()
-            flow_val = float(inflow_s[-1]) if inflow_s.size else 0.0
+            flow_val = float(boundary_series[self.n_history + s])
             bc_s = np.full((n_cells, 1), flow_val, dtype=np.float32)
             boundary_sequence_list.append(torch.tensor(bc_s, device="cpu", dtype=torch.float32))
         target_sequence = torch.stack(target_sequence_list, dim=0)
@@ -651,6 +935,9 @@ class FloodRolloutTestDatasetHDF(Dataset):
         raise_on_smaller=True,
         skip_before_timestep=0,
         hdf_paths=None,
+        boundary_source="member_hdf",
+        clean_boundary_root=None,
+        clean_boundary_file=None,
     ):
         super().__init__()
         if h5py is None:
@@ -665,6 +952,14 @@ class FloodRolloutTestDatasetHDF(Dataset):
         self.raise_on_smaller = raise_on_smaller
         self.skip_before_timestep = skip_before_timestep
         self.hdf_paths = hdf_paths or HDF_PATHS
+        self.boundary_source = normalize_boundary_source(boundary_source)
+        self.clean_boundary_root = clean_boundary_root
+        self.clean_boundary_file = clean_boundary_file
+        self._clean_boundary_bundle = None
+        if self.boundary_source == "clean_family":
+            self._clean_boundary_bundle = _load_clean_boundary_table(
+                clean_boundary_root, clean_boundary_file
+            )
 
         if run_ids is not None:
             self.run_ids = [str(r).strip() for r in run_ids if str(r).strip()]
@@ -690,6 +985,39 @@ class FloodRolloutTestDatasetHDF(Dataset):
 
     def _hdf_file(self, run_id: str) -> Path:
         return self.data_root / f"{run_id}{self.hdf_suffix}"
+
+    def _resolve_boundary_series(
+        self,
+        run_id: str,
+        inflow: np.ndarray,
+        *,
+        slice_start: int = 0,
+        slice_end: int | None = None,
+    ) -> np.ndarray:
+        if self.boundary_source == "member_hdf":
+            if inflow.ndim == 1:
+                inflow = inflow[:, None]
+            flow_col = inflow[:, -1] if inflow.shape[1] >= 2 else inflow[:, 0]
+            return np.asarray(flow_col, dtype=np.float32)
+
+        family_id = parse_family_id_from_run_id(run_id)
+        boundary_by_family = self._clean_boundary_bundle["boundary_by_family"]
+        if family_id not in boundary_by_family:
+            raise KeyError(
+                f"Family {family_id!r} not found in clean boundary file "
+                f"{self._clean_boundary_bundle['path']}."
+            )
+        clean_series = np.asarray(boundary_by_family[family_id], dtype=np.float32)
+        total_len = clean_series.shape[0]
+        if slice_end is None:
+            slice_end = total_len
+        if slice_start < 0 or slice_end < slice_start or slice_end > total_len:
+            raise ValueError(
+                f"Clean boundary slice [{slice_start}:{slice_end}] is invalid for family {family_id!r}: "
+                f"available length={total_len} in "
+                f"{self._clean_boundary_bundle['path']}."
+            )
+        return clean_series[slice_start:slice_end]
 
     def _load_static_and_validate_runs(self):
         static_list = []
@@ -752,9 +1080,8 @@ class FloodRolloutTestDatasetHDF(Dataset):
         )
         dynamic = np.stack([wd, vx, vy], axis=-1)
         dynamic = torch.tensor(dynamic, device="cpu", dtype=torch.float32)
-        if inflow.ndim == 1:
-            inflow = inflow[:, None]
-        flow_col = inflow[:, -1:] if inflow.shape[1] >= 2 else inflow  # (n_time, 1)
+        boundary_series = self._resolve_boundary_series(run_id, inflow, slice_start=0, slice_end=n_time)
+        flow_col = boundary_series[:, None]  # (n_time, 1)
         flow_col = flow_col[:, np.newaxis, :]  # (n_time, 1, 1) for broadcast over cells
         boundary = np.broadcast_to(flow_col, (n_time, n_cells, 1))
         boundary = torch.tensor(boundary, device="cpu", dtype=torch.float32)
@@ -1329,6 +1656,8 @@ class FGNTrainer(Trainer):
         ar_truncation_steps=1,
         crps_sample_chunk_size=1,
         use_activation_checkpointing=False,
+        fgn_latent_temporal_mode="stepwise",
+        fgn_ar_state_update="mean_feedback",
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -1355,6 +1684,12 @@ class FGNTrainer(Trainer):
         self.ar_truncation_steps = max(1, int(ar_truncation_steps))
         self.crps_sample_chunk_size = max(1, int(crps_sample_chunk_size))
         self.use_activation_checkpointing = bool(use_activation_checkpointing)
+        self.fgn_latent_temporal_mode = normalize_fgn_latent_temporal_mode(
+            fgn_latent_temporal_mode
+        )
+        self.fgn_ar_state_update = normalize_fgn_ar_state_update(
+            fgn_ar_state_update
+        )
         self._force_truncated_next_batch = False
         self._oom_fallback_count = 0
 
@@ -1499,7 +1834,7 @@ class FGNTrainer(Trainer):
         detach_every = self.ar_truncation_steps if gradient_mode == "truncated" else 0
 
         n_history = sample["dynamic"].shape[1]
-        dynamic_sliding = sample["dynamic"].clone()
+        dynamic_members = [sample["dynamic"].clone() for _ in range(self.crps_n_samples)]
         boundary_sliding = sample["boundary"].clone()
         static = sample["static"]
         geom = sample["input_geom"]
@@ -1509,18 +1844,38 @@ class FGNTrainer(Trainer):
         total_loss = 0.0
         last_rel_l2 = None
         n_crps = self.crps_n_samples
+        latent_bank = sample_fgn_rollout_latent_bank(
+            num_members=n_crps,
+            batch_size=sample["dynamic"].shape[0],
+            latent_dim=self.fgn_noise_dim,
+            device=self.device,
+            dtype=sample["dynamic"].dtype,
+            temporal_mode=self.fgn_latent_temporal_mode,
+        )
         for s in range(n_ar_steps):
-            x = _build_x_from_dynamic_boundary(static, boundary_sliding, dynamic_sliding)
             y_s = target_sequence[:, s]
             if y_s.dim() == 2:
                 y_s = y_s.unsqueeze(0)
-            kwargs_base = {"input_geom": geom, "latent_queries": q, "output_queries": out_q, "x": x}
             outs_s = []
             for _start in range(0, n_crps, self.crps_sample_chunk_size):
                 chunk_n = min(self.crps_sample_chunk_size, n_crps - _start)
-                for _ in range(chunk_n):
-                    z = torch.randn(
-                        x.shape[0], self.fgn_noise_dim, device=self.device, dtype=x.dtype
+                for member_idx in range(_start, _start + chunk_n):
+                    x = _build_x_from_dynamic_boundary(
+                        static, boundary_sliding, dynamic_members[member_idx]
+                    )
+                    kwargs_base = {
+                        "input_geom": geom,
+                        "latent_queries": q,
+                        "output_queries": out_q,
+                        "x": x,
+                    }
+                    z = get_fgn_rollout_latent(
+                        latent_bank=latent_bank,
+                        member_idx=member_idx,
+                        batch_size=x.shape[0],
+                        latent_dim=self.fgn_noise_dim,
+                        device=self.device,
+                        dtype=x.dtype,
                     )
                     out = self._forward_fgn(kwargs_base, z)
                     if self.data_processor is not None:
@@ -1563,10 +1918,15 @@ class FGNTrainer(Trainer):
             if self.rel_l2_loss_fn is not None:
                 with torch.no_grad():
                     last_rel_l2 = self.rel_l2_loss_fn(pred_mean, y_s)
-            dynamic_sliding = torch.cat([dynamic_sliding[:, 1:], pred_mean.unsqueeze(1)], dim=1)
-            dynamic_sliding = dynamic_sliding[:, -n_history:]
+            dynamic_members = update_fgn_dynamic_members(
+                dynamic_members=dynamic_members,
+                pred_samples=pred_samples,
+                pred_mean=pred_mean,
+                n_history=n_history,
+                state_update_mode=self.fgn_ar_state_update,
+            )
             if detach_every > 0 and ((s + 1) % detach_every == 0):
-                dynamic_sliding = dynamic_sliding.detach()
+                dynamic_members = [hist.detach() for hist in dynamic_members]
             if boundary_sequence.dim() == 5:
                 time_dim = next(i for i, sz in enumerate(boundary_sequence.shape) if sz == max_available_steps)
                 sl = [slice(None)] * boundary_sequence.dim()
@@ -1589,6 +1949,13 @@ class FGNTrainer(Trainer):
                 " [curriculum]" if self.ar_curriculum_epochs_per_step > 0 else "",
                 gradient_mode,
                 f", detach_every={detach_every}" if detach_every > 0 else "",
+            )
+            self.logger.info(
+                "FGN AR semantics: latent_temporal_mode=%s, state_update=%s, crps_n_samples=%s, fgn_noise_dim=%s",
+                self.fgn_latent_temporal_mode,
+                self.fgn_ar_state_update,
+                self.crps_n_samples,
+                self.fgn_noise_dim,
             )
         return loss, metrics
 
@@ -2132,13 +2499,15 @@ def rollout_prediction(
         out_dir="./rollout_gifs",
         fgn_noise_dim=None,
         n_ensemble_samples=1,
+        fgn_latent_temporal_mode="stepwise",
         gaussian_min_logvar: float = -9.0,
         gaussian_max_logvar: float = 4.0,
 ):
     """
     Performs autoregressive rollout, computing and plotting metrics for water depth, VX, and VY.
     FGN mode: when fgn_noise_dim is set and n_ensemble_samples > 1, runs an ensemble of
-    forwards per step with per-sample noise z shaped [B, D] and uses the mean prediction.
+    forwards per step with per-sample noise z shaped [B, D]. In persistent mode each
+    member reuses one latent across the full rollout.
     Gaussian mode: samples members from packed [mu, logvar] outputs and propagates sampled
     member states autoregressively.
     """
@@ -2149,6 +2518,7 @@ def rollout_prediction(
     output_distribution = str(getattr(model, "output_distribution", "deterministic")).strip().lower()
     use_gaussian = output_distribution == "gaussian"
     n_ens = max(1, int(n_ensemble_samples))
+    fgn_latent_temporal_mode = normalize_fgn_latent_temporal_mode(fgn_latent_temporal_mode)
 
     def compute_csi(threshold, pred, gt):
         event_pred = pred >= threshold
@@ -2182,7 +2552,8 @@ def rollout_prediction(
         run_rmse_vx, run_rmse_vy = [], []
         run_spread_wd, run_spread_vx, run_spread_vy = [], [], []
 
-        if use_gaussian and n_ens > 1:
+        use_fgn_ensemble = fgn_noise_dim is not None and n_ens > 1
+        if (use_gaussian and n_ens > 1) or use_fgn_ensemble:
             current_dynamics = [
                 full_dynamic[skip_before_timestep:start_pred_t].clone() for _ in range(n_ens)
             ]
@@ -2190,6 +2561,16 @@ def rollout_prediction(
             current_dynamic = full_dynamic[skip_before_timestep:start_pred_t].clone()
         current_boundary = full_boundary[skip_before_timestep:start_pred_t].clone()
         n_target_channels = int(full_dynamic.shape[-1])
+        fgn_latent_bank = None
+        if fgn_noise_dim is not None:
+            fgn_latent_bank = sample_fgn_rollout_latent_bank(
+                num_members=n_ens if use_fgn_ensemble else 1,
+                batch_size=1,
+                latent_dim=fgn_noise_dim,
+                device=device,
+                dtype=full_dynamic.dtype,
+                temporal_mode=fgn_latent_temporal_mode,
+            )
 
         for t in range(rollout_length):
             with torch.no_grad():
@@ -2235,24 +2616,52 @@ def rollout_prediction(
                             max_logvar=gaussian_max_logvar,
                         )
                         pred_stack = sampled_single.unsqueeze(0)
+                elif use_fgn_ensemble:
+                    preds = []
+                    for ens_idx in range(n_ens):
+                        dyn_hist = current_dynamics[ens_idx]
+                        dyn_flat = dyn_hist.permute(1, 0, 2).reshape(1, dyn_hist.shape[1], -1)
+                        bc_flat = current_boundary.permute(1, 0, 2).reshape(1, current_boundary.shape[1], -1)
+                        x = torch.cat([sample["static"].to(device).unsqueeze(0), bc_flat, dyn_flat], dim=2)
+                        z = get_fgn_rollout_latent(
+                            latent_bank=fgn_latent_bank,
+                            member_idx=ens_idx,
+                            batch_size=x.shape[0],
+                            latent_dim=fgn_noise_dim,
+                            device=device,
+                            dtype=x.dtype,
+                        )
+                        p = model(
+                            input_geom=geometry.to(device).unsqueeze(0),
+                            latent_queries=sample["query_points"].to(device).unsqueeze(0),
+                            output_queries=geometry.to(device).unsqueeze(0),
+                            x=x,
+                            ada_in=z,
+                        )
+                        preds.append(p)
+                    pred_stack = torch.stack(preds, dim=0)
+                    pred = pred_stack.mean(dim=0)
                 else:
                     dyn_flat = current_dynamic.permute(1, 0, 2).reshape(1, current_dynamic.shape[1], -1)
                     bc_flat = current_boundary.permute(1, 0, 2).reshape(1, current_boundary.shape[1], -1)
                     x = torch.cat([sample["static"].to(device).unsqueeze(0), bc_flat, dyn_flat], dim=2)
-                    if fgn_noise_dim is not None and n_ens > 1:
-                        preds = []
-                        for _ in range(n_ens):
-                            z = torch.randn(x.shape[0], fgn_noise_dim, device=device, dtype=x.dtype)
-                            p = model(
-                                input_geom=geometry.to(device).unsqueeze(0),
-                                latent_queries=sample["query_points"].to(device).unsqueeze(0),
-                                output_queries=geometry.to(device).unsqueeze(0),
-                                x=x,
-                                ada_in=z,
-                            )
-                            preds.append(p)
-                        pred_stack = torch.stack(preds, dim=0)
-                        pred = pred_stack.mean(dim=0)
+                    if fgn_noise_dim is not None:
+                        z = get_fgn_rollout_latent(
+                            latent_bank=fgn_latent_bank,
+                            member_idx=0,
+                            batch_size=x.shape[0],
+                            latent_dim=fgn_noise_dim,
+                            device=device,
+                            dtype=x.dtype,
+                        )
+                        pred = model(
+                            input_geom=geometry.to(device).unsqueeze(0),
+                            latent_queries=sample["query_points"].to(device).unsqueeze(0),
+                            output_queries=geometry.to(device).unsqueeze(0),
+                            x=x,
+                            ada_in=z,
+                        )
+                        pred_stack = pred.unsqueeze(0)
                     else:
                         pred = model(
                             input_geom=geometry.to(device).unsqueeze(0),
@@ -2302,6 +2711,11 @@ def rollout_prediction(
                 else:
                     current_dynamic = torch.cat(
                         [current_dynamic[1:], sampled_single.squeeze(0).unsqueeze(0)], dim=0
+                    )
+            elif use_fgn_ensemble:
+                for ens_idx in range(n_ens):
+                    current_dynamics[ens_idx] = torch.cat(
+                        [current_dynamics[ens_idx][1:], pred_stack[ens_idx, 0].unsqueeze(0)], dim=0
                     )
             else:
                 current_dynamic = torch.cat([current_dynamic[1:], pred.squeeze(0).unsqueeze(0)], dim=0)
@@ -2492,6 +2906,14 @@ def main():
         setattr(config.gino, "data_channels", data_channels)
         setattr(config.gino, "out_channels", n_target_channels)
     ar_rollout_steps = max(1, _safe_int(_cfg_get(config.opt, "ar_rollout_steps", 1), 1))
+    data_boundary_kwargs = get_dataset_boundary_kwargs(config.data)
+    logger.info(
+        "Training dataset boundary_source=%s%s",
+        data_boundary_kwargs["boundary_source"],
+        f", clean_boundary_file={data_boundary_kwargs['clean_boundary_file']}"
+        if data_boundary_kwargs["boundary_source"] == "clean_family"
+        else "",
+    )
     full_dataset = FloodDatasetHDF(
         data_root=config.data.root,
         n_history=config.data.n_history,
@@ -2506,6 +2928,7 @@ def main():
         noise_std=noise_std,
         ar_rollout_steps=ar_rollout_steps,
         target_variables=target_variables,
+        **data_boundary_kwargs,
     )
     n_samples_max = _cfg_get(config.data, "n_samples_max", None)
     if n_samples_max is not None:
@@ -2665,8 +3088,16 @@ def main():
             "Use 'deterministic' or 'gaussian'."
         )
     setattr(config.gino, "output_distribution", output_distribution)
+    fgn_latent_temporal_mode = normalize_fgn_latent_temporal_mode(
+        _cfg_get(config.gino, "fgn_latent_temporal_mode", "stepwise")
+    )
+    setattr(config.gino, "fgn_latent_temporal_mode", fgn_latent_temporal_mode)
     training_loss_name = str(_cfg_get(config.opt, "training_loss", "l2")).strip().lower()
     setattr(config.opt, "training_loss", training_loss_name)
+    fgn_ar_state_update = normalize_fgn_ar_state_update(
+        _cfg_get(config.opt, "fgn_ar_state_update", "mean_feedback")
+    )
+    setattr(config.opt, "fgn_ar_state_update", fgn_ar_state_update)
 
     if training_loss_name == "gaussian_nll" and output_distribution != "gaussian":
         raise ValueError(
@@ -2848,6 +3279,8 @@ def main():
             ar_truncation_steps=ar_truncation_steps,
             crps_sample_chunk_size=crps_sample_chunk_size,
             use_activation_checkpointing=use_activation_checkpointing,
+            fgn_latent_temporal_mode=fgn_latent_temporal_mode,
+            fgn_ar_state_update=fgn_ar_state_update,
         )
     elif output_distribution == "gaussian" and training_loss_name == "gaussian_nll":
         trainer = GaussianNLLTrainer(
@@ -2900,6 +3333,14 @@ def main():
             else ""
         ),
     )
+    if use_fgn and training_loss_name == "crps":
+        logger.info(
+            "FGN settings: latent_temporal_mode=%s, ar_state_update=%s, crps_n_samples=%s, fgn_noise_dim=%s",
+            fgn_latent_temporal_mode,
+            fgn_ar_state_update,
+            crps_n_samples,
+            fgn_noise_dim,
+        )
 
     # Optional: verify gradient flow and overfit one batch (set verify_training: true in config)
     try:
@@ -2965,6 +3406,8 @@ def main():
     if checkpoint_save_dir is None:
         checkpoint_save_dir = "."
     checkpoint_resume_dir = _cfg_get(config.checkpoint, "resume_from_dir", None)
+    if is_logger:
+        save_effective_config_snapshot(config, checkpoint_save_dir, logger=logger)
 
     trainer.train(
         train_loader=train_loader,
@@ -3004,6 +3447,14 @@ def main():
     rollout_skip_before_timestep = _cfg_get(config.data, "skip_before_timestep", 0)
 
     rollout_data_root = config.rollout_data.root
+    rollout_boundary_kwargs = get_dataset_boundary_kwargs(config.rollout_data, split="test")
+    logger.info(
+        "Rollout dataset boundary_source=%s%s",
+        rollout_boundary_kwargs["boundary_source"],
+        f", clean_boundary_file={rollout_boundary_kwargs['clean_boundary_file']}"
+        if rollout_boundary_kwargs["boundary_source"] == "clean_family"
+        else "",
+    )
     rollout_test_dataset = FloodRolloutTestDatasetHDF(
         rollout_data_root=rollout_data_root,
         n_history=history_steps,
@@ -3014,6 +3465,7 @@ def main():
         hdf_suffix=".hdf",
         raise_on_smaller=True,
         skip_before_timestep=rollout_skip_before_timestep,
+        **rollout_boundary_kwargs,
     )
 
     # Normalizing rollout data
@@ -3101,6 +3553,7 @@ def main():
         out_dir=config.rollout.out_dir,
         fgn_noise_dim=fgn_noise_dim if use_fgn else None,
         n_ensemble_samples=_cfg_get(config.rollout, "n_ensemble_samples", 1),
+        fgn_latent_temporal_mode=fgn_latent_temporal_mode,
         gaussian_min_logvar=_safe_float(_cfg_get(config.opt, "gaussian_min_logvar", -9.0), -9.0),
         gaussian_max_logvar=_safe_float(_cfg_get(config.opt, "gaussian_max_logvar", 4.0), 4.0),
     )

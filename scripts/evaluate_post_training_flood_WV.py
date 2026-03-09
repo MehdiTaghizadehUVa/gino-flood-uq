@@ -55,7 +55,12 @@ from train_gino_flood_train_rollout_animation_WV import (  # noqa: E402
     NormalizedRolloutTestDataset,
     create_rollout_animation,
     generate_publication_maps,
+    get_dataset_boundary_kwargs,
     parse_target_variables,
+    normalize_fgn_latent_temporal_mode,
+    normalize_fgn_ar_state_update,
+    sample_fgn_rollout_latent_bank,
+    get_fgn_rollout_latent,
 )
 from neuralop import get_model  # noqa: E402
 from neuralop.models.base_model import BaseModel  # noqa: E402
@@ -1339,6 +1344,7 @@ def _rollout_prediction_per_hydrograph(
     logger: logging.Logger,
     fgn_noise_dim: Optional[int],
     n_ensemble_samples: int,
+    fgn_latent_temporal_mode: str = "stepwise",
     gaussian_mode: bool = False,
     gaussian_min_logvar: float = -9.0,
     gaussian_max_logvar: float = 4.0,
@@ -1370,6 +1376,9 @@ def _rollout_prediction_per_hydrograph(
     use_ensemble = n_ens > 1 or n_models > 1
     member_model_indices = _build_member_model_indices(n_models, n_ens)
     model_counts = [member_model_indices.count(i) for i in range(n_models)]
+    fgn_latent_temporal_mode = normalize_fgn_latent_temporal_mode(
+        fgn_latent_temporal_mode
+    )
     gaussian_state_update = str(gaussian_state_update).strip().lower()
     if gaussian_mode and gaussian_state_update not in {"sample", "mu"}:
         raise ValueError(
@@ -1384,6 +1393,12 @@ def _rollout_prediction_per_hydrograph(
         logger.info(
             "Gaussian rollout state update mode='%s' (predictions are still sampled for ensemble metrics).",
             gaussian_state_update,
+        )
+    if fgn_noise_dim is not None:
+        logger.info(
+            "FGN rollout latent temporal mode='%s' with fgn_noise_dim=%d",
+            fgn_latent_temporal_mode,
+            fgn_noise_dim,
         )
     if not use_ensemble:
         logger.warning(
@@ -1474,6 +1489,16 @@ def _rollout_prediction_per_hydrograph(
         else:
             current_dynamic = init_history.clone()
         current_boundary = full_boundary[skip_before_timestep:start_pred_t].clone()
+        fgn_latent_bank = None
+        if fgn_noise_dim is not None:
+            fgn_latent_bank = sample_fgn_rollout_latent_bank(
+                num_members=n_ens if use_ensemble else 1,
+                batch_size=1,
+                latent_dim=fgn_noise_dim,
+                device=device,
+                dtype=dynamic_ref.dtype,
+                temporal_mode=fgn_latent_temporal_mode,
+            )
 
         for t in range(rollout_length):
             mu_stack: Optional[torch.Tensor] = None
@@ -1510,7 +1535,14 @@ def _rollout_prediction_per_hydrograph(
                             logvar_members.append(logvar)
                             state_members.append(mu if gaussian_state_update == "mu" else sampled)
                         elif fgn_noise_dim is not None:
-                            z = torch.randn(x.shape[0], fgn_noise_dim, device=device, dtype=x.dtype)
+                            z = get_fgn_rollout_latent(
+                                latent_bank=fgn_latent_bank,
+                                member_idx=ens_idx,
+                                batch_size=x.shape[0],
+                                latent_dim=fgn_noise_dim,
+                                device=device,
+                                dtype=x.dtype,
+                            )
                             pred_members.append(
                                 model(
                                     input_geom=geom_0,
@@ -1561,7 +1593,14 @@ def _rollout_prediction_per_hydrograph(
                         logvar_stack = logvar.unsqueeze(0)
                         state_stack = (mu if gaussian_state_update == "mu" else sampled).unsqueeze(0)
                     elif fgn_noise_dim is not None:
-                        z = torch.randn(x.shape[0], fgn_noise_dim, device=device, dtype=x.dtype)
+                        z = get_fgn_rollout_latent(
+                            latent_bank=fgn_latent_bank,
+                            member_idx=0,
+                            batch_size=x.shape[0],
+                            latent_dim=fgn_noise_dim,
+                            device=device,
+                            dtype=x.dtype,
+                        )
                         pred = model(
                             input_geom=geom_0,
                             latent_queries=query_0,
@@ -1999,6 +2038,7 @@ def _rollout_prediction_generic(
     logger: logging.Logger,
     fgn_noise_dim: Optional[int] = None,
     n_ensemble_samples: int = 1,
+    fgn_latent_temporal_mode: str = "stepwise",
     gaussian_mode: bool = False,
     gaussian_min_logvar: float = -9.0,
     gaussian_max_logvar: float = 4.0,
@@ -2029,6 +2069,9 @@ def _rollout_prediction_generic(
     use_ensemble = n_ens > 1 or n_models > 1
     member_model_indices = _build_member_model_indices(n_models, n_ens)
     model_counts = [member_model_indices.count(i) for i in range(n_models)]
+    fgn_latent_temporal_mode = normalize_fgn_latent_temporal_mode(
+        fgn_latent_temporal_mode
+    )
     gaussian_state_update = str(gaussian_state_update).strip().lower()
     if gaussian_mode and gaussian_state_update not in {"sample", "mu"}:
         raise ValueError(
@@ -2043,6 +2086,12 @@ def _rollout_prediction_generic(
         logger.info(
             "Gaussian rollout state update mode='%s' (predictions are still sampled for ensemble metrics).",
             gaussian_state_update,
+        )
+    if fgn_noise_dim is not None:
+        logger.info(
+            "FGN rollout latent temporal mode='%s' with fgn_noise_dim=%d",
+            fgn_latent_temporal_mode,
+            fgn_noise_dim,
         )
 
     per_channel_rmse: Dict[str, List[np.ndarray]] = {name: [] for name in target_variables}
@@ -2078,6 +2127,16 @@ def _rollout_prediction_generic(
         else:
             current_dynamic = full_dynamic[skip_before_timestep:start_pred_t].clone()
         current_boundary = full_boundary[skip_before_timestep:start_pred_t].clone()
+        fgn_latent_bank = None
+        if fgn_noise_dim is not None:
+            fgn_latent_bank = sample_fgn_rollout_latent_bank(
+                num_members=n_ens if use_ensemble else 1,
+                batch_size=1,
+                latent_dim=fgn_noise_dim,
+                device=device,
+                dtype=full_dynamic.dtype,
+                temporal_mode=fgn_latent_temporal_mode,
+            )
 
         static_0 = sample["static"].to(device).unsqueeze(0)
         geom_0 = geometry.to(device).unsqueeze(0)
@@ -2118,7 +2177,14 @@ def _rollout_prediction_generic(
                             logvar_members.append(logvar)
                             state_members.append(mu if gaussian_state_update == "mu" else sampled)
                         elif fgn_noise_dim is not None:
-                            z = torch.randn(x.shape[0], fgn_noise_dim, device=device, dtype=x.dtype)
+                            z = get_fgn_rollout_latent(
+                                latent_bank=fgn_latent_bank,
+                                member_idx=ens_idx,
+                                batch_size=x.shape[0],
+                                latent_dim=fgn_noise_dim,
+                                device=device,
+                                dtype=x.dtype,
+                            )
                             pred_members.append(
                                 model(
                                     input_geom=geom_0,
@@ -2174,7 +2240,14 @@ def _rollout_prediction_generic(
                             pred if gaussian_state_update == "mu" else sampled_single
                         ).unsqueeze(0)
                     elif fgn_noise_dim is not None:
-                        z = torch.randn(x.shape[0], fgn_noise_dim, device=device, dtype=x.dtype)
+                        z = get_fgn_rollout_latent(
+                            latent_bank=fgn_latent_bank,
+                            member_idx=0,
+                            batch_size=x.shape[0],
+                            latent_dim=fgn_noise_dim,
+                            device=device,
+                            dtype=x.dtype,
+                        )
                         pred = model(
                             input_geom=geom_0,
                             latent_queries=query_0,
@@ -2449,6 +2522,12 @@ def _make_trainer(
             ),
             ar_pooled_crps_gamma=float(
                 _opt(config, "opt", "ar_pooled_crps_gamma", 1.0)
+            ),
+            fgn_latent_temporal_mode=normalize_fgn_latent_temporal_mode(
+                _opt(config, "gino", "fgn_latent_temporal_mode", "stepwise")
+            ),
+            fgn_ar_state_update=normalize_fgn_ar_state_update(
+                _opt(config, "opt", "fgn_ar_state_update", "mean_feedback")
             ),
         )
     return Trainer(**common)
@@ -2770,6 +2849,14 @@ def _build_one_step_datasets(
     if hasattr(config, "gino"):
         setattr(config.gino, "data_channels", data_channels)
         setattr(config.gino, "out_channels", n_target)
+    data_boundary_kwargs = get_dataset_boundary_kwargs(config.data)
+    logger.info(
+        "One-step dataset boundary_source=%s%s",
+        data_boundary_kwargs["boundary_source"],
+        f", clean_boundary_file={data_boundary_kwargs['clean_boundary_file']}"
+        if data_boundary_kwargs["boundary_source"] == "clean_family"
+        else "",
+    )
 
     with _PhaseTimer(logger, "Building one-step dataset"):
         full = FloodDatasetHDF(
@@ -2786,6 +2873,7 @@ def _build_one_step_datasets(
             noise_std=_opt(config, "data", "noise_std", None),
             ar_rollout_steps=ar_rollout_steps,
             target_variables=target_variables,
+            **data_boundary_kwargs,
         )
     n_max = _opt(config, "data", "n_samples_max", None)
     if n_max is not None and int(n_max) > 0:
@@ -2833,6 +2921,14 @@ def _build_rollout_normalized_dataset(
         rollout_static = list(rollout_static)
 
     with _PhaseTimer(logger, "Building rollout test dataset"):
+        rollout_boundary_kwargs = get_dataset_boundary_kwargs(config.rollout_data, split="test")
+        logger.info(
+            "Rollout dataset boundary_source=%s%s",
+            rollout_boundary_kwargs["boundary_source"],
+            f", clean_boundary_file={rollout_boundary_kwargs['clean_boundary_file']}"
+            if rollout_boundary_kwargs["boundary_source"] == "clean_family"
+            else "",
+        )
         rds = FloodRolloutTestDatasetHDF(
             rollout_data_root=config.rollout_data.root,
             n_history=history_steps,
@@ -2843,6 +2939,7 @@ def _build_rollout_normalized_dataset(
             hdf_suffix=".hdf",
             raise_on_smaller=True,
             skip_before_timestep=skip,
+            **rollout_boundary_kwargs,
         )
 
     groups = group_run_ids_by_hydrograph(rds.valid_run_ids)
@@ -2965,6 +3062,16 @@ def main() -> int:
     out_dist = str(_opt(config, "gino", "output_distribution", "deterministic")).strip().lower()
     train_loss_name = str(_opt(config, "opt", "training_loss", "l2")).strip().lower()
     use_fgn_cfg = bool(_opt(config, "gino", "use_fgn_noise", False))
+    fgn_latent_temporal_mode = normalize_fgn_latent_temporal_mode(
+        _opt(config, "gino", "fgn_latent_temporal_mode", "stepwise")
+    )
+    fgn_ar_state_update = normalize_fgn_ar_state_update(
+        _opt(config, "opt", "fgn_ar_state_update", "mean_feedback")
+    )
+    if hasattr(config, "gino"):
+        setattr(config.gino, "fgn_latent_temporal_mode", fgn_latent_temporal_mode)
+    if hasattr(config, "opt"):
+        setattr(config.opt, "fgn_ar_state_update", fgn_ar_state_update)
     if train_loss_name == "gaussian_nll" and out_dist != "gaussian":
         raise ValueError(
             "training_loss='gaussian_nll' requires gino.output_distribution='gaussian'."
@@ -3026,6 +3133,14 @@ def main() -> int:
         len(models),
         gaussian_mode,
     )
+    if use_fgn:
+        logger.info(
+            "FGN settings: latent_temporal_mode=%s, ar_state_update=%s, crps_n_samples=%s, fgn_noise_dim=%s",
+            fgn_latent_temporal_mode,
+            fgn_ar_state_update,
+            max(2, int(_opt(config, "opt", "crps_n_samples", 2))),
+            int(_opt(config, "gino", "fgn_noise_dim", 32)),
+        )
 
     run_single = args.run_single_step and not args.skip_single_step
     if run_single:
@@ -3138,6 +3253,7 @@ def main() -> int:
                 logger=logger,
                 fgn_noise_dim=_opt(config, "gino", "fgn_noise_dim", 32) if use_fgn else None,
                 n_ensemble_samples=rollout_n_ensemble,
+                fgn_latent_temporal_mode=fgn_latent_temporal_mode,
                 gaussian_mode=gaussian_mode,
                 gaussian_min_logvar=_opt_float(config, "opt", "gaussian_min_logvar", -9.0),
                 gaussian_max_logvar=_opt_float(config, "opt", "gaussian_max_logvar", 4.0),
@@ -3159,6 +3275,7 @@ def main() -> int:
                 logger=logger,
                 fgn_noise_dim=_opt(config, "gino", "fgn_noise_dim", 32) if use_fgn else None,
                 n_ensemble_samples=rollout_n_ensemble,
+                fgn_latent_temporal_mode=fgn_latent_temporal_mode,
                 gaussian_mode=gaussian_mode,
                 gaussian_min_logvar=_opt_float(config, "opt", "gaussian_min_logvar", -9.0),
                 gaussian_max_logvar=_opt_float(config, "opt", "gaussian_max_logvar", 4.0),

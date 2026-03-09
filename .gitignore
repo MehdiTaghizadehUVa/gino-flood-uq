@@ -87,3 +87,19 @@ single_step_maps*/
 test-output.xml
 diagnose_single_step_depth.png
 hdf_geometry_cell_points_vs_centers.png
+
+# Repo-local runtime / experiment outputs
+_codex_backups/
+_workspace_archive/
+scripts/logs/
+scripts/eval_outputs/
+scripts/wandb/
+scripts/smoke_ckpts/
+scripts/job_snapshots/
+scripts/eval_ckpt_sets/
+scripts/rollout_uq_*/
+scripts/*.log
+scripts/*.log.*
+scripts/*.tmp
+scripts/*.bak_*
+scripts/smoke_*.txt

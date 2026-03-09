@@ -208,6 +208,7 @@ class GINO(BaseModel):
         fno_ada_in_dim=1,
         use_fgn_noise=False,
         fgn_noise_dim=32,
+        fgn_latent_temporal_mode="stepwise",
         fno_preactivation=False,
         fno_skip='linear',
         fno_channel_mlp_skip='soft-gating',
@@ -274,6 +275,7 @@ class GINO(BaseModel):
         self.fno_norm = fno_norm
         self.use_fgn_noise = use_fgn_noise
         self.fgn_noise_dim = fgn_noise_dim
+        self.fgn_latent_temporal_mode = str(fgn_latent_temporal_mode).strip().lower()
 
         if use_fgn_noise and fno_norm != "ada_in":
             raise ValueError(

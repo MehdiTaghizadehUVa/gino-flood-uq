@@ -37,6 +37,7 @@ from train_gino_flood_train_rollout_animation_WV import (  # noqa: E402
     FloodGINODataProcessor,
     NormalizedDatasetOnTheFly,
     fit_normalizers_streaming,
+    get_dataset_boundary_kwargs,
     load_config_and_setup,
     make_split_generator,
     parse_target_variables,
@@ -159,6 +160,7 @@ def main():
         noise_std=noise_std,
         ar_rollout_steps=ar_rollout_steps,
         target_variables=target_variables,
+        **get_dataset_boundary_kwargs(config.data),
     )
     n_samples_max = getattr(config.data, "n_samples_max", None)
     if n_samples_max is not None:

@@ -18,6 +18,14 @@ flood: &FLOOD
 
   data:
     root: "C:/Users/jrj6wm/Desktop/Data_Generation_UQ/Results/M40"
+    # Boundary input policy:
+    # - member_hdf: use realized member inflow from each HDF (legacy datasets)
+    # - clean_family: use deterministic family backbone from clean hydrograph table
+    boundary_source: "member_hdf"
+    # For dynamic-forcing datasets, point this to the packaged metadata directory
+    # (for example ../metadata relative to data.root).
+    clean_boundary_root: "../metadata"
+    clean_boundary_file: "Hydrographs_Train_Clean.txt"
     resolution: 48
     n_history: 3
     batch_size: 128
@@ -47,11 +55,28 @@ flood: &FLOOD
 
   rollout_data:
     root: "C:/Users/jrj6wm/Desktop/Data_Generation_UQ/Results/M40"
+    boundary_source: "member_hdf"
+    clean_boundary_root: "../metadata"
+    clean_boundary_file: "Hydrographs_Test_Clean.txt"
     test_txt: "test.txt"
     static_text_files:
       - "M40_CS.txt"
       - "M40_CU.txt"
       - "M40_FA.txt"
+
+  rollout_calibration:
+    enabled: true
+    root: "C:/Users/jrj6wm/Desktop/Data_Generation_UQ/Results/M40"
+    boundary_source: "member_hdf"
+    clean_boundary_root: "../metadata"
+    clean_boundary_file: "Hydrographs_Val_Clean.txt"
+    calib_txt: "calib.txt"
+    fit_wet_threshold: 0.01
+    min_pred_std: 1.0e-4
+    c_clip_min: 0.25
+    c_clip_max: 4.0
+    smooth_window: 5
+    allow_same_split: false
 
   gino:
     data_channels: 20   # overwritten at runtime
@@ -82,6 +107,10 @@ flood: &FLOOD
     output_distribution: 'deterministic'
     use_fgn_noise: true
     fgn_noise_dim: 32
+    # FGN rollout latent semantics:
+    # - stepwise: sample fresh latent z_t each AR step
+    # - persistent: sample one latent per member and reuse across the hydrograph rollout
+    fgn_latent_temporal_mode: 'persistent'
     fno_factorization: 'tucker'
     fno_rank: 0.4
     fno_joint_factorization: false
@@ -129,6 +158,10 @@ flood: &FLOOD
     ar_truncation_steps: 1
     # Training loss options: 'l2', 'l2_abs', 'crps' (FGN), 'gaussian_nll' (Gaussian head)
     training_loss: 'crps'
+    # FGN AR state update semantics:
+    # - mean_feedback: feed back ensemble mean state (legacy)
+    # - member_feedback: each CRPS member feeds back its own predicted state
+    fgn_ar_state_update: 'member_feedback'
     crps_n_samples: 2
     crps_sample_chunk_size: 1
     crps_l2_weight: 0.0

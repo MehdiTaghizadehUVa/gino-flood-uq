@@ -51,6 +51,7 @@ from train_gino_flood_train_rollout_animation_WV import (  # noqa: E402
     NormalizedDatasetOnTheFly,
     dataloader_worker_init,
     fit_normalizers_streaming,
+    get_dataset_boundary_kwargs,
     make_dataloader_generator,
     make_split_generator,
     parse_target_variables,
@@ -248,6 +249,16 @@ def _prepare_datasets(
         skip_before_timestep=int(safe_get(data_cfg, "skip_before_timestep", 0)),
         ar_rollout_steps=max(1, int(safe_get(safe_get(config, "opt", {}), "ar_rollout_steps", 1))),
         target_variables=target_variables,
+    )
+    dataset_kwargs.update(get_dataset_boundary_kwargs(data_cfg))
+    _rank0_info(
+        logger,
+        dist_ctx,
+        "Training dataset boundary_source=%s%s",
+        dataset_kwargs["boundary_source"],
+        f", clean_boundary_file={dataset_kwargs['clean_boundary_file']}"
+        if dataset_kwargs["boundary_source"] == "clean_family"
+        else "",
     )
     # Backward compatibility: only pass write_train_txt if this FloodDatasetHDF
     # implementation supports it.

@@ -59,6 +59,7 @@ def main():
         make_split_generator,
         parse_target_variables,
         FloodDatasetHDF,
+        get_dataset_boundary_kwargs,
         NormalizedDatasetOnTheFly,
         write_train_txt_from_data_root,
         FloodGINODataProcessor,
@@ -113,6 +114,7 @@ def main():
         noise_std=getattr(config.data, "noise_std", None),
         ar_rollout_steps=ar_rollout_steps,
         target_variables=target_variables,
+        **get_dataset_boundary_kwargs(config.data),
     )
     n_samples_max = getattr(config.data, "n_samples_max", None)
     if n_samples_max is not None and int(n_samples_max) > 0:

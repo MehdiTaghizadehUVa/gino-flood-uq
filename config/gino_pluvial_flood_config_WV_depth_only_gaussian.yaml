@@ -21,6 +21,9 @@ flood: &FLOOD
 
   data:
     root: "C:/Users/jrj6wm/Desktop/Data_Generation_UQ/Results/M40"
+    boundary_source: "member_hdf"
+    clean_boundary_root: "../metadata"
+    clean_boundary_file: "Hydrographs_Train_Clean.txt"
     resolution: 48
     n_history: 3
     batch_size: 128
@@ -47,6 +50,9 @@ flood: &FLOOD
 
   rollout_data:
     root: "C:/Users/jrj6wm/Desktop/Data_Generation_UQ/Results/M40"
+    boundary_source: "member_hdf"
+    clean_boundary_root: "../metadata"
+    clean_boundary_file: "Hydrographs_Test_Clean.txt"
     test_txt: "test.txt"
     static_text_files:
       - "M40_CS.txt"

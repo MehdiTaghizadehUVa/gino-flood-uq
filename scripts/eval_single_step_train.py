@@ -50,6 +50,7 @@ def main():
         make_split_generator,
         parse_target_variables,
         FloodDatasetHDF,
+        get_dataset_boundary_kwargs,
         fit_normalizers_streaming,
         NormalizedDatasetOnTheFly,
         write_train_txt_from_data_root,
@@ -122,6 +123,7 @@ def main():
         noise_std=getattr(config.data, "noise_std", None),
         ar_rollout_steps=ar_rollout_steps,
         target_variables=target_variables,
+        **get_dataset_boundary_kwargs(config.data),
     )
     # Same as training: optional n_samples_max then 90/10 split with fixed seed (no leakage)
     n_samples_max = getattr(config.data, "n_samples_max", None)
