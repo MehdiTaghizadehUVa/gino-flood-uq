@@ -8,7 +8,7 @@ from torch import nn
 from torch.utils.data import DataLoader, Dataset
 
 try:
-    from scripts.evaluate_post_training_flood_WV import (
+    from neuralop.flood.eval.common import (
         _build_eval_losses,
         _make_trainer,
         _rollout_prediction_generic,

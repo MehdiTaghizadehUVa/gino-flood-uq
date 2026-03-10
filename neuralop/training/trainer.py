@@ -761,13 +761,14 @@ class Trainer:
                                                 map_location={'cpu': self.device})
 
         if resume_epoch is not None:
-            if resume_epoch > self.start_epoch:
-                self.start_epoch = resume_epoch
+            next_epoch = int(resume_epoch) + 1
+            if next_epoch > self.start_epoch:
+                self.start_epoch = next_epoch
                 if self.verbose:
                     if self.logger:
-                        self.logger.info("Trainer resuming from epoch %s", resume_epoch)
+                        self.logger.info("Trainer resuming from epoch %s", next_epoch)
                     else:
-                        print(f"Trainer resuming from epoch {resume_epoch}")
+                        print(f"Trainer resuming from epoch {next_epoch}")
 
 
     def checkpoint(self, save_dir, save_name: Optional[str]=None):

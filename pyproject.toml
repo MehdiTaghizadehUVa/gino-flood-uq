@@ -39,6 +39,13 @@ include = [
 [tool.setuptools.dynamic]
 version = {attr = "neuralop.__version__"}
 
+[project.scripts]
+neuralop-flood-train-operator = "neuralop.flood.cli.train_operator:main"
+neuralop-flood-train-diffusion = "neuralop.flood.cli.train_diffusion:main"
+neuralop-flood-eval-operator = "neuralop.flood.eval.common:main"
+neuralop-flood-eval-operator-calibrated = "neuralop.flood.eval.calibrated:main"
+neuralop-flood-eval-diffusion = "neuralop.flood.eval.diffusion:main"
+
 [project.optional-dependencies]
 dev = [
     "pytest",

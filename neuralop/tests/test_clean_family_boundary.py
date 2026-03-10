@@ -10,7 +10,7 @@ except Exception as exc:  # pragma: no cover - environment dependency guard
     pytest.skip(f"h5py unavailable: {exc}", allow_module_level=True)
 
 try:
-    from scripts.train_gino_flood_train_rollout_animation_WV import (
+    from neuralop.flood.data.wv import (
         FloodDatasetHDF,
         FloodRolloutTestDatasetHDF,
     )

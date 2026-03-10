@@ -51,9 +51,9 @@ def test_wet_mask_excludes_dry_dominated_cells():
     wet_thr = 0.01
     n = 500
     x_dry = np.full(n, 0.002, dtype=np.float64)
-    y_dry = np.full(n, 0.50, dtype=np.float64)
+    y_dry = np.full(n, 0.003, dtype=np.float64)
     sp_dry = np.full(n, 0.02, dtype=np.float64)
-    sr_dry = np.full(n, 0.80, dtype=np.float64)
+    sr_dry = np.full(n, 0.02, dtype=np.float64)
 
     x_wet = np.linspace(0.05, 1.0, n)
     y_wet = 0.1 + 1.1 * x_wet
@@ -77,7 +77,7 @@ def test_wet_mask_excludes_dry_dominated_cells():
         smooth_window=1,
     )
 
-    # Wet subset drives fit, dry conflicting subset should not dominate.
+    # Dry-dominated subset stays below threshold in both pred/ref means, so the wet subset drives fit.
     assert coeffs["a"][0] == pytest.approx(0.1, abs=1e-6)
     assert coeffs["b"][0] == pytest.approx(1.1, abs=1e-6)
     assert coeffs["c"][0] == pytest.approx(1.5, abs=1e-6)

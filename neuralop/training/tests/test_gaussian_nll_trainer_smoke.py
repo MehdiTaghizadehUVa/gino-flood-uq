@@ -6,7 +6,7 @@ import pytest
 from neuralop.losses.probabilistic_losses import GaussianNLLLoss
 
 try:
-    from scripts.train_gino_flood_train_rollout_animation_WV import GaussianNLLTrainer
+    from neuralop.flood.train.operator import GaussianNLLTrainer
 except Exception as exc:  # pragma: no cover - environment dependency guard
     pytest.skip(f"Gaussian trainer script import unavailable: {exc}", allow_module_level=True)
 

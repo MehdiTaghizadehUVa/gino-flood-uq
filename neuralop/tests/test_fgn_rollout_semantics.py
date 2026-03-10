@@ -6,12 +6,12 @@ import torch
 from torch import nn
 
 try:
-    from scripts.train_gino_flood_train_rollout_animation_WV import (
+    from neuralop.flood.train.operator import (
         get_fgn_rollout_latent,
         sample_fgn_rollout_latent_bank,
         update_fgn_dynamic_members,
     )
-    from scripts.evaluate_post_training_flood_WV import (
+    from neuralop.flood.eval.common import (
         _rollout_prediction_generic,
         _rollout_prediction_per_hydrograph,
     )

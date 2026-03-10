@@ -175,6 +175,7 @@ def load_checkpoint_bundle(
     *,
     map_location: str | torch.device = "cpu",
     allow_unsafe_legacy_load: bool,
+    merge_legacy_training_state: bool = False,
     logger: Optional[logging.Logger] = None,
 ) -> Dict[str, Any]:
     """
@@ -183,6 +184,10 @@ def load_checkpoint_bundle(
     Preferred path:
     - `<stem>_weights.pt` loaded via safe strategy
     - `<stem>_metadata.json`
+
+    Optional training-state merge path:
+    - when `merge_legacy_training_state=True`, fill optimizer/scheduler state from
+      the legacy monolithic checkpoint if sidecars omit them
 
     Legacy fallback path:
     - original checkpoint `.pt` via `load_torch_checkpoint(...)`
@@ -209,6 +214,16 @@ def load_checkpoint_bundle(
             merged = dict(metadata)
             for key, value in weights.items():
                 merged[key] = value
+            if merge_legacy_training_state and allow_unsafe_legacy_load and cp.exists():
+                legacy = load_torch_checkpoint(
+                    cp,
+                    map_location=map_location,
+                    allow_unsafe_legacy_load=True,
+                    logger=logger,
+                )
+                for key in ("optimizer_state_dict", "scheduler_state_dict"):
+                    if key not in merged and key in legacy:
+                        merged[key] = legacy[key]
             return merged
         except Exception as exc:
             if not allow_unsafe_legacy_load:

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+from pathlib import Path
 from typing import Any, Dict, Sequence
 
 import numpy as np
@@ -159,6 +161,8 @@ def validate_split_leakage_guard(
     test_txt: str,
     *,
     allow_same_split: bool = False,
+    calib_root: str | Path | None = None,
+    test_root: str | Path | None = None,
 ) -> None:
     """Validate calibration/eval split paths for leakage-safe usage."""
     c = str(calib_txt).strip()
@@ -167,8 +171,54 @@ def validate_split_leakage_guard(
         raise ValueError("rollout_calibration.calib_txt must be non-empty.")
     if not t:
         raise ValueError("rollout_data.test_txt must be non-empty.")
-    if (not allow_same_split) and c == t:
+
+    if (not allow_same_split) and os.path.normcase(c) == os.path.normcase(t):
         raise ValueError(
             "Calibration split equals evaluation split; set rollout_calibration.allow_same_split=true "
             "only for debug/non-publishable runs."
         )
+    calib_path = _resolve_split_txt_path(c, root=calib_root)
+    test_path = _resolve_split_txt_path(t, root=test_root)
+    if (not allow_same_split) and _same_split_path(calib_path, test_path):
+        raise ValueError(
+            "Calibration split equals evaluation split; set rollout_calibration.allow_same_split=true "
+            "only for debug/non-publishable runs."
+        )
+    if allow_same_split or calib_path is None or test_path is None:
+        return
+    if not calib_path.exists() or not test_path.exists():
+        return
+    calib_ids = _load_split_run_ids(calib_path)
+    test_ids = _load_split_run_ids(test_path)
+    overlap = sorted(calib_ids & test_ids)
+    if overlap:
+        example = ", ".join(overlap[:5])
+        raise ValueError(
+            "Calibration and evaluation splits overlap in run IDs; this would leak evaluation "
+            f"data into calibration. Overlap count={len(overlap)}. Examples: {example}"
+        )
+
+
+def _resolve_split_txt_path(path_str: str, *, root: str | Path | None) -> Path | None:
+    path = Path(str(path_str))
+    if path.is_absolute():
+        return path.resolve(strict=False)
+    if root is None or str(root).strip() == "":
+        return None
+    return (Path(str(root)) / path).resolve(strict=False)
+
+
+def _same_split_path(a: Path | None, b: Path | None) -> bool:
+    if a is None or b is None:
+        return False
+    return os.path.normcase(str(a)) == os.path.normcase(str(b))
+
+
+def _load_split_run_ids(path: Path) -> set[str]:
+    with open(path, "r", encoding="utf-8-sig") as handle:
+        lines = [line.strip() for line in handle if line.strip()]
+    if not lines:
+        return set()
+    if len(lines) == 1 and "," in lines[0]:
+        return {token.strip().casefold() for token in lines[0].split(",") if token.strip()}
+    return {line.casefold() for line in lines}

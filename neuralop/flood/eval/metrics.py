@@ -1,0 +1,222 @@
+"""Metrics and ensemble-statistics helpers for flood evaluation."""
+
+from __future__ import annotations
+
+from typing import Any, Dict, List, Optional, Tuple
+
+import numpy as np
+import torch
+
+from neuralop.flood.eval.runtime import MIN_EPS, _opt, _opt_float
+from neuralop.losses.data_losses import LpLoss
+from neuralop.losses.probabilistic_losses import CRPSLoss, GaussianNLLLoss, split_gaussian_packed
+
+def _is_gaussian_mode(config: Any) -> bool:
+    out_dist = str(_opt(config, "gino", "output_distribution", "deterministic")).strip().lower()
+    train_loss = str(_opt(config, "opt", "training_loss", "l2")).strip().lower()
+    return out_dist == "gaussian" and train_loss == "gaussian_nll"
+
+
+def _sample_from_packed_gaussian(
+    out: torch.Tensor,
+    n_channels: int,
+    min_logvar: float,
+    max_logvar: float,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    mu, logvar = split_gaussian_packed(out, n_channels=n_channels)
+    logvar = torch.clamp(logvar, min=float(min_logvar), max=float(max_logvar))
+    sample = mu + torch.exp(0.5 * logvar) * torch.randn_like(mu)
+    return sample, mu, logvar
+
+
+def _build_eval_losses(config: Any, use_fgn: bool) -> Dict[str, Any]:
+    """Build loss dict for one-step evaluation (L2 and optionally CRPS)."""
+    l2_loss = LpLoss(d=2, p=2)
+    if _is_gaussian_mode(config):
+        return {
+            "l2": l2_loss,
+            "gaussian_nll": GaussianNLLLoss(
+                channel_weights=_opt(config, "opt", "crps_channel_weights", None),
+                reduction="mean",
+                min_logvar=_opt_float(config, "opt", "gaussian_min_logvar", -9.0),
+                max_logvar=_opt_float(config, "opt", "gaussian_max_logvar", 4.0),
+                logvar_reg_weight=0.0,
+            ),
+        }
+    if use_fgn and _opt(config, "opt", "training_loss", "l2") == "crps":
+        n_samples = max(2, int(_opt(config, "opt", "crps_n_samples", 2)))
+        ch_weights = _opt(config, "opt", "crps_channel_weights", None)
+        return {
+            "l2": l2_loss,
+            "crps": CRPSLoss(
+                n_samples=n_samples, channel_weights=ch_weights, reduction="mean"
+            ),
+        }
+    test_loss_name = _opt(config, "opt", "testing_loss", "l2")
+    return {test_loss_name: l2_loss}
+
+    fp = np.sum(event_pred & (~event_gt))
+    fn = np.sum((~event_pred) & event_gt)
+    denom = tp + fp + fn
+    return float(tp / denom) if denom > 0 else 1.0
+
+
+def _build_query_points_from_geometry(
+    geometry: torch.Tensor, query_res: List[int]
+) -> torch.Tensor:
+    """Build query grid points from geometry bounds."""
+    geom = geometry.detach().cpu().numpy()
+    x_vals = geom[:, 0]
+    y_vals = geom[:, 1]
+    tx = np.linspace(float(x_vals.min()), float(x_vals.max()), query_res[0], dtype=np.float32)
+    ty = np.linspace(float(y_vals.min()), float(y_vals.max()), query_res[1], dtype=np.float32)
+    grid_x, grid_y = np.meshgrid(tx, ty, indexing="ij")
+    q_pts = np.stack([grid_x, grid_y], axis=-1)
+    return torch.tensor(q_pts, device=geometry.device, dtype=geometry.dtype)
+
+
+def _crps_ensemble_vs_reference(
+    forecast_ens: np.ndarray, reference_ens: np.ndarray
+) -> np.ndarray:
+    """
+    CRPS per location for forecast ensemble against reference ensemble.
+
+    Parameters
+    ----------
+    forecast_ens: [n_forecast, n_locations]
+    reference_ens: [n_reference, n_locations]
+    """
+    term_1 = np.mean(
+        np.abs(forecast_ens[:, None, :] - reference_ens[None, :, :]), axis=(0, 1)
+    )
+    term_2 = 0.5 * np.mean(
+        np.abs(forecast_ens[:, None, :] - forecast_ens[None, :, :]), axis=(0, 1)
+    )
+    return term_1 - term_2
+
+
+def _build_member_model_indices(n_models: int, n_members: int) -> List[int]:
+    """Allocate ensemble members to models as evenly as possible."""
+    if n_models <= 0:
+        raise ValueError("n_models must be >= 1")
+    if n_members <= 0:
+        raise ValueError("n_members must be >= 1")
+    base = n_members // n_models
+    rem = n_members % n_models
+    out: List[int] = []
+    for model_idx in range(n_models):
+        count = base + (1 if model_idx < rem else 0)
+        out.extend([model_idx] * count)
+    return out
+
+
+def _variance_decomposition_by_model(
+    pred_ens: np.ndarray, member_model_indices: List[int], n_models: int
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Decompose predictive variance into within-model and between-model components.
+
+    Parameters
+    ----------
+    pred_ens: [n_ens, n_locations]
+    member_model_indices: model index for each ensemble member
+    n_models: number of trained models
+    """
+    if pred_ens.ndim != 2:
+        raise ValueError("pred_ens must be 2D [n_ens, n_locations]")
+    n_ens = pred_ens.shape[0]
+    if n_ens != len(member_model_indices):
+        raise ValueError("member_model_indices length must match n_ens")
+    n_loc = pred_ens.shape[1]
+    if n_models <= 0:
+        z = np.zeros(n_loc, dtype=np.float64)
+        return z, z, z
+
+    member_idx = np.asarray(member_model_indices, dtype=np.int64)
+    model_means: List[np.ndarray] = []
+    within_vars: List[np.ndarray] = []
+    for m in range(n_models):
+        sel = np.where(member_idx == m)[0]
+        if sel.size == 0:
+            continue
+        vals = pred_ens[sel, :]
+        model_means.append(np.mean(vals, axis=0))
+        if sel.size > 1:
+            within_vars.append(np.var(vals, axis=0, ddof=0))
+        else:
+            within_vars.append(np.zeros(n_loc, dtype=np.float64))
+    if not model_means:
+        z = np.zeros(n_loc, dtype=np.float64)
+        return z, z, z
+    within = np.mean(np.stack(within_vars, axis=0), axis=0)
+    between = (
+        np.var(np.stack(model_means, axis=0), axis=0, ddof=0)
+        if len(model_means) > 1
+        else np.zeros(n_loc, dtype=np.float64)
+    )
+    total = within + between
+    return within, between, total
+
+
+def _pit_rank_counts_from_reference(
+    pred_ens: np.ndarray,
+    ref_ens: np.ndarray,
+    pit_edges: np.ndarray,
+    n_ens: int,
+    rng: np.random.Generator,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    PIT and rank histogram counts using all reference members as pseudo-observations.
+
+    pred_ens shape: [n_pred, n_locations]
+    ref_ens shape:  [n_ref, n_locations]
+    """
+    if pred_ens.ndim != 2 or ref_ens.ndim != 2:
+        raise ValueError("pred_ens/ref_ens must be 2D arrays")
+    if pred_ens.shape[1] != ref_ens.shape[1]:
+        raise ValueError("pred_ens and ref_ens must share n_locations")
+
+    # Compare each reference member against predictive ensemble.
+    less = np.sum(pred_ens[:, None, :] < ref_ens[None, :, :], axis=0).astype(np.int64)
+    equal = np.sum(pred_ens[:, None, :] == ref_ens[None, :, :], axis=0).astype(np.int64)
+    u = rng.random(size=less.shape, dtype=np.float64)
+    pit = (less + u * equal) / max(float(n_ens), 1.0)
+    valid = np.isfinite(pit)
+    pit_counts = np.zeros(len(pit_edges) - 1, dtype=np.float64)
+    rank_counts = np.zeros(n_ens + 1, dtype=np.float64)
+    if not np.any(valid):
+        return pit_counts, rank_counts
+
+    pit_counts += np.histogram(pit[valid], bins=pit_edges)[0].astype(np.float64)
+    # Randomized rank with tie handling: integer rank in [0, n_ens].
+    rank = less + np.floor(u * (equal + 1)).astype(np.int64)
+    rank = np.clip(rank, 0, n_ens)
+    rank_counts += np.bincount(rank[valid], minlength=n_ens + 1).astype(np.float64)
+    return pit_counts, rank_counts
+
+
+def _nanmax_floor(arr: np.ndarray, floor: float = MIN_EPS) -> float:
+    """Safe nanmax with lower floor."""
+    if arr.size == 0:
+        return floor
+    try:
+        val = float(np.nanmax(arr))
+    except ValueError:
+        return floor
+    if not np.isfinite(val):
+        return floor
+    return max(val, floor)
+
+
+def _median_positive_step(vals: np.ndarray) -> Optional[float]:
+    """Median positive spacing between unique coordinates."""
+    if vals.size < 2:
+        return None
+    uniq = np.unique(np.asarray(vals, dtype=np.float64))
+    if uniq.size < 2:
+        return None
+    diffs = np.diff(np.sort(uniq))
+    diffs = diffs[diffs > 0.0]
+    if diffs.size == 0:
+        return None
+    return float(np.median(diffs))
