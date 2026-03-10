@@ -4,8 +4,8 @@ Evaluate single-step prediction on TRAIN or TEST set using a saved checkpoint.
 Uses the exact same train/test split as training (90/10, same seed) so no leakage.
 Normalizers are loaded from disk (fit on train only during training).
 
-  python scripts/eval_single_step_train.py --split train
-  python scripts/eval_single_step_train.py --split test --checkpoint.save_dir ./checkpoints_TargetOnly_FGN
+  python scripts/flood_wv_eval_single_step.py --split train
+  python scripts/flood_wv_eval_single_step.py --split test --checkpoint.save_dir ./checkpoints_TargetOnly_FGN
 
 FGN: random z. --n_ensemble 2 and --normalized_space to match training log.
 """

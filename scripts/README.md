@@ -1,6 +1,6 @@
 # Scripts Layout
 
-Root `scripts/` now contains compatibility Python wrappers and operational folders.
+Root `scripts/` now contains the active `flood_wv_*` Python entry wrappers and operational folders.
 Canonical Python entrypoints live under `neuralop.flood.cli` and `neuralop.flood.eval`.
 Canonical Slurm launchers live under:
 
@@ -20,4 +20,4 @@ Runtime artifacts for maintained launchers should go under `scripts/runtime/`:
 
 Use the package entrypoints and canonical shell scripts for new automation and code integration.
 Redundant root-level shell wrappers have been moved under `scripts/archive/root_shell_wrappers/`.
-Root Python script paths remain as thin compatibility wrappers because maintained launchers still use them.
+Archived legacy Python wrapper names live under `scripts/archive/legacy_python_wrappers/`; active wrappers use the `flood_wv_*` naming scheme.

@@ -3,13 +3,13 @@
 """
 Standalone post-training evaluation for flood GINO WV pipeline.
 
-Reproduces evaluation logic from train_gino_flood_train_rollout_animation_WV.py
+Reproduces evaluation logic from flood_wv_train_operator.py
 without retraining:
   1) One-step test evaluation on a saved checkpoint
   2) Optional rollout evaluation and plots
 
 Example:
-  python scripts/evaluate_post_training_flood_WV.py \\
+  python scripts/flood_wv_eval_operator.py \\
     --config_path config/gino_pluvial_flood_config_WV_depth_only.yaml \\
     --checkpoint.save_dir /path/to/checkpoints
 """

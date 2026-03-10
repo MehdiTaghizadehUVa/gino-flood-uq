@@ -4,8 +4,8 @@ Generate 2x2 comparison maps: single-step prediction vs ground truth in normaliz
 Uses one training sample, same split and checkpoint as training. Produces one figure per channel
 (water depth, vx, vy): [Pred Normalized | Pred Physical; GT Normalized | GT Physical].
 
-  python scripts/plot_single_step_maps.py
-  python scripts/plot_single_step_maps.py --target_timestep 20 --out_dir ./maps
+  python scripts/flood_wv_plot_single_step_maps.py
+  python scripts/flood_wv_plot_single_step_maps.py --target_timestep 20 --out_dir ./maps
 """
 import argparse
 import sys

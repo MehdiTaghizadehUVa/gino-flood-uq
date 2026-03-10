@@ -1,4 +1,4 @@
-# All parameters used by train_gino_flood_train_rollout_animation_WV.py are defined below.
+# All parameters used by flood_wv_train_operator.py are defined below.
 # Override via CLI: --data.batch_size 32 --opt.n_epochs 20 etc.
 # Quick overfit tests (200 samples, 20 epochs): --config_path config/gino_pluvial_flood_config_WV_overfit.yaml (L2) or .../gino_pluvial_flood_config_WV_overfit_crps.yaml (CRPS)
 # Or override: --data.n_samples_max 200 --opt.n_epochs 20 --opt.training_loss l2

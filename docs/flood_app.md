@@ -10,6 +10,6 @@ Flood-specific workflow code lives under `neuralop.flood`.
 - `neuralop.flood.utils`: checkpoint/runtime helpers
 - `neuralop.flood.visualization`: rollout/publication plotting helpers
 
-The legacy `scripts/*.py` files remain as thin wrappers for backward compatibility.
-Canonical shell launchers live under `scripts/slurm/`, while root `scripts/*.sh` remain compatibility wrappers.
+Root `scripts/` now exposes professional `flood_wv_*` Python wrappers; archived legacy wrapper names live under `scripts/archive/legacy_python_wrappers/`.
+Canonical shell launchers live under `scripts/slurm/`; root shell wrappers have been archived under `scripts/archive/root_shell_wrappers/`.
 WV flood configs are available under `config/flood/wv/`, while legacy config paths remain available.
