@@ -6,8 +6,8 @@
 #SBATCH --mem=128G
 #SBATCH -t 72:00:00
 #SBATCH -J gino_gauss_wv
-#SBATCH -o logs/out/gino_gauss_wv-%j.out
-#SBATCH -e logs/err/gino_gauss_wv-%j.err
+#SBATCH -o runtime/logs/out/gino_gauss_wv-%j.out
+#SBATCH -e runtime/logs/err/gino_gauss_wv-%j.err
 
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"

@@ -9,8 +9,8 @@
 #SBATCH -t 72:00:00
 #SBATCH -J ddofs_wv_e4_ddpMN
 #SBATCH --array=0-3
-#SBATCH -o logs/out/ddofs_wv_e4_ddpMN-%A_%a.out
-#SBATCH -e logs/err/ddofs_wv_e4_ddpMN-%A_%a.err
+#SBATCH -o runtime/logs/out/ddofs_wv_e4_ddpMN-%A_%a.out
+#SBATCH -e runtime/logs/err/ddofs_wv_e4_ddpMN-%A_%a.err
 
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"

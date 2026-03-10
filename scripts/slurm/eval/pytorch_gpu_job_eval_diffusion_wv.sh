@@ -6,8 +6,8 @@
 #SBATCH --mem=128G
 #SBATCH -t 24:00:00
 #SBATCH -J ddofs_wv_ev
-#SBATCH -o logs/out/ddofs_wv_ev-%j.out
-#SBATCH -e logs/err/ddofs_wv_ev-%j.err
+#SBATCH -o runtime/logs/out/ddofs_wv_ev-%j.out
+#SBATCH -e runtime/logs/err/ddofs_wv_ev-%j.err
 
 set -euo pipefail
 if [[ -n "${SLURM_SUBMIT_DIR:-}" && -f "${SLURM_SUBMIT_DIR}/slurm/lib/common.sh" ]]; then
@@ -20,7 +20,7 @@ else
 fi
 slurm_load_apptainer
 cd "${SCRIPT_DIR}"
-mkdir -p logs/out logs/err
+mkdir -p runtime/logs/out runtime/logs/err runtime/eval_outputs
 
 PROJECT_DIR="${PROJECT_DIR:-/home/$USER/GINO_Model/neuraloperator_no_physics_git_main}"
 EVAL_SCRIPT="${EVAL_SCRIPT:-${PROJECT_DIR}/scripts/evaluate_diffusion_forecaster_WV.py}"
@@ -29,9 +29,9 @@ CONTAINER_PATH="${CONTAINER_PATH:-/share/resources/containers/apptainer/archive/
 TEST_ROOT="${TEST_ROOT:-/scratch/$USER/Data_Generation_UQ/Results_Test/M40}"
 TRAIN_ROOT="${TRAIN_ROOT:-/scratch/$USER/Data_Generation_UQ/Results/M40}"
 TRAIN_NORMALIZER="${TRAIN_NORMALIZER:-${TRAIN_ROOT}/normalizers_depth_only.pt}"
-CHECKPOINT_ROOT="${CHECKPOINT_ROOT:-${PROJECT_DIR}/scripts/checkpoints_WV_depth_only_diffusion}"
+CHECKPOINT_ROOT="${CHECKPOINT_ROOT:-${PROJECT_DIR}/scripts/runtime/checkpoints_WV_depth_only_diffusion}"
 JOB_NAME="${JOB_NAME:-ddofs_wv_ev}"
-OUT_DIR_DEFAULT="${PROJECT_DIR}/scripts/eval_outputs/${JOB_NAME}_$(date +%Y%m%d_%H%M%S)"
+OUT_DIR_DEFAULT="${PROJECT_DIR}/scripts/runtime/eval_outputs/${JOB_NAME}_$(date +%Y%m%d_%H%M%S)"
 OUT_DIR="${OUT_DIR:-${OUT_DIR_DEFAULT}}"
 
 slurm_configure_host_ca

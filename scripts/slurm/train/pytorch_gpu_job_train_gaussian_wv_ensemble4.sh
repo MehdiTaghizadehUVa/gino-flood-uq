@@ -7,8 +7,8 @@
 #SBATCH -t 72:00:00
 #SBATCH -J gino_gauss_e4
 #SBATCH --array=0-3
-#SBATCH -o logs/out/gino_gauss_e4-%A_%a.out
-#SBATCH -e logs/err/gino_gauss_e4-%A_%a.err
+#SBATCH -o runtime/logs/out/gino_gauss_e4-%A_%a.out
+#SBATCH -e runtime/logs/err/gino_gauss_e4-%A_%a.err
 
 set -euo pipefail
 if [[ -n "${SLURM_SUBMIT_DIR:-}" && -f "${SLURM_SUBMIT_DIR}/slurm/lib/common.sh" ]]; then
@@ -21,7 +21,7 @@ else
 fi
 slurm_load_apptainer
 cd "${SCRIPT_DIR}"
-mkdir -p logs/out logs/err
+mkdir -p runtime/logs/out runtime/logs/err runtime/checkpoints
 
 PROJECT_DIR="${PROJECT_DIR:-/home/$USER/GINO_Model/neuraloperator_no_physics_git_main}"
 TRAIN_SCRIPT="${PROJECT_DIR}/scripts/train_gino_flood_train_rollout_animation_WV.py"
@@ -41,7 +41,7 @@ SHORT_SHA="$(git -C "${PROJECT_DIR}" rev-parse --short HEAD)"
 RUN_TAG_BASE="wv_m40_gaussianNLL_ep150_lr1e-4_gr0.1_h64_wd1e-4_${SHORT_SHA}"
 WANDB_GROUP="${RUN_TAG_BASE}_job${SLURM_ARRAY_JOB_ID}_sbase${BASE_SEED}"
 WANDB_NAME="${RUN_TAG_BASE}_ens${ENSEMBLE_ID}_seed${SEED}"
-CKPT_ROOT="${CKPT_ROOT:-${PROJECT_DIR}/scripts/checkpoints_WV_depth_only_gaussian}"
+CKPT_ROOT="${CKPT_ROOT:-${PROJECT_DIR}/scripts/runtime/checkpoints_WV_depth_only_gaussian}"
 CKPT_DIR="${CKPT_ROOT}/${WANDB_GROUP}/ens${ENSEMBLE_ID}"
 mkdir -p "${CKPT_DIR}"
 

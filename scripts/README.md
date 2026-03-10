@@ -9,6 +9,13 @@ Canonical Slurm launchers live under:
 - `scripts/slurm/lib/`
 - `scripts/release/`
 - `scripts/dev/`
+- `scripts/runtime/`
+
+Runtime artifacts for maintained launchers should go under `scripts/runtime/`:
+
+- `scripts/runtime/logs/`
+- `scripts/runtime/eval_outputs/`
+- `scripts/runtime/checkpoints/`
 
 Use the package entrypoints for new automation and code integration. Existing root script paths are
 preserved as thin wrappers so current Slurm jobs and ad hoc commands continue to work.

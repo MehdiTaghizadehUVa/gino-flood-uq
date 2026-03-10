@@ -9,8 +9,8 @@
 #SBATCH -t 72:00:00
 #SBATCH -J gino_fgn_e4_ddp_mn
 #SBATCH --array=0-3
-#SBATCH -o logs/out/gino_fgn_e4_ddp_mn-%A_%a.out
-#SBATCH -e logs/err/gino_fgn_e4_ddp_mn-%A_%a.err
+#SBATCH -o runtime/logs/out/gino_fgn_e4_ddp_mn-%A_%a.out
+#SBATCH -e runtime/logs/err/gino_fgn_e4_ddp_mn-%A_%a.err
 
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
