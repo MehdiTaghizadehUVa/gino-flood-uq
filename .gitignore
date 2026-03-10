@@ -99,11 +99,16 @@ scripts/job_snapshots/
 scripts/eval_ckpt_sets/
 scripts/rollout_uq_*/
 scripts/runtime/logs/**
+!scripts/runtime/logs/
+!scripts/runtime/logs/out/
 !scripts/runtime/logs/out/.gitkeep
+!scripts/runtime/logs/err/
 !scripts/runtime/logs/err/.gitkeep
 scripts/runtime/eval_outputs/**
+!scripts/runtime/eval_outputs/
 !scripts/runtime/eval_outputs/.gitkeep
 scripts/runtime/checkpoints/**
+!scripts/runtime/checkpoints/
 !scripts/runtime/checkpoints/.gitkeep
 scripts/*.log
 scripts/*.log.*
