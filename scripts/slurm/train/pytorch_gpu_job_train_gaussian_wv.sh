@@ -22,7 +22,7 @@ slurm_load_apptainer
 cd "${SCRIPT_DIR}"
 mkdir -p logs/out logs/err
 
-PROJECT_DIR="/home/$USER/GINO_Model/neuraloperator_no_physics"
+PROJECT_DIR="${PROJECT_DIR:-/home/$USER/GINO_Model/neuraloperator_no_physics_git_main}"
 TRAIN_SCRIPT="${PROJECT_DIR}/scripts/train_gino_flood_train_rollout_animation_WV.py"
 TRAIN_CONFIG="${PROJECT_DIR}/config/flood/wv/gino_pluvial_flood_config_WV_depth_only_gaussian.yaml"
 CONTAINER_PATH="/share/resources/containers/apptainer/archive/pytorch-2.0.1.sif"
@@ -32,7 +32,7 @@ SEED=123
 RUN_TAG_BASE="wv_m40_gaussianNLL_ep150_lr1e-4_gr0.1_h64_wd1e-4"
 WANDB_GROUP="${RUN_TAG_BASE}_job${SLURM_JOB_ID}"
 WANDB_NAME="${WANDB_GROUP}_seed${SEED}"
-CKPT_ROOT="/home/$USER/GINO_Model/neuraloperator_no_physics/scripts/checkpoints_WV_depth_only_gaussian"
+CKPT_ROOT="${CKPT_ROOT:-${PROJECT_DIR}/scripts/checkpoints_WV_depth_only_gaussian}"
 CKPT_DIR="${CKPT_ROOT}/${WANDB_GROUP}"
 mkdir -p "${CKPT_DIR}"
 

@@ -23,7 +23,7 @@ slurm_load_apptainer
 cd "${SCRIPT_DIR}"
 mkdir -p logs/out logs/err
 
-PROJECT_DIR="/home/$USER/GINO_Model/neuraloperator_no_physics"
+PROJECT_DIR="${PROJECT_DIR:-/home/$USER/GINO_Model/neuraloperator_no_physics_git_main}"
 TRAIN_SCRIPT="${PROJECT_DIR}/scripts/train_gino_flood_train_rollout_animation_WV.py"
 TRAIN_CONFIG="${PROJECT_DIR}/config/flood/wv/gino_pluvial_flood_config_WV_depth_only.yaml"
 CONTAINER_PATH="/share/resources/containers/apptainer/archive/pytorch-2.0.1.sif"
@@ -39,7 +39,7 @@ SHORT_SHA="$(git -C "${PROJECT_DIR}" rev-parse --short HEAD)"
 
 # Keep model/training config + overrides identical to latest full FGN run.
 RUN_GROUP="wdonly_ep300_lr2e-4_gr0.1_h64_wd5e-4_${SHORT_SHA}_job${SLURM_ARRAY_JOB_ID}_sbase${BASE_SEED}"
-CKPT_ROOT="${PROJECT_DIR}/scripts/checkpoints_WV_depth_only_300ep"
+CKPT_ROOT="${CKPT_ROOT:-${PROJECT_DIR}/scripts/checkpoints_WV_depth_only_300ep}"
 RUN_TAG="${RUN_GROUP}_ens${ENSEMBLE_ID}"
 CKPT_DIR="${CKPT_ROOT}/${RUN_TAG}"
 mkdir -p "${CKPT_DIR}"

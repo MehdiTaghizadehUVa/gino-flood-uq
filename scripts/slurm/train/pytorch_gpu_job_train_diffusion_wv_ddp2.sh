@@ -23,7 +23,7 @@ slurm_load_apptainer
 cd "${SCRIPT_DIR}"
 mkdir -p logs/out logs/err
 
-PROJECT_DIR="/home/$USER/GINO_Model/neuraloperator_no_physics"
+PROJECT_DIR="${PROJECT_DIR:-/home/$USER/GINO_Model/neuraloperator_no_physics_git_main}"
 TRAIN_SCRIPT="${PROJECT_DIR}/scripts/train_diffusion_forecaster_WV.py"
 TRAIN_CONFIG="${PROJECT_DIR}/config/flood/wv/gino_pluvial_flood_config_WV_depth_only_diffusion.yaml"
 CONTAINER_PATH="/share/resources/containers/apptainer/archive/pytorch-2.0.1.sif"
@@ -39,7 +39,7 @@ SHORT_SHA="$(git -C "${PROJECT_DIR}" rev-parse --short HEAD)"
 RUN_TAG="ddofs_wv_m40_depth_e4_ddp2_${SHORT_SHA}"
 RUN_GROUP="${RUN_TAG}_job${SLURM_ARRAY_JOB_ID}_sbase${BASE_SEED}"
 WANDB_NAME="${RUN_TAG}_ens${ENSEMBLE_ID}_seed${SEED}_ws${WORLD_SIZE}"
-CKPT_ROOT="/home/$USER/GINO_Model/neuraloperator_no_physics/scripts/checkpoints_WV_depth_only_diffusion"
+CKPT_ROOT="${CKPT_ROOT:-${PROJECT_DIR}/scripts/checkpoints_WV_depth_only_diffusion}"
 CKPT_DIR="${CKPT_ROOT}/${RUN_GROUP}/ens${ENSEMBLE_ID}"
 mkdir -p "${CKPT_DIR}"
 
