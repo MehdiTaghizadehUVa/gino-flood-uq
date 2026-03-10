@@ -155,6 +155,40 @@ def test_clean_family_rollout_boundary_is_shared_within_family(tmp_path: Path):
     assert torch.allclose(sample_a["boundary"], expected)
 
 
+def test_clean_family_prefixed_run_id_resolves_to_clean_event_id(tmp_path: Path):
+    data_root = tmp_path / "data_prefixed"
+    meta_root = tmp_path / "metadata_prefixed"
+    data_root.mkdir()
+    meta_root.mkdir()
+
+    run_ids = ["M40_TR000001_sim00", "M40_TR000001_sim01"]
+    _write_minimal_hdf(data_root / f"{run_ids[0]}.hdf", inflow_offset=0.0, wd_offset=0.0)
+    _write_minimal_hdf(data_root / f"{run_ids[1]}.hdf", inflow_offset=50.0, wd_offset=25.0)
+
+    clean_series = np.array([100, 101, 102, 103, 104, 105], dtype=np.float32)
+    _write_clean_boundary_table(
+        meta_root / "Hydrographs_Train_Clean.txt",
+        {"TR000001": clean_series},
+    )
+
+    ds = FloodDatasetHDF(
+        data_root=str(data_root),
+        n_history=2,
+        ar_rollout_steps=2,
+        run_ids=run_ids,
+        boundary_source="clean_family",
+        clean_boundary_root=str(meta_root),
+        clean_boundary_file="Hydrographs_Train_Clean.txt",
+        target_variables=["wd"],
+    )
+
+    sample_a = ds[_first_index_for_run(ds, run_ids[0])]
+    sample_b = ds[_first_index_for_run(ds, run_ids[1])]
+    assert torch.equal(sample_a["boundary"], sample_b["boundary"])
+    expected_hist = torch.tensor(clean_series[:2], dtype=torch.float32).view(2, 1, 1).expand(-1, 3, -1)
+    assert torch.allclose(sample_a["boundary"], expected_hist)
+
+
 def test_clean_family_missing_family_raises_clear_error(tmp_path: Path):
     data_root, meta_root, run_ids, _ = _make_fixture(tmp_path)
     _write_clean_boundary_table(
@@ -171,7 +205,7 @@ def test_clean_family_missing_family_raises_clear_error(tmp_path: Path):
         clean_boundary_file="Hydrographs_Train_Clean.txt",
         target_variables=["wd"],
     )
-    with pytest.raises(KeyError, match="Family 'TR000001' not found"):
+    with pytest.raises(KeyError, match="Family 'TR000001' not found in clean boundary file"):
         _ = ds[0]
 
 

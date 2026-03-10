@@ -21,8 +21,8 @@ from neuralop.flood.data.hec_ras import (
 from neuralop.flood.utils.runtime_core import (
     _load_clean_boundary_table,
     normalize_boundary_source,
-    parse_family_id_from_run_id,
     parse_target_variables,
+    resolve_family_id_for_boundary,
     write_train_txt_from_data_root,
 )
 
@@ -147,13 +147,8 @@ class FloodDatasetHDF(Dataset):
             flow_col = inflow[:, -1] if inflow.shape[1] >= 2 else inflow[:, 0]
             return np.asarray(flow_col, dtype=np.float32)
 
-        family_id = parse_family_id_from_run_id(run_id)
         boundary_by_family = self._clean_boundary_bundle["boundary_by_family"]
-        if family_id not in boundary_by_family:
-            raise KeyError(
-                f"Family {family_id!r} not found in clean boundary file "
-                f"{self._clean_boundary_bundle['path']}."
-            )
+        family_id = resolve_family_id_for_boundary(run_id, boundary_by_family)
         clean_series = np.asarray(boundary_by_family[family_id], dtype=np.float32)
         total_len = clean_series.shape[0]
         if slice_end is None:
@@ -397,13 +392,8 @@ class FloodRolloutTestDatasetHDF(Dataset):
             flow_col = inflow[:, -1] if inflow.shape[1] >= 2 else inflow[:, 0]
             return np.asarray(flow_col, dtype=np.float32)
 
-        family_id = parse_family_id_from_run_id(run_id)
         boundary_by_family = self._clean_boundary_bundle["boundary_by_family"]
-        if family_id not in boundary_by_family:
-            raise KeyError(
-                f"Family {family_id!r} not found in clean boundary file "
-                f"{self._clean_boundary_bundle['path']}."
-            )
+        family_id = resolve_family_id_for_boundary(run_id, boundary_by_family)
         clean_series = np.asarray(boundary_by_family[family_id], dtype=np.float32)
         total_len = clean_series.shape[0]
         if slice_end is None:

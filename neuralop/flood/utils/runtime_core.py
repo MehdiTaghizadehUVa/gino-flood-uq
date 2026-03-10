@@ -179,6 +179,41 @@ def parse_family_id_from_run_id(run_id: str) -> str:
     return family_id
 
 
+def family_id_lookup_candidates(run_id: str) -> list[str]:
+    """Return exact-first family-id candidates for clean-boundary lookup.
+
+    The dynamic dataset package can encode run IDs with a dataset prefix
+    (for example ``M40_TR000001_sim00``) while the clean hydrograph table uses
+    the bare family/event id (for example ``TR000001``). We keep exact match as
+    the primary contract and only add suffix aliases as fallbacks.
+    """
+    family_id = parse_family_id_from_run_id(run_id)
+    candidates = [family_id]
+    parts = [part for part in family_id.split("_") if part]
+    if len(parts) > 1:
+        for start in range(1, len(parts)):
+            alias = "_".join(parts[start:])
+            if alias and alias not in candidates:
+                candidates.append(alias)
+    return candidates
+
+
+def resolve_family_id_for_boundary(run_id: str, boundary_by_family: dict[str, np.ndarray]) -> str:
+    """Resolve the clean-boundary family id for a run id.
+
+    Exact match is required when available. If the exact family id is not found,
+    try suffix aliases so datasets with prefixed run IDs can still consume clean
+    boundary tables keyed by bare event IDs.
+    """
+    candidates = family_id_lookup_candidates(run_id)
+    for candidate in candidates:
+        if candidate in boundary_by_family:
+            return candidate
+    raise KeyError(
+        f"Family {candidates[0]!r} not found in clean boundary file. Tried aliases: {candidates}."
+    )
+
+
 def _resolve_clean_boundary_root(clean_boundary_root, section_root):
     if clean_boundary_root is None:
         raise ValueError(
