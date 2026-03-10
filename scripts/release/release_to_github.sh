@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Add your GitHub repo as a remote and push main + optional tag.
-# Edit GITHUB_REPO below, then run: ./scripts/release_to_github.sh
+# Edit GITHUB_REPO below, then run: ./scripts/release/release_to_github.sh
 
 set -e
 cd "$(dirname "$0")/.."
@@ -10,7 +10,7 @@ GITHUB_REPO="${GITHUB_REPO:-MehdiTaghizadehUVa/gino-flood-uq}"
 
 if [[ "$GITHUB_REPO" == *"YOUR_USERNAME"* ]] || [[ "$GITHUB_REPO" == *"YOUR_REPO"* ]]; then
   echo "Edit GITHUB_REPO in this script or set it when running:"
-  echo "  GITHUB_REPO=username/repo ./scripts/release_to_github.sh"
+  echo "  GITHUB_REPO=username/repo ./scripts/release/release_to_github.sh"
   exit 1
 fi
 

@@ -54,7 +54,7 @@ git push github tag v1.0.3
 
 On Rivanna, git cannot ask for a password. To let the **agent push by itself**, use SSH or a stored token. See **[docs/RIVANNA_GIT_PUSH_SETUP.md](docs/RIVANNA_GIT_PUSH_SETUP.md)** for:
 
-- **Option 1 (recommended):** SSH key — add key to GitHub, then run `./scripts/set_github_remote_ssh.sh` and pushes work without prompts.
+- **Option 1 (recommended):** SSH key — add key to GitHub, then run `./scripts/dev/set_github_remote_ssh.sh` and pushes work without prompts.
 - **Option 2:** Personal Access Token stored via `credential.helper store` after one interactive push.
 
 ## Quick reference: your remotes after setup
