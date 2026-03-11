@@ -24,6 +24,7 @@ cd "${SCRIPT_DIR}"
 mkdir -p runtime/logs/out runtime/logs/err runtime/checkpoints
 
 PROJECT_DIR="${PROJECT_DIR:-/home/$USER/GINO_Model/neuraloperator_no_physics_git_main}"
+export APPTAINERENV_PYTHONPATH="${PROJECT_DIR}${APPTAINERENV_PYTHONPATH:+:${APPTAINERENV_PYTHONPATH}}"
 TRAIN_SCRIPT="${PROJECT_DIR}/scripts/flood_wv_train_operator.py"
 TRAIN_CONFIG="${PROJECT_DIR}/config/flood/wv/gino_pluvial_flood_config_WV_depth_only_gaussian.yaml"
 CONTAINER_PATH="/share/resources/containers/apptainer/archive/pytorch-2.0.1.sif"
