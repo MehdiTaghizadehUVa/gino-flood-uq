@@ -49,6 +49,7 @@ AR_TRUNC_STEPS=1
 GRAD_ACCUM=1
 AMP_AUTOCAST=true
 ACT_CKPT=false
+LEARNING_RATE_OVERRIDE="${LEARNING_RATE_OVERRIDE:-0.00020}"
 
 RUN_GROUP="wdonly_fgn_ddp2_ep300_lr2e-4_gr0.1_h64_wd5e-4_${SHORT_SHA}_job${SLURM_ARRAY_JOB_ID}_sbase${BASE_SEED}"
 CKPT_ROOT="${CKPT_ROOT:-${PROJECT_DIR}/scripts/runtime/checkpoints_WV_depth_only_300ep}"
@@ -101,6 +102,7 @@ echo "World size:      ${WORLD_SIZE}"
 echo "Checkpoint dir:  ${CKPT_DIR}"
 echo "W&B group:       ${WANDB_GROUP}"
 echo "W&B name:        ${WANDB_NAME}"
+echo "Learning rate:   ${LEARNING_RATE_OVERRIDE}"
 echo "AR settings:     mode=${AR_MODE}, trunc_steps=${AR_TRUNC_STEPS}, amp=${AMP_AUTOCAST}, grad_accum=${GRAD_ACCUM}, act_ckpt=${ACT_CKPT}"
 
 CLI_ARGS=(
@@ -114,7 +116,7 @@ CLI_ARGS=(
   --wandb.group "${WANDB_GROUP}"
   --wandb.name "${WANDB_NAME}"
   --opt.n_epochs 300
-  --opt.learning_rate 0.00020
+  --opt.learning_rate "${LEARNING_RATE_OVERRIDE}"
   --gino.gno_radius 0.1
   --gino.fno_hidden_channels 64
   --opt.weight_decay 0.00050

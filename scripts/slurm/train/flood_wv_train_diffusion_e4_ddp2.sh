@@ -47,6 +47,7 @@ SHORT_SHA="$(git -C "${PROJECT_DIR}" rev-parse --short HEAD)"
 RUN_TAG="ddofs_wv_m40_depth_e4_ddp2_${SHORT_SHA}"
 RUN_GROUP="${RUN_TAG}_job${SLURM_ARRAY_JOB_ID}_sbase${BASE_SEED}"
 WANDB_NAME="${RUN_TAG}_ens${ENSEMBLE_ID}_seed${SEED}_ws${WORLD_SIZE}"
+LEARNING_RATE_OVERRIDE="${LEARNING_RATE_OVERRIDE:-}"
 CKPT_ROOT="${CKPT_ROOT:-${PROJECT_DIR}/scripts/runtime/checkpoints_WV_depth_only_diffusion}"
 CKPT_DIR="${CKPT_ROOT}/${RUN_GROUP}/ens${ENSEMBLE_ID}"
 mkdir -p "${CKPT_DIR}"
@@ -80,6 +81,9 @@ echo "World size:      ${WORLD_SIZE}"
 echo "Checkpoint dir:  ${CKPT_DIR}"
 echo "W&B group:       ${RUN_GROUP}"
 echo "W&B name:        ${WANDB_NAME}"
+if [[ -n "${LEARNING_RATE_OVERRIDE}" ]]; then
+  echo "Learning rate:   ${LEARNING_RATE_OVERRIDE}"
+fi
 
 CLI_ARGS=(
   --config_path "${TRAIN_CONFIG}"
@@ -120,6 +124,10 @@ fi
 
 if [[ -n "${BATCH_SIZE_OVERRIDE:-}" ]]; then
   CLI_ARGS+=(--data.batch_size "${BATCH_SIZE_OVERRIDE}")
+fi
+
+if [[ -n "${LEARNING_RATE_OVERRIDE}" ]]; then
+  CLI_ARGS+=(--opt.learning_rate "${LEARNING_RATE_OVERRIDE}")
 fi
 
 apptainer exec ${APPTAINER_BIND_ARGS} "${CONTAINER_PATH}" \
