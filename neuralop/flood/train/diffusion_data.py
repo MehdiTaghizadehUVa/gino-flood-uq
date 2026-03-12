@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
@@ -27,6 +28,30 @@ from neuralop.flood.utils.runtime import (
     make_dataloader_generator,
     make_split_generator,
 )
+
+
+def _wait_for_normalizer_file(
+    normalizer_path: Path,
+    *,
+    timeout_seconds: float,
+    poll_interval_seconds: float = 5.0,
+) -> None:
+    """Wait for a rank-0-produced normalizer file to appear and become readable."""
+    deadline = time.monotonic() + timeout_seconds
+    last_error: Exception | None = None
+    while time.monotonic() < deadline:
+        if normalizer_path.exists():
+            try:
+                load_normalizers(normalizer_path, device=None)
+                return
+            except Exception as exc:  # file may exist but still be mid-write
+                last_error = exc
+        time.sleep(poll_interval_seconds)
+    if last_error is not None:
+        raise RuntimeError(
+            f"Timed out waiting for readable normalizers at {normalizer_path}."
+        ) from last_error
+    raise TimeoutError(f"Timed out waiting for normalizer file to appear at {normalizer_path}.")
 
 def _prepare_datasets(
     config: Any,
@@ -106,6 +131,11 @@ def _prepare_datasets(
         _rank0_info(logger, dist_ctx, "Loaded normalizers from %s", normalizer_path)
     else:
         normalizers = None
+        if dist_ctx.use_distributed and normalizer_path is None:
+            raise RuntimeError(
+                "Distributed diffusion training requires data.normalizer_path so non-rank0 "
+                "processes can wait for rank0-produced normalizers without long-lived NCCL collectives."
+            )
         if dist_ctx.is_rank0:
             normalizers = fit_normalizers_streaming(
                 train_raw,
@@ -116,13 +146,16 @@ def _prepare_datasets(
                 save_normalizers(normalizers, normalizer_path)
                 logger.info("Saved normalizers to %s", normalizer_path)
         if dist_ctx.use_distributed:
-            obj = [normalizers]
-            dist.broadcast_object_list(obj, src=0)
-            normalizers = obj[0]
-            if normalizer_path is not None:
-                _dist_barrier(dist_ctx)
-                if not dist_ctx.is_rank0 and normalizer_path.exists():
-                    normalizers = load_normalizers(normalizer_path, device=None)
+            if not dist_ctx.is_rank0:
+                wait_timeout_min = float(
+                    safe_get(data_cfg, "normalizer_wait_timeout_min", 120)
+                )
+                _wait_for_normalizer_file(
+                    normalizer_path,
+                    timeout_seconds=wait_timeout_min * 60.0,
+                )
+                normalizers = load_normalizers(normalizer_path, device=None)
+            _dist_barrier(dist_ctx)
         if normalizers is None:
             raise RuntimeError("Failed to initialize normalizers in distributed setup.")
 

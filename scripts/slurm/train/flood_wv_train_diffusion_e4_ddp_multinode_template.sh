@@ -55,6 +55,7 @@ MASTER_PORT=$((14000 + SLURM_JOB_ID % 20000))
 export MASTER_ADDR MASTER_PORT
 
 slurm_configure_host_ca
+slurm_assert_container_gpus "${CONTAINER_PATH}" "${GPUS_PER_NODE}"
 
 for key_path in "${PROJECT_DIR}/config/wandb_api_key.txt" "/scratch/$USER/Data_Generation_UQ/GINO_Model/neuraloperator_no_physics/config/wandb_api_key.txt"; do
   if [[ -f "${key_path}" ]]; then

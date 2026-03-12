@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH -A uqgroup
-#SBATCH -p gpu-a100-80
+#SBATCH -p gpu
 #SBATCH --gres=gpu:2
 #SBATCH -c 16
 #SBATCH --mem=192G
@@ -49,6 +49,9 @@ RUN_TAG="ddofs_wv_m40_depth_e4_ddp2_${SHORT_SHA}"
 RUN_GROUP="${RUN_TAG}_job${SLURM_ARRAY_JOB_ID}_sbase${BASE_SEED}"
 WANDB_NAME="${RUN_TAG}_ens${ENSEMBLE_ID}_seed${SEED}_ws${WORLD_SIZE}"
 LEARNING_RATE_OVERRIDE="${LEARNING_RATE_OVERRIDE:-}"
+EPOCHS_OVERRIDE="${EPOCHS_OVERRIDE:-}"
+N_SAMPLES_MAX_OVERRIDE="${N_SAMPLES_MAX_OVERRIDE:-}"
+MAX_VAL_BATCHES_OVERRIDE="${MAX_VAL_BATCHES_OVERRIDE:-}"
 CKPT_ROOT="${CKPT_ROOT:-${PROJECT_DIR}/scripts/runtime/checkpoints_WV_depth_only_diffusion}"
 CKPT_DIR="${CKPT_ROOT}/${RUN_GROUP}/ens${ENSEMBLE_ID}"
 mkdir -p "${CKPT_DIR}"
@@ -65,6 +68,8 @@ done
 export OMP_NUM_THREADS=8
 export MASTER_ADDR=127.0.0.1
 export MASTER_PORT=$((13000 + SLURM_JOB_ID % 20000))
+
+slurm_assert_container_gpus "${CONTAINER_PATH}" "${WORLD_SIZE}"
 
 echo "Training script: ${TRAIN_SCRIPT}"
 echo "Config:          ${TRAIN_CONFIG}"
@@ -84,6 +89,15 @@ echo "W&B group:       ${RUN_GROUP}"
 echo "W&B name:        ${WANDB_NAME}"
 if [[ -n "${LEARNING_RATE_OVERRIDE}" ]]; then
   echo "Learning rate:   ${LEARNING_RATE_OVERRIDE}"
+fi
+if [[ -n "${EPOCHS_OVERRIDE}" ]]; then
+  echo "Epoch override:  ${EPOCHS_OVERRIDE}"
+fi
+if [[ -n "${N_SAMPLES_MAX_OVERRIDE}" ]]; then
+  echo "Sample cap:      ${N_SAMPLES_MAX_OVERRIDE}"
+fi
+if [[ -n "${MAX_VAL_BATCHES_OVERRIDE}" ]]; then
+  echo "Max val batches: ${MAX_VAL_BATCHES_OVERRIDE}"
 fi
 
 CLI_ARGS=(
@@ -129,6 +143,18 @@ fi
 
 if [[ -n "${LEARNING_RATE_OVERRIDE}" ]]; then
   CLI_ARGS+=(--opt.learning_rate "${LEARNING_RATE_OVERRIDE}")
+fi
+
+if [[ -n "${EPOCHS_OVERRIDE}" ]]; then
+  CLI_ARGS+=(--opt.n_epochs "${EPOCHS_OVERRIDE}")
+fi
+
+if [[ -n "${N_SAMPLES_MAX_OVERRIDE}" ]]; then
+  CLI_ARGS+=(--data.n_samples_max "${N_SAMPLES_MAX_OVERRIDE}")
+fi
+
+if [[ -n "${MAX_VAL_BATCHES_OVERRIDE}" ]]; then
+  CLI_ARGS+=(--max_val_batches "${MAX_VAL_BATCHES_OVERRIDE}")
 fi
 
 apptainer exec ${APPTAINER_BIND_ARGS} "${CONTAINER_PATH}" \

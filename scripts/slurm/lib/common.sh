@@ -37,3 +37,23 @@
         export APPTAINERENV_REQUESTS_CA_BUNDLE=/host_ca_bundle.crt
       fi
     }
+
+    slurm_assert_container_gpus() {
+      local container_path="$1"
+      local min_gpus="${2:-1}"
+      apptainer exec ${APPTAINER_BIND_ARGS} "${container_path}" python - <<PY
+import sys
+import torch
+
+available = torch.cuda.is_available()
+count = torch.cuda.device_count() if available else 0
+required = int(${min_gpus})
+if (not available) or count < required:
+    raise SystemExit(
+        f"Container GPU preflight failed: cuda_available={available} "
+        f"device_count={count} required>={required}. "
+        "Check the Slurm GPU allocation and apptainer --nv wiring."
+    )
+print(f"Container GPU preflight OK: cuda_available={available} device_count={count}")
+PY
+    }

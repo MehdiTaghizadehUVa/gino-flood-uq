@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH -A uqgroup
-#SBATCH -p gpu-a100-80
+#SBATCH -p gpu
 #SBATCH --gres=gpu:2
 #SBATCH -c 16
 #SBATCH --mem=192G
@@ -51,6 +51,9 @@ GRAD_ACCUM=1
 AMP_AUTOCAST=true
 ACT_CKPT=false
 LEARNING_RATE_OVERRIDE="${LEARNING_RATE_OVERRIDE:-0.00020}"
+EPOCHS_OVERRIDE="${EPOCHS_OVERRIDE:-}"
+N_SAMPLES_MAX_OVERRIDE="${N_SAMPLES_MAX_OVERRIDE:-}"
+MAX_VAL_BATCHES_OVERRIDE="${MAX_VAL_BATCHES_OVERRIDE:-}"
 
 RUN_GROUP="wdonly_fgn_ddp2_ep300_lr2e-4_gr0.1_h64_wd5e-4_${SHORT_SHA}_job${SLURM_ARRAY_JOB_ID}_sbase${BASE_SEED}"
 CKPT_ROOT="${CKPT_ROOT:-${PROJECT_DIR}/scripts/runtime/checkpoints_WV_depth_only_300ep}"
@@ -87,6 +90,8 @@ export OMP_NUM_THREADS=8
 export MASTER_ADDR=127.0.0.1
 export MASTER_PORT=$((12000 + SLURM_JOB_ID % 20000))
 
+slurm_assert_container_gpus "${CONTAINER_PATH}" "${WORLD_SIZE}"
+
 echo "Training script: ${TRAIN_SCRIPT}"
 echo "Config:          ${TRAIN_CONFIG}"
 echo "Data root:       ${DATA_ROOT}"
@@ -104,6 +109,15 @@ echo "Checkpoint dir:  ${CKPT_DIR}"
 echo "W&B group:       ${WANDB_GROUP}"
 echo "W&B name:        ${WANDB_NAME}"
 echo "Learning rate:   ${LEARNING_RATE_OVERRIDE}"
+if [[ -n "${EPOCHS_OVERRIDE}" ]]; then
+  echo "Epoch override:  ${EPOCHS_OVERRIDE}"
+fi
+if [[ -n "${N_SAMPLES_MAX_OVERRIDE}" ]]; then
+  echo "Sample cap:      ${N_SAMPLES_MAX_OVERRIDE}"
+fi
+if [[ -n "${MAX_VAL_BATCHES_OVERRIDE}" ]]; then
+  echo "Max val batches: ${MAX_VAL_BATCHES_OVERRIDE}"
+fi
 echo "AR settings:     mode=${AR_MODE}, trunc_steps=${AR_TRUNC_STEPS}, amp=${AMP_AUTOCAST}, grad_accum=${GRAD_ACCUM}, act_ckpt=${ACT_CKPT}"
 
 CLI_ARGS=(
@@ -155,6 +169,18 @@ fi
 
 if [[ -n "${BATCH_SIZE_OVERRIDE:-}" ]]; then
   CLI_ARGS+=(--data.batch_size "${BATCH_SIZE_OVERRIDE}")
+fi
+
+if [[ -n "${EPOCHS_OVERRIDE}" ]]; then
+  CLI_ARGS+=(--opt.n_epochs "${EPOCHS_OVERRIDE}")
+fi
+
+if [[ -n "${N_SAMPLES_MAX_OVERRIDE}" ]]; then
+  CLI_ARGS+=(--data.n_samples_max "${N_SAMPLES_MAX_OVERRIDE}")
+fi
+
+if [[ -n "${MAX_VAL_BATCHES_OVERRIDE}" ]]; then
+  CLI_ARGS+=(--max_val_batches "${MAX_VAL_BATCHES_OVERRIDE}")
 fi
 
 apptainer exec ${APPTAINER_BIND_ARGS} "${CONTAINER_PATH}" \

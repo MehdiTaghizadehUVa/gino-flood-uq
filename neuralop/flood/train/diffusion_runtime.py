@@ -61,8 +61,16 @@ def _init_distributed(config: Any) -> DistContext:
     if not requested or world_size <= 1:
         return DistContext(use_distributed=False, rank=0, local_rank=0, world_size=1)
 
+    if not torch.cuda.is_available():
+        raise RuntimeError(
+            "Distributed diffusion training requires CUDA-visible GPUs. "
+            "This denoiser uses complex-valued spectral parameters, and the CPU/gloo DDP path "
+            "is not supported. Verify the job requested GPUs and that the container was launched "
+            "with GPU visibility enabled (for example, apptainer --nv)."
+        )
+
     if not dist.is_initialized():
-        backend = "nccl" if torch.cuda.is_available() else "gloo"
+        backend = "nccl"
         timeout_min = int(safe_get(dist_cfg, "ddp_timeout_min", 30))
         dist.init_process_group(
             backend=backend,

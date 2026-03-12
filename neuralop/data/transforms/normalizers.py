@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 from typing import Dict, Union
 
@@ -327,7 +328,9 @@ def save_normalizers(
         if sd is not None:
             state[key] = sd
     payload = {"version": NORMALIZER_STATE_VERSION, "normalizers": state}
-    torch.save(payload, path)
+    tmp_path = path.with_name(f".{path.name}.tmp-{os.getpid()}")
+    torch.save(payload, tmp_path)
+    os.replace(tmp_path, path)
     return path.resolve()
 
 
