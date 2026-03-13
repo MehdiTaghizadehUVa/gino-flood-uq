@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+
 import torch
 
 from neuralop.losses.data_losses import LpLoss
@@ -159,6 +161,10 @@ class FGNTrainer(Trainer):
         )
         self._force_truncated_next_batch = False
         self._oom_fallback_count = 0
+        self._oom_microbatch_count = 0
+        self._epoch_oom_microbatch_fallbacks = 0
+        self._last_ar_runtime_context = {}
+        self._current_batch_weight = 1.0
 
     def _forward_fgn(self, kwargs_base, z):
         if not self.use_activation_checkpointing:
@@ -199,22 +205,219 @@ class FGNTrainer(Trainer):
         is_ar_active = self.ar_rollout_steps > 1 and self.epoch >= self.ar_finetune_start_epoch
         if self.ar_gradient_mode != "adaptive" or not is_ar_active:
             raise RuntimeError("OOM retry requested but opt.ar_gradient_mode is not 'adaptive'.")
+        ar_ctx = dict(getattr(self, "_last_ar_runtime_context", {}) or {})
+        failed_sample_increment = self._estimate_sample_increment(sample)
+        baseline_n_samples = max(0, int(self.n_samples) - int(failed_sample_increment))
+        self.n_samples = baseline_n_samples
         self._force_truncated_next_batch = True
+        retry_mode = "truncated"
         try:
             loss, metrics = self.train_one_batch(idx, sample, training_loss)
+        except Exception as exc:
+            if self._is_cuda_oom(exc):
+                self._clear_cuda_oom_state()
+                self.n_samples = baseline_n_samples
+                retry_mode = "truncated-microbatch"
+                loss, metrics = self._train_batch_via_truncated_microbatches(
+                    idx, sample, training_loss
+                )
+            else:
+                raise RuntimeError(
+                    (
+                        "Adaptive AR retry failed "
+                        f"(epoch={getattr(self, 'epoch', -1)}, batch={idx}, "
+                        f"rollout_steps={ar_ctx.get('rollout_steps', 'unknown')}, "
+                        f"original_mode={ar_ctx.get('gradient_mode', 'full')}, "
+                        f"retry_mode=truncated, detach_every={self.ar_truncation_steps})."
+                    )
+                ) from exc
         finally:
             self._force_truncated_next_batch = False
         self._oom_fallback_count += 1
         if isinstance(metrics, dict):
             metrics["oom_fallback"] = 1.0
+            metrics["oom_fallback_total"] = float(self._oom_fallback_count)
         if self.logger is not None:
             self.logger.warning(
-                "Adaptive AR OOM fallback triggered at epoch=%s batch=%s (total=%s).",
+                (
+                    "Adaptive AR OOM fallback triggered at epoch=%s batch=%s "
+                    "(rollout_steps=%s, original_mode=%s, retry_mode=%s, detach_every=%s, total=%s)."
+                ),
                 getattr(self, "epoch", -1),
                 idx,
+                ar_ctx.get("rollout_steps", "unknown"),
+                ar_ctx.get("gradient_mode", "full"),
+                retry_mode,
+                self.ar_truncation_steps,
                 self._oom_fallback_count,
             )
         return loss, metrics
+
+    def _backward_ar_window(self, window_loss, *, n_ar_steps: int):
+        if window_loss is None:
+            return
+        accum_divisor = max(1, int(getattr(self, "_current_accum_divisor", 1)))
+        batch_weight = float(getattr(self, "_current_batch_weight", 1.0))
+        scaled_loss = (window_loss * batch_weight) / (
+            float(n_ar_steps) * float(accum_divisor)
+        )
+        if self.scaler.is_enabled():
+            self.scaler.scale(scaled_loss).backward()
+        else:
+            scaled_loss.backward()
+
+    def _estimate_sample_increment(self, sample):
+        batch_size = None
+        if isinstance(sample, dict):
+            for key in ("y", "dynamic", "x"):
+                value = sample.get(key, None)
+                if torch.is_tensor(value) and value.dim() > 0:
+                    batch_size = int(value.shape[0])
+                    break
+        if batch_size is None:
+            return 0
+        use_ar = (
+            self.ar_rollout_steps > 1
+            and self.epoch >= self.ar_finetune_start_epoch
+            and "target_sequence" in sample
+            and sample["target_sequence"] is not None
+        )
+        if not use_ar:
+            return batch_size
+        target_sequence = sample["target_sequence"]
+        if target_sequence.dim() == 5:
+            target_sequence = target_sequence.squeeze(1)
+        max_available_steps = int(target_sequence.shape[1])
+        if self.ar_curriculum_epochs_per_step > 0:
+            ar_epoch_index = self.epoch - self.ar_finetune_start_epoch
+            curriculum_step_index = ar_epoch_index // self.ar_curriculum_epochs_per_step
+            effective_ar_steps = min(curriculum_step_index + 1, self.ar_rollout_steps)
+        else:
+            effective_ar_steps = self.ar_rollout_steps
+        n_ar_steps = min(int(effective_ar_steps), max_available_steps)
+        return batch_size * n_ar_steps
+
+    @staticmethod
+    def _slice_batch_like(sample, start: int, end: int):
+        if not isinstance(sample, dict):
+            raise TypeError("Expected sample to be a dict for microbatch slicing.")
+        ref_batch = None
+        for key in ("y", "dynamic", "x"):
+            value = sample.get(key, None)
+            if torch.is_tensor(value) and value.dim() > 0:
+                ref_batch = int(value.shape[0])
+                break
+        if ref_batch is None:
+            raise ValueError("Unable to infer batch size for microbatch slicing.")
+        subset = {}
+        for key, value in sample.items():
+            if torch.is_tensor(value) and value.dim() > 0 and int(value.shape[0]) == ref_batch:
+                subset[key] = value[start:end]
+            else:
+                subset[key] = value
+        return subset
+
+    def _train_batch_via_truncated_microbatches(self, idx, sample, training_loss):
+        full_batch_size = int(sample["y"].shape[0])
+        if full_batch_size <= 1:
+            raise RuntimeError(
+                "Adaptive AR microbatch fallback cannot shrink a batch of size 1 any further."
+            )
+        retry_ctx = dict(getattr(self, "_last_ar_runtime_context", {}) or {})
+        chunk_size = max(1, full_batch_size // 2)
+        baseline_n_samples = int(getattr(self, "n_samples", 0))
+        prev_batch_weight = float(getattr(self, "_current_batch_weight", 1.0))
+        self._force_truncated_next_batch = True
+        try:
+            while True:
+                self.n_samples = baseline_n_samples
+                self._clear_cuda_oom_state()
+                total_loss_scalar = 0.0
+                total_rel_l2 = 0.0
+                chunk_counter = 0
+                try:
+                    for start in range(0, full_batch_size, chunk_size):
+                        end = min(full_batch_size, start + chunk_size)
+                        batch_weight = float(end - start) / float(full_batch_size)
+                        self._current_batch_weight = batch_weight
+                        chunk_sample = self._slice_batch_like(sample, start, end)
+                        loss, metrics = self.train_one_batch(idx, chunk_sample, training_loss)
+                        if not isinstance(metrics, dict) or not metrics.get("_backward_done", False):
+                            raise RuntimeError(
+                                "Adaptive AR microbatch fallback expected truncated backward "
+                                "to complete inside the trainer."
+                            )
+                        total_loss_scalar += float(loss.detach().item()) * batch_weight
+                        rel_l2 = metrics.get("rel_l2", None)
+                        if rel_l2 is not None:
+                            total_rel_l2 += float(
+                                rel_l2.detach().item() if torch.is_tensor(rel_l2) else rel_l2
+                            )
+                        chunk_counter += 1
+                    self._oom_microbatch_count += 1
+                    self._epoch_oom_microbatch_fallbacks += 1
+                    if self.logger is not None:
+                        self.logger.warning(
+                            (
+                                "Adaptive AR microbatch fallback succeeded at epoch=%s batch=%s "
+                                "(rollout_steps=%s, chunk_size=%s, chunks=%s, total=%s)."
+                            ),
+                            getattr(self, "epoch", -1),
+                            idx,
+                            retry_ctx.get("rollout_steps", "unknown"),
+                            chunk_size,
+                            chunk_counter,
+                            self._oom_microbatch_count,
+                        )
+                    return (
+                        torch.tensor(
+                            total_loss_scalar,
+                            device=self.device,
+                            dtype=sample["y"].dtype,
+                        ),
+                        {
+                            "rel_l2": torch.tensor(
+                                total_rel_l2, device=self.device, dtype=sample["y"].dtype
+                            ),
+                            "_backward_done": True,
+                            "oom_fallback_microbatch": 1.0,
+                            "oom_fallback_microbatch_total": float(self._oom_microbatch_count),
+                            "oom_fallback_microbatch_chunks": float(chunk_counter),
+                            "oom_fallback_microbatch_chunk_size": float(chunk_size),
+                        },
+                    )
+                except RuntimeError as exc:
+                    if self._is_cuda_oom(exc) and chunk_size > 1:
+                        next_chunk_size = max(1, math.ceil(chunk_size / 2))
+                        if next_chunk_size == chunk_size:
+                            next_chunk_size = max(1, chunk_size - 1)
+                        if self.logger is not None:
+                            self.logger.warning(
+                                (
+                                    "Adaptive AR microbatch fallback reduced chunk size after OOM "
+                                    "(epoch=%s batch=%s rollout_steps=%s chunk_size=%s -> %s)."
+                                ),
+                                getattr(self, "epoch", -1),
+                                idx,
+                                retry_ctx.get("rollout_steps", "unknown"),
+                                chunk_size,
+                                next_chunk_size,
+                            )
+                        chunk_size = next_chunk_size
+                        continue
+                    self.n_samples = baseline_n_samples
+                    raise RuntimeError(
+                        (
+                            "Adaptive AR microbatch retry failed "
+                            f"(epoch={getattr(self, 'epoch', -1)}, batch={idx}, "
+                            f"rollout_steps={retry_ctx.get('rollout_steps', 'unknown')}, "
+                            f"retry_mode=truncated-microbatch, chunk_size={chunk_size}, "
+                            f"detach_every={self.ar_truncation_steps})."
+                        )
+                    ) from exc
+        finally:
+            self._current_batch_weight = prev_batch_weight
+            self._force_truncated_next_batch = False
 
     def _train_one_batch_single_step(self, idx, sample, training_loss):
         """Single-step FGN: n_crps forward passes with different z, loss on (pred_samples, y)."""
@@ -299,6 +502,12 @@ class FGNTrainer(Trainer):
         if gradient_mode == "adaptive":
             gradient_mode = "truncated" if self._force_truncated_next_batch else "full"
         detach_every = self.ar_truncation_steps if gradient_mode == "truncated" else 0
+        self._last_ar_runtime_context = {
+            "batch_idx": int(idx),
+            "rollout_steps": int(n_ar_steps),
+            "gradient_mode": str(gradient_mode),
+            "detach_every": int(detach_every),
+        }
 
         n_history = sample["dynamic"].shape[1]
         dynamic_members = [sample["dynamic"].clone() for _ in range(self.crps_n_samples)]
@@ -308,7 +517,9 @@ class FGNTrainer(Trainer):
         q = sample["latent_queries"]
         out_q = sample["output_queries"]
 
-        total_loss = 0.0
+        total_loss = None
+        total_loss_scalar = 0.0
+        window_loss = None
         last_rel_l2 = None
         n_crps = self.crps_n_samples
         latent_bank = sample_fgn_rollout_latent_bank(
@@ -381,7 +592,11 @@ class FGNTrainer(Trainer):
                 )
                 gamma_s = self.ar_pooled_crps_gamma ** s
                 loss_s = loss_s + gamma_s * self.hazard_proxy_crps_weight * fair_crps_univariate(pred_pooled_s, y_pooled_s).mean()
-            total_loss = total_loss + loss_s
+            if gradient_mode != "truncated":
+                total_loss = loss_s if total_loss is None else (total_loss + loss_s)
+            total_loss_scalar += float(loss_s.detach().item())
+            if gradient_mode == "truncated":
+                window_loss = loss_s if window_loss is None else (window_loss + loss_s)
             if self.rel_l2_loss_fn is not None:
                 with torch.no_grad():
                     last_rel_l2 = self.rel_l2_loss_fn(pred_mean, y_s)
@@ -392,7 +607,11 @@ class FGNTrainer(Trainer):
                 n_history=n_history,
                 state_update_mode=self.fgn_ar_state_update,
             )
-            if detach_every > 0 and ((s + 1) % detach_every == 0):
+            reached_truncation_boundary = detach_every > 0 and ((s + 1) % detach_every == 0)
+            final_step = (s + 1) == n_ar_steps
+            if gradient_mode == "truncated" and (reached_truncation_boundary or final_step):
+                self._backward_ar_window(window_loss, n_ar_steps=n_ar_steps)
+                window_loss = None
                 dynamic_members = [hist.detach() for hist in dynamic_members]
             if boundary_sequence.dim() == 5:
                 time_dim = next(i for i, sz in enumerate(boundary_sequence.shape) if sz == max_available_steps)
@@ -405,8 +624,19 @@ class FGNTrainer(Trainer):
                 bc_step = bc_step.unsqueeze(1)
             boundary_sliding = torch.cat([boundary_sliding[:, 1:], bc_step], dim=1)[:, -n_history:]
 
-        loss = total_loss / n_ar_steps
-        metrics = {"rel_l2": last_rel_l2 if last_rel_l2 is not None else torch.tensor(0.0, device=self.device)}
+        if gradient_mode == "truncated":
+            loss = torch.tensor(
+                total_loss_scalar / float(n_ar_steps),
+                device=self.device,
+                dtype=sample["dynamic"].dtype,
+            )
+        else:
+            loss = total_loss / n_ar_steps
+        metrics = {
+            "rel_l2": last_rel_l2 if last_rel_l2 is not None else torch.tensor(0.0, device=self.device),
+        }
+        if gradient_mode == "truncated":
+            metrics["_backward_done"] = True
         if idx == 0 and self.logger is not None:
             self.logger.info(
                 "AR fine-tuning: epoch=%s, rollout_steps=%s (max=%s)%s, mode=%s%s.",
@@ -453,7 +683,21 @@ class FGNTrainer(Trainer):
             print(f"FGN {'AR' if use_ar else 'single-step'}: loss = {loss.item():.8f} (B={B})")
 
         if self.regularizer:
-            loss = loss + self.regularizer.loss
+            regularizer_loss = self.regularizer.loss
+            if isinstance(metrics, dict) and metrics.get("_backward_done", False):
+                if torch.is_tensor(regularizer_loss) and regularizer_loss.requires_grad:
+                    accum_divisor = max(1, int(getattr(self, "_current_accum_divisor", 1)))
+                    batch_weight = float(getattr(self, "_current_batch_weight", 1.0))
+                    scaled_reg = (regularizer_loss * batch_weight) / float(accum_divisor)
+                    if self.scaler.is_enabled():
+                        self.scaler.scale(scaled_reg).backward()
+                    else:
+                        scaled_reg.backward()
+                loss = loss + regularizer_loss.detach() * float(
+                    getattr(self, "_current_batch_weight", 1.0)
+                )
+            else:
+                loss = loss + regularizer_loss
         return loss, metrics
 
     def eval_one_batch(self, sample, eval_losses, return_output=False):

@@ -300,13 +300,22 @@ class Trainer:
         n_batches = len(train_loader)
         grad_accum = max(1, int(self.grad_accum_steps))
         oom_fallback_batches = 0
+        if hasattr(self, "_epoch_oom_microbatch_fallbacks"):
+            self._epoch_oom_microbatch_fallbacks = 0
         self._skip_internal_zero_grad = True
+        self._current_accum_divisor = 1
         self.optimizer.zero_grad(set_to_none=True)
 
         try:
             for idx, sample in enumerate(batch_iter):
                 did_oom_retry = False
                 result = None
+                is_last_batch = (idx + 1 == n_batches)
+                if is_last_batch and ((idx + 1) % grad_accum != 0):
+                    accum_divisor = (idx % grad_accum) + 1
+                else:
+                    accum_divisor = grad_accum
+                self._current_accum_divisor = accum_divisor
                 for attempt in range(2):
                     try:
                         if did_oom_retry and hasattr(self, "retry_batch_after_oom"):
@@ -318,16 +327,13 @@ class Trainer:
                         else:
                             loss, metrics = result, {}
 
-                        is_last_batch = (idx + 1 == n_batches)
-                        if is_last_batch and ((idx + 1) % grad_accum != 0):
-                            accum_divisor = (idx % grad_accum) + 1
-                        else:
-                            accum_divisor = grad_accum
-                        scaled_loss = loss / accum_divisor
-                        if self.scaler.is_enabled():
-                            self.scaler.scale(scaled_loss).backward()
-                        else:
-                            scaled_loss.backward()
+                        backward_done = bool(metrics.pop("_backward_done", False)) if isinstance(metrics, dict) else False
+                        if not backward_done:
+                            scaled_loss = loss / accum_divisor
+                            if self.scaler.is_enabled():
+                                self.scaler.scale(scaled_loss).backward()
+                            else:
+                                scaled_loss.backward()
                         break
                     except RuntimeError as exc:
                         can_retry = (
@@ -380,6 +386,7 @@ class Trainer:
                     )
         finally:
             self._skip_internal_zero_grad = False
+            self._current_accum_divisor = 1
 
         epoch_train_time = default_timer() - t1
 
@@ -417,10 +424,28 @@ class Trainer:
                 else:
                     print(msg)
                     sys.stdout.flush()
+            microbatch_fallback_batches = int(getattr(self, "_epoch_oom_microbatch_fallbacks", 0))
+            if microbatch_fallback_batches > 0:
+                msg = (
+                    f"Epoch {epoch}: adaptive microbatch fallback used on "
+                    f"{microbatch_fallback_batches} batch(es)."
+                )
+                if self.logger:
+                    self.logger.warning(msg)
+                else:
+                    print(msg)
+                    sys.stdout.flush()
 
         if self.wandb_log and wandb_available and oom_fallback_batches > 0:
             wandb.log(
                 data={"train_oom_fallback_batches": float(oom_fallback_batches)},
+                step=epoch + 1,
+                commit=False,
+            )
+        microbatch_fallback_batches = int(getattr(self, "_epoch_oom_microbatch_fallbacks", 0))
+        if self.wandb_log and wandb_available and microbatch_fallback_batches > 0:
+            wandb.log(
+                data={"train_oom_fallback_microbatch_batches": float(microbatch_fallback_batches)},
                 step=epoch + 1,
                 commit=False,
             )

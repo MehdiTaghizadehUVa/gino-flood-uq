@@ -9,23 +9,33 @@ import torch
 def verify_training_gradient_flow(trainer, train_loader, training_loss):
     """
     Verify that loss is differentiable and gradients flow to model parameters.
-    Runs one forward + backward and checks loss.grad_fn and param.grad norms.
+
+    If ``trainer.train_one_batch`` already performed backward internally (for example,
+    truncated/adaptive AR paths), reuse those gradients instead of calling backward a
+    second time.
     """
     trainer.model.train()
     if trainer.data_processor is not None:
         trainer.data_processor.train()
+    if getattr(trainer, "optimizer", None) is not None:
+        trainer.optimizer.zero_grad(set_to_none=True)
     batch = next(iter(train_loader))
     result = trainer.train_one_batch(0, batch, training_loss)
-    loss, _ = (result[0], result[1]) if isinstance(result, tuple) and len(result) == 2 else (result, {})
+    if isinstance(result, tuple) and len(result) == 2:
+        loss, metrics = result
+    else:
+        loss, metrics = result, {}
 
     if not isinstance(loss, torch.Tensor):
         raise AssertionError(f"train_one_batch must return a Tensor (or (loss, metrics)), got {type(loss)}")
-    if not loss.requires_grad:
-        raise AssertionError("Loss does not require grad; check that model output is used in loss.")
-    if loss.grad_fn is None:
-        raise AssertionError("Loss has no grad_fn; graph may be detached.")
 
-    loss.backward()
+    backward_done = bool(getattr(metrics, "get", lambda *_args, **_kwargs: False)("_backward_done", False))
+    if not backward_done:
+        if not loss.requires_grad:
+            raise AssertionError("Loss does not require grad; check that model output is used in loss.")
+        if loss.grad_fn is None:
+            raise AssertionError("Loss has no grad_fn; graph may be detached.")
+        loss.backward()
 
     total_norm = 0.0
     num_params_with_grad = 0
@@ -41,13 +51,18 @@ def verify_training_gradient_flow(trainer, train_loader, training_loss):
     if total_norm == 0.0:
         raise AssertionError("Total gradient norm is zero; loss may not depend on model parameters.")
 
-    print(f"[Verify] Gradient flow OK: loss={loss.item():.6f}, grad_norm={total_norm:.6e}, params_with_grad={num_params_with_grad}")
+    print(
+        f"[Verify] Gradient flow OK: loss={loss.item():.6f}, grad_norm={total_norm:.6e}, "
+        f"params_with_grad={num_params_with_grad}, backward_done={backward_done}"
+    )
     return True
 
 
 def overfit_sanity_check(trainer, train_loader, training_loss, optimizer, n_steps=15):
     """
     Overfit a single batch for n_steps. If optimization is correct, loss should decrease.
+
+    Respects trainer-internal backward for adaptive/truncated AR paths.
     """
     trainer.model.train()
     if trainer.data_processor is not None:
@@ -57,8 +72,13 @@ def overfit_sanity_check(trainer, train_loader, training_loss, optimizer, n_step
     for step in range(n_steps):
         optimizer.zero_grad(set_to_none=True)
         result = trainer.train_one_batch(0, batch, training_loss)
-        loss = result[0] if isinstance(result, tuple) and len(result) == 2 else result
-        loss.backward()
+        if isinstance(result, tuple) and len(result) == 2:
+            loss, metrics = result
+        else:
+            loss, metrics = result, {}
+        backward_done = bool(getattr(metrics, "get", lambda *_args, **_kwargs: False)("_backward_done", False))
+        if not backward_done:
+            loss.backward()
         optimizer.step()
         losses.append(loss.item())
     if losses[-1] >= losses[0]:
