@@ -42,7 +42,7 @@ def test_model_checkpoint_saves():
                   save_every=1
                   )
     
-    for file_ext in ['model_state_dict.pt', 'model_metadata.pkl', 'optimizer.pt', 'scheduler.pt']:
+    for file_ext in ['model_state_dict.pt', 'model_metadata.pkl', 'optimizer.pt', 'scheduler.pt', 'rng_state.pt']:
         file_pth = save_pth / file_ext
         assert file_pth.exists()
 
@@ -83,7 +83,7 @@ def test_model_checkpoint_and_resume():
                   save_dir=save_pth,
                   save_every=1
                   )
-    for file_ext in ['best_model_state_dict.pt', 'best_model_metadata.pkl', 'optimizer.pt', 'scheduler.pt']:
+    for file_ext in ['best_model_state_dict.pt', 'best_model_metadata.pkl', 'optimizer.pt', 'scheduler.pt', 'rng_state.pt']:
         file_pth = save_pth / file_ext
         
         assert file_pth.exists()

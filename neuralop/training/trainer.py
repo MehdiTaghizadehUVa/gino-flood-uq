@@ -19,6 +19,7 @@ except ModuleNotFoundError:
     wandb_available = False
 
 from neuralop.losses import LpLoss
+from .determinism import deterministic_seed_context, stable_seed_from_parts
 from .training_state import load_training_state, save_training_state
 
 try:
@@ -48,6 +49,8 @@ class Trainer:
         use_progress_bar: bool=True,
         scheduler_monitor: str="train_err",
         grad_accum_steps: int=1,
+        deterministic_eval: bool=False,
+        eval_seed: int | None=None,
     ):
         """
         Parameters
@@ -90,6 +93,8 @@ class Trainer:
         self.use_distributed = use_distributed
         self.device = device
         self.grad_accum_steps = max(1, int(grad_accum_steps))
+        self.deterministic_eval = bool(deterministic_eval)
+        self.eval_seed = None if eval_seed is None else int(eval_seed)
         # handle autocast device
         if isinstance(self.device, torch.device):
             self.autocast_device_type = self.device.type
@@ -456,8 +461,12 @@ class Trainer:
         # evaluate and gather metrics across each loader in test_loaders
         all_metrics = {}
         for loader_name, loader in test_loaders.items():
-            loader_metrics = self.evaluate(eval_losses, loader,
-                                    log_prefix=loader_name)   
+            loader_metrics = self.evaluate(
+                eval_losses,
+                loader,
+                log_prefix=loader_name,
+                epoch=epoch,
+            )
             all_metrics.update(**loader_metrics)
         if self.verbose:
             self.log_eval(epoch=epoch,
@@ -501,7 +510,11 @@ class Trainer:
                 return_output = False
                 if idx == len(data_loader) - 1:
                     return_output = True
-                eval_step_losses, outs = self.eval_one_batch(sample, loss_dict, return_output=return_output)
+                eval_seed = self._seed_for_eval_batch(epoch=epoch, log_prefix=log_prefix, batch_idx=idx)
+                with deterministic_seed_context(eval_seed):
+                    eval_step_losses, outs = self.eval_one_batch(
+                        sample, loss_dict, return_output=return_output
+                    )
                 batch_size = sample["y"].size(0)
 
                 for loss_name, val_loss in eval_step_losses.items():
@@ -523,6 +536,17 @@ class Trainer:
             errors[f"{log_prefix}_outputs"] = wandb.Image(outs)
         
         return errors
+
+    def _seed_for_eval_batch(self, *, epoch: int | None, log_prefix: str, batch_idx: int) -> int | None:
+        if not self.deterministic_eval or self.eval_seed is None:
+            return None
+        return stable_seed_from_parts(
+            "trainer_eval",
+            self.eval_seed,
+            int(epoch) if epoch is not None else -1,
+            str(log_prefix),
+            int(batch_idx),
+        )
     
     def on_epoch_start(self, epoch):
         """on_epoch_start runs at the beginning
@@ -783,7 +807,8 @@ class Trainer:
                                                 optimizer=self.optimizer,
                                                 regularizer=self.regularizer,
                                                 scheduler=self.scheduler,
-                                                map_location={'cpu': self.device})
+                                                map_location={'cpu': self.device},
+                                                restore_rng_state_on_load=True)
 
         if resume_epoch is not None:
             next_epoch = int(resume_epoch) + 1
@@ -811,22 +836,21 @@ class Trainer:
             otherwise "model".
         """
         is_rank0 = (not dist.is_initialized()) or (dist.get_rank() == 0)
-        if is_rank0:
-            if save_name is None:
-                if self.save_best is not None:
-                    save_name = "best_model"
-                else:
-                    save_name = "model"
-            save_training_state(save_dir=save_dir, 
-                                save_name=save_name,
-                                model=self.model,
-                                optimizer=self.optimizer,
-                                scheduler=self.scheduler,
-                                regularizer=self.regularizer,
-                                epoch=self.epoch
-                                )
-            if self.verbose:
-                if self.logger:
-                    self.logger.info("Saved training state to %s", save_dir)
-                else:
-                    print(f"[Rank 0]: saved training state to {save_dir}")
+        if save_name is None:
+            if self.save_best is not None:
+                save_name = "best_model"
+            else:
+                save_name = "model"
+        save_training_state(save_dir=save_dir, 
+                            save_name=save_name,
+                            model=self.model,
+                            optimizer=self.optimizer,
+                            scheduler=self.scheduler,
+                            regularizer=self.regularizer,
+                            epoch=self.epoch
+                            )
+        if is_rank0 and self.verbose:
+            if self.logger:
+                self.logger.info("Saved training state to %s", save_dir)
+            else:
+                print(f"[Rank 0]: saved training state to {save_dir}")

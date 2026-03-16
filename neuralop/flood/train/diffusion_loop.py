@@ -19,6 +19,11 @@ from neuralop.flood.train.diffusion_runtime import (
     _unwrap_module,
 )
 from neuralop.flood.utils.diffusion_script_utils import save_checkpoint_sidecars, safe_get
+from neuralop.training.determinism import (
+    collect_rng_state_across_ranks,
+    deterministic_seed_context,
+    stable_seed_from_parts,
+)
 
 def _evaluate_validation(
     forecaster: ConditionalDDOForecaster,
@@ -27,6 +32,9 @@ def _evaluate_validation(
     target_norm: Optional[Any],
     dist_ctx: DistContext,
     max_batches: int = DEFAULT_MAX_VAL_BATCHES,
+    deterministic_eval: bool = False,
+    eval_seed: int | None = None,
+    epoch: int | None = None,
 ) -> Dict[str, float]:
     forecaster.eval()
     loss_sum = torch.tensor(0.0, device=device, dtype=torch.float64)
@@ -56,9 +64,19 @@ def _evaluate_validation(
             if bidx >= max_batches:
                 break
             sample = _prepare_batch(batch, device)
-            loss, _ = forecaster.training_loss(sample)
             full_loss_input = {k: v for k, v in sample.items() if k != "point_weights"}
-            loss_full, _ = forecaster.training_loss(full_loss_input)
+            batch_seed = None
+            if deterministic_eval and eval_seed is not None:
+                batch_seed = stable_seed_from_parts(
+                    "diffusion_val",
+                    int(eval_seed),
+                    int(epoch) if epoch is not None else -1,
+                    int(bidx),
+                )
+            with deterministic_seed_context(batch_seed):
+                loss, _ = forecaster.training_loss(sample)
+            with deterministic_seed_context(batch_seed):
+                loss_full, _ = forecaster.training_loss(full_loss_input)
             bsz = float(sample["target"].shape[0])
             loss_sum += float(loss.item()) * bsz
             loss_count += bsz
@@ -203,6 +221,8 @@ def _save_checkpoint(
     forecaster: ConditionalDDOForecaster,
     scheduler: Optional[Any] = None,
 ) -> None:
+    is_rank0 = (not dist.is_available()) or (not dist.is_initialized()) or (dist.get_rank() == 0)
+    rng_state_bundle = collect_rng_state_across_ranks()
     denoiser_state = _unwrap_module(model).state_dict()
     time_mlp_state = _unwrap_module(time_mlp).state_dict() if time_mlp is not None else None
 
@@ -216,6 +236,7 @@ def _save_checkpoint(
         "gino_config": gino_cfg,
         "diffusion_hparams": forecaster.diffusion_hparams(),
         "has_time_mlp_state_dict": time_mlp_state is not None,
+        "has_rng_state": True,
     }
     payload = {
         **metadata,
@@ -223,18 +244,22 @@ def _save_checkpoint(
         "time_mlp_state_dict": time_mlp_state,
         "optimizer_state_dict": optimizer.state_dict(),
         "scheduler_state_dict": scheduler.state_dict() if scheduler is not None else None,
+        "rng_state": rng_state_bundle,
     }
-    path.parent.mkdir(parents=True, exist_ok=True)
-    torch.save(payload, path)
-    extra_sidecars: Dict[str, Dict[str, Any]] = {}
-    if time_mlp_state is not None:
-        extra_sidecars["time_mlp_state_dict"] = time_mlp_state
-    save_checkpoint_sidecars(
-        path,
-        denoiser_state_dict=denoiser_state,
-        metadata=metadata,
-        extra_state_dicts=extra_sidecars,
-    )
+    if is_rank0:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        torch.save(payload, path)
+        extra_sidecars: Dict[str, Dict[str, Any]] = {}
+        if time_mlp_state is not None:
+            extra_sidecars["time_mlp_state_dict"] = time_mlp_state
+        save_checkpoint_sidecars(
+            path,
+            denoiser_state_dict=denoiser_state,
+            metadata=metadata,
+            extra_state_dicts=extra_sidecars,
+        )
+    if dist.is_available() and dist.is_initialized():
+        dist.barrier()
 
 
 def _resolve_resume_checkpoint(config: Any) -> Optional[Path]:

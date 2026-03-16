@@ -657,6 +657,8 @@ def main():
             use_distributed=use_distributed,
             mixed_precision=mixed_precision,
             grad_accum_steps=grad_accum_steps,
+            deterministic_eval=deterministic,
+            eval_seed=effective_seed,
             fgn_noise_dim=fgn_noise_dim,
             crps_n_samples=crps_n_samples,
             rel_l2_loss_fn=primary_l2_loss,
@@ -694,6 +696,8 @@ def main():
             use_distributed=use_distributed,
             mixed_precision=mixed_precision,
             grad_accum_steps=grad_accum_steps,
+            deterministic_eval=deterministic,
+            eval_seed=effective_seed,
             rel_l2_loss_fn=primary_l2_loss,
             ar_finetune_start_epoch=max(0, _safe_int(_cfg_get(config.opt, "ar_finetune_start_epoch", 0), 0)),
             ar_rollout_steps=ar_rollout_steps,
@@ -716,6 +720,8 @@ def main():
             use_distributed=use_distributed,
             mixed_precision=mixed_precision,
             grad_accum_steps=grad_accum_steps,
+            deterministic_eval=deterministic,
+            eval_seed=effective_seed,
         )
     logger.info(
         "Trainer settings: distributed=%s, mixed_precision=%s, grad_accum_steps=%s%s",

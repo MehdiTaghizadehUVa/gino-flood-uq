@@ -1,6 +1,7 @@
 import torch
 import torch.distributed as dist
 import neuralop.mpu.comm as comm
+from .determinism import configure_global_determinism
 
 def _safe_get(obj, key, default):
     try:
@@ -31,6 +32,8 @@ def setup(config):
         is_logger : bool
     """
     use_distributed = bool(_safe_get(config.distributed, "use_distributed", False))
+    deterministic = bool(_safe_get(config, "deterministic", False))
+    configure_global_determinism(deterministic)
     if use_distributed:
         verbose = bool(_safe_get(config, "verbose", False))
         comm.init(model_parallel_size=config.distributed.get('model_parallel_size', 1),
@@ -83,7 +86,7 @@ def setup(config):
         except AttributeError:
             pass
         
-        torch.backends.cudnn.benchmark = True
+        torch.backends.cudnn.benchmark = not deterministic
 
     if 'seed' in config.distributed:
         torch.manual_seed(seed)

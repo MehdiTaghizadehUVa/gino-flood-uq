@@ -14,6 +14,7 @@ import numpy as np
 import torch
 from configmypy import ArgparseConfig, ConfigPipeline, YamlConfig
 
+from neuralop.training.determinism import seed_all
 from neuralop.training import setup
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -27,17 +28,7 @@ def set_seed(seed: int, deterministic: bool = True) -> None:
     are deterministic; training may be slightly slower. For extra reproducibility
     (e.g. hash-based dict order), set env PYTHONHASHSEED=0 before starting Python.
     """
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed(seed)
-        torch.cuda.manual_seed_all(seed)
-    if deterministic:
-        torch.backends.cudnn.deterministic = True
-        torch.backends.cudnn.benchmark = False
-    else:
-        torch.backends.cudnn.benchmark = True
+    seed_all(int(seed), deterministic=bool(deterministic))
 
 
 def make_dataloader_generator(seed: int):
@@ -507,6 +498,7 @@ def save_effective_config_snapshot(config, save_dir, logger=None):
 def dataloader_worker_init(worker_id: int, base_seed: int) -> None:
     """Top-level worker init for Windows multiprocessing pickling compatibility."""
     worker_seed = int(base_seed) + int(worker_id)
+    random.seed(worker_seed)
     np.random.seed(worker_seed)
     torch.manual_seed(worker_seed)
 

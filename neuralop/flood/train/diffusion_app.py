@@ -44,6 +44,7 @@ from neuralop.flood.utils.diffusion_script_utils import (
     shutdown_dataloader_workers,
 )
 from neuralop.flood.utils.runtime import parse_target_variables, set_seed, setup_logging
+from neuralop.training.determinism import restore_rng_state
 
 def main() -> int:
     config = _load_config(_REPO_ROOT / "config" / "gino_pluvial_flood_config_WV_depth_only_diffusion.yaml")
@@ -297,6 +298,7 @@ def main() -> int:
         best_val_loss = float(resume_bundle.get("best_val_loss", best_val_loss))
         global_step = int(resume_bundle.get("global_step", 0))
         start_epoch = int(resume_bundle.get("epoch", 0)) + 1
+        restore_rng_state(resume_bundle.get("rng_state"))
         _rank0_info(
             logger,
             dist_ctx,
@@ -397,6 +399,9 @@ def main() -> int:
                 target_norm=normalizers.get("target", None),
                 dist_ctx=dist_ctx,
                 max_batches=max_val_batches,
+                deterministic_eval=deterministic,
+                eval_seed=seed,
+                epoch=epoch,
             )
 
             if scheduler is not None:
@@ -432,43 +437,42 @@ def main() -> int:
             checkpoint_best_val_loss = float(
                 val_stats["val_loss"] if improved else best_val_loss
             )
-            if dist_ctx.is_rank0:
-                latest_path = ckpt_dir / "checkpoint.pt"
+            latest_path = ckpt_dir / "checkpoint.pt"
+            _save_checkpoint(
+                path=latest_path,
+                model=model,
+                time_mlp=forecaster.time_mlp,
+                optimizer=optimizer,
+                epoch=epoch,
+                global_step=global_step,
+                seed=seed,
+                best_val_loss=checkpoint_best_val_loss,
+                normalizer_path=normalizer_path,
+                target_variables=target_variables,
+                gino_cfg=gino_cfg,
+                forecaster=forecaster,
+                scheduler=scheduler,
+            )
+
+            if improved:
+                best_val_loss = float(val_stats["val_loss"])
+                best_path = ckpt_dir / "checkpoint_best.pt"
                 _save_checkpoint(
-                    path=latest_path,
+                    path=best_path,
                     model=model,
                     time_mlp=forecaster.time_mlp,
                     optimizer=optimizer,
                     epoch=epoch,
                     global_step=global_step,
                     seed=seed,
-                    best_val_loss=checkpoint_best_val_loss,
+                    best_val_loss=best_val_loss,
                     normalizer_path=normalizer_path,
                     target_variables=target_variables,
                     gino_cfg=gino_cfg,
                     forecaster=forecaster,
                     scheduler=scheduler,
                 )
-
-            if improved:
-                best_val_loss = float(val_stats["val_loss"])
                 if dist_ctx.is_rank0:
-                    best_path = ckpt_dir / "checkpoint_best.pt"
-                    _save_checkpoint(
-                        path=best_path,
-                        model=model,
-                        time_mlp=forecaster.time_mlp,
-                        optimizer=optimizer,
-                        epoch=epoch,
-                        global_step=global_step,
-                        seed=seed,
-                        best_val_loss=best_val_loss,
-                        normalizer_path=normalizer_path,
-                        target_variables=target_variables,
-                        gino_cfg=gino_cfg,
-                        forecaster=forecaster,
-                        scheduler=scheduler,
-                    )
                     logger.info("Saved new best checkpoint: %s", best_path)
             _dist_barrier(dist_ctx)
 

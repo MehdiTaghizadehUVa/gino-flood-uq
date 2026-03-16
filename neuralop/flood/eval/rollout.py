@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Optional
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
+import torch.distributed as dist
 from tqdm import tqdm
 
 from neuralop.flood.losses import FloodMaskedRelLpLoss
@@ -1617,6 +1618,10 @@ def _make_trainer(
     eval_interval = _opt(config, "wandb", "eval_interval", 1)
     is_logger = logger is not None
     n_epochs = max(1, int(_opt(config, "opt", "n_epochs", 1)))
+    deterministic = bool(_opt(config, None, "deterministic", True))
+    eval_seed = int(_opt(config, "distributed", "seed", 123))
+    if dist.is_available() and dist.is_initialized():
+        eval_seed += int(dist.get_rank())
 
     common = dict(
         model=model,
@@ -1629,6 +1634,8 @@ def _make_trainer(
         use_progress_bar=use_progress_bar,
         scheduler_monitor=scheduler_monitor,
         eval_interval=eval_interval,
+        deterministic_eval=deterministic,
+        eval_seed=eval_seed,
     )
     structural_policy = str(
         _opt(config, "structural_dry", "policy", "legacy_full_domain")

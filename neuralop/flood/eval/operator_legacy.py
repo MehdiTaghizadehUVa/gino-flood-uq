@@ -2489,6 +2489,10 @@ def _make_trainer(
     eval_interval = _opt(config, "wandb", "eval_interval", 1)
     is_logger = logger is not None
     n_epochs = max(1, int(_opt(config, "opt", "n_epochs", 1)))
+    deterministic = bool(_opt(config, None, "deterministic", True))
+    eval_seed = int(_opt(config, "distributed", "seed", 123))
+    if torch.distributed.is_available() and torch.distributed.is_initialized():
+        eval_seed += int(torch.distributed.get_rank())
 
     common = dict(
         model=model,
@@ -2501,6 +2505,8 @@ def _make_trainer(
         use_progress_bar=use_progress_bar,
         scheduler_monitor=scheduler_monitor,
         eval_interval=eval_interval,
+        deterministic_eval=deterministic,
+        eval_seed=eval_seed,
     )
     if gaussian_mode:
         return GaussianNLLTrainer(
