@@ -221,7 +221,7 @@ def load_checkpoint_bundle(
                     allow_unsafe_legacy_load=True,
                     logger=logger,
                 )
-                for key in ("optimizer_state_dict", "scheduler_state_dict"):
+                for key in ("optimizer_state_dict", "scheduler_state_dict", "rng_state"):
                     if key not in merged and key in legacy:
                         merged[key] = legacy[key]
             return merged

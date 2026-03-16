@@ -5,6 +5,7 @@ from torch.utils.data import DataLoader, Dataset
 from neuralop.diffusion import ConditioningConfig, ConditionalDDOForecaster, PointRFFGaussianProcessSampler
 from neuralop.flood.train.diffusion_loop import _evaluate_validation
 from neuralop.flood.train.diffusion_runtime import DistContext
+from neuralop.flood.utils.diffusion_script_utils import load_checkpoint_bundle, save_checkpoint_sidecars
 
 
 class _DummyDenoiser(nn.Module):
@@ -82,3 +83,47 @@ def test_diffusion_validation_loss_is_repeatable_with_deterministic_eval_seed():
 
     assert val_1["val_loss"] == val_2["val_loss"]
     assert val_1["val_loss_full_domain"] == val_2["val_loss_full_domain"]
+
+
+def test_load_checkpoint_bundle_merges_rng_state_from_legacy_checkpoint(tmp_path):
+    checkpoint_path = tmp_path / "checkpoint.pt"
+    legacy_payload = {
+        "epoch": 1,
+        "global_step": 4,
+        "best_val_loss": 0.5,
+        "normalizer_path": str(tmp_path / "normalizers.pt"),
+        "target_variables": ["wd"],
+        "gino_config": {"fno_hidden_channels": 16},
+        "diffusion_hparams": {"sampler_num_steps": 4},
+        "denoiser_state_dict": {"lin.weight": torch.randn(1, 3)},
+        "time_mlp_state_dict": {"proj.weight": torch.randn(4, 4)},
+        "optimizer_state_dict": {"state": {0: {"momentum_buffer": torch.randn(3)}}},
+        "scheduler_state_dict": {"last_epoch": 1},
+        "rng_state": {"format_version": 1, "world_size": 1, "rank_states": [{"torch_cpu": torch.get_rng_state()}]},
+    }
+    torch.save(legacy_payload, checkpoint_path)
+    save_checkpoint_sidecars(
+        checkpoint_path,
+        denoiser_state_dict=legacy_payload["denoiser_state_dict"],
+        metadata={k: legacy_payload[k] for k in (
+            "epoch",
+            "global_step",
+            "best_val_loss",
+            "normalizer_path",
+            "target_variables",
+            "gino_config",
+            "diffusion_hparams",
+        )},
+        extra_state_dicts={"time_mlp_state_dict": legacy_payload["time_mlp_state_dict"]},
+    )
+
+    bundle = load_checkpoint_bundle(
+        checkpoint_path,
+        map_location="cpu",
+        allow_unsafe_legacy_load=True,
+        merge_legacy_training_state=True,
+    )
+
+    assert "optimizer_state_dict" in bundle
+    assert "scheduler_state_dict" in bundle
+    assert "rng_state" in bundle

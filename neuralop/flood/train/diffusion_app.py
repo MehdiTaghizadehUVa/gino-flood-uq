@@ -44,7 +44,12 @@ from neuralop.flood.utils.diffusion_script_utils import (
     shutdown_dataloader_workers,
 )
 from neuralop.flood.utils.runtime import parse_target_variables, set_seed, setup_logging
-from neuralop.training.determinism import restore_rng_state, seed_dataloader_for_epoch
+from neuralop.training.determinism import (
+    deterministic_seed_context,
+    restore_rng_state,
+    seed_dataloader_for_epoch,
+    stable_seed_from_parts,
+)
 
 def main() -> int:
     config = _load_config(_REPO_ROOT / "config" / "gino_pluvial_flood_config_WV_depth_only_diffusion.yaml")
@@ -331,7 +336,7 @@ def main() -> int:
                 pbar = tqdm(train_loader, desc=f"Epoch {epoch}/{n_epochs}", leave=False)
                 train_iter = pbar
 
-            for batch in train_iter:
+            for batch_idx, batch in enumerate(train_iter):
                 sample = _prepare_batch(batch, device)
                 if not first_batch_checked:
                     batch_size = sample["context"].shape[0]
@@ -356,8 +361,17 @@ def main() -> int:
                             )
                     first_batch_checked = True
                 optimizer.zero_grad(set_to_none=True)
-
-                loss, stats = forecaster.training_loss(sample)
+                batch_seed = None
+                if deterministic:
+                    batch_seed = stable_seed_from_parts(
+                        "diffusion_train",
+                        int(seed),
+                        int(epoch),
+                        int(batch_idx),
+                        int(dist_ctx.rank),
+                    )
+                with deterministic_seed_context(batch_seed):
+                    loss, stats = forecaster.training_loss(sample)
                 loss.backward()
                 if grad_clip is not None and grad_clip > 0:
                     torch.nn.utils.clip_grad_norm_(optim_params, grad_clip)
