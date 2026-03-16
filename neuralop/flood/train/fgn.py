@@ -7,7 +7,7 @@ import math
 import torch
 
 from neuralop.losses.data_losses import LpLoss
-from neuralop.losses.probabilistic_losses import fair_crps_univariate
+from neuralop.losses.probabilistic_losses import CRPSLoss, fair_crps_univariate
 from neuralop.training.trainer import Trainer
 
 from neuralop.flood.processing.wv_impl import (
@@ -443,6 +443,7 @@ class FGNTrainer(Trainer):
         pred_samples = torch.stack(outs, dim=0)
         pred_mean = pred_samples.mean(dim=0)
         y_target = sample["y"]
+        structural_dry_mask = sample.get("structural_dry_mask")
         if self.use_flood_crps_spatial_weights and "static" in sample and y_target.shape[-1] >= 3:
             spatial_weights = get_flood_crps_weights(
                 sample["static"],
@@ -452,11 +453,24 @@ class FGNTrainer(Trainer):
                 dry_weight_alpha=self.flood_crps_dry_weight_alpha,
                 static_normalizer=self.static_normalizer,
             )
-            loss = training_loss(pred_samples, y_target, spatial_weights=spatial_weights)
+            loss = training_loss(
+                pred_samples,
+                y_target,
+                spatial_weights=spatial_weights,
+                structural_dry_mask=structural_dry_mask,
+            )
         else:
-            loss = training_loss(pred_samples, y_target)
+            loss = training_loss(
+                pred_samples,
+                y_target,
+                structural_dry_mask=structural_dry_mask,
+            )
         if self.crps_l2_weight > 0 and self.rel_l2_loss_fn is not None:
-            loss = loss + self.crps_l2_weight * self.rel_l2_loss_fn(pred_mean, sample["y"])
+            loss = loss + self.crps_l2_weight * self.rel_l2_loss_fn(
+                pred_mean,
+                sample["y"],
+                structural_dry_mask=structural_dry_mask,
+            )
         if self.use_hazard_proxy_crps and "static" in sample and y_target.shape[-1] >= 3:
             pred_pooled = compute_hazard_proxy_pooled(
                 sample["static"],
@@ -477,7 +491,11 @@ class FGNTrainer(Trainer):
         metrics = {}
         if self.rel_l2_loss_fn is not None:
             with torch.no_grad():
-                metrics["rel_l2"] = self.rel_l2_loss_fn(pred_mean, sample["y"])
+                metrics["rel_l2"] = self.rel_l2_loss_fn(
+                    pred_mean,
+                    sample["y"],
+                    structural_dry_mask=structural_dry_mask,
+                )
         return loss, metrics
 
     def _train_one_batch_ar(self, idx, sample, training_loss):
@@ -534,6 +552,7 @@ class FGNTrainer(Trainer):
             y_s = target_sequence[:, s]
             if y_s.dim() == 2:
                 y_s = y_s.unsqueeze(0)
+            structural_dry_mask = sample.get("structural_dry_mask")
             outs_s = []
             for _start in range(0, n_crps, self.crps_sample_chunk_size):
                 chunk_n = min(self.crps_sample_chunk_size, n_crps - _start)
@@ -570,11 +589,24 @@ class FGNTrainer(Trainer):
                     dry_weight_alpha=self.flood_crps_dry_weight_alpha,
                     static_normalizer=self.static_normalizer,
                 )
-                loss_s = training_loss(pred_samples, y_s, spatial_weights=spatial_weights_s)
+                loss_s = training_loss(
+                    pred_samples,
+                    y_s,
+                    spatial_weights=spatial_weights_s,
+                    structural_dry_mask=structural_dry_mask,
+                )
             else:
-                loss_s = training_loss(pred_samples, y_s)
+                loss_s = training_loss(
+                    pred_samples,
+                    y_s,
+                    structural_dry_mask=structural_dry_mask,
+                )
             if self.crps_l2_weight > 0 and self.rel_l2_loss_fn is not None:
-                loss_s = loss_s + self.crps_l2_weight * self.rel_l2_loss_fn(pred_mean, y_s)
+                loss_s = loss_s + self.crps_l2_weight * self.rel_l2_loss_fn(
+                    pred_mean,
+                    y_s,
+                    structural_dry_mask=structural_dry_mask,
+                )
             if self.use_hazard_proxy_crps and y_s.shape[-1] >= 3:
                 pred_pooled_s = compute_hazard_proxy_pooled(
                     static,
@@ -599,7 +631,11 @@ class FGNTrainer(Trainer):
                 window_loss = loss_s if window_loss is None else (window_loss + loss_s)
             if self.rel_l2_loss_fn is not None:
                 with torch.no_grad():
-                    last_rel_l2 = self.rel_l2_loss_fn(pred_mean, y_s)
+                    last_rel_l2 = self.rel_l2_loss_fn(
+                        pred_mean,
+                        y_s,
+                        structural_dry_mask=structural_dry_mask,
+                    )
             dynamic_members = update_fgn_dynamic_members(
                 dynamic_members=dynamic_members,
                 pred_samples=pred_samples,
@@ -729,11 +765,20 @@ class FGNTrainer(Trainer):
         pred_mean = pred_samples.mean(dim=0)
 
         eval_step_losses = {}
+        structural_dry_mask = sample.get("structural_dry_mask")
         for loss_name, loss_fn in eval_losses.items():
-            if loss_name == "crps":
-                val = loss_fn(pred_samples, y_eval)
+            if getattr(loss_fn, "expects_samples", False) or isinstance(loss_fn, CRPSLoss) or loss_name == "crps":
+                val = loss_fn(
+                    pred_samples,
+                    y_eval,
+                    structural_dry_mask=structural_dry_mask,
+                )
             else:
-                val = loss_fn(pred_mean, y_eval)
+                val = loss_fn(
+                    pred_mean,
+                    y_eval,
+                    structural_dry_mask=structural_dry_mask,
+                )
             eval_step_losses[loss_name] = val
 
         out = pred_mean if return_output else None

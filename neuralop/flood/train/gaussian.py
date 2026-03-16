@@ -47,12 +47,17 @@ class GaussianNLLTrainer(Trainer):
         if self.data_processor is not None:
             out, sample = self.data_processor.postprocess(out, sample)
 
-        loss = training_loss(out, sample["y"])
+        structural_dry_mask = sample.get("structural_dry_mask")
+        loss = training_loss(out, sample["y"], structural_dry_mask=structural_dry_mask)
         metrics = {}
         if self.rel_l2_loss_fn is not None:
             with torch.no_grad():
                 pred_mean = _gaussian_mean_from_packed(out, sample["y"].shape[-1])
-                metrics["rel_l2"] = self.rel_l2_loss_fn(pred_mean, sample["y"])
+                metrics["rel_l2"] = self.rel_l2_loss_fn(
+                    pred_mean,
+                    sample["y"],
+                    structural_dry_mask=structural_dry_mask,
+                )
         if self.epoch == 0 and idx == 0 and self.verbose:
             B = sample["y"].shape[0]
             print(f"Gaussian NLL single-step: loss = {loss.item():.8f} (B={B})")
@@ -101,6 +106,7 @@ class GaussianNLLTrainer(Trainer):
 
             total_loss = 0.0
             last_rel_l2 = None
+            structural_dry_mask = sample.get("structural_dry_mask")
             for s in range(n_ar_steps):
                 x = _build_x_from_dynamic_boundary(static, boundary_sliding, dynamic_sliding)
                 y_s = target_sequence[:, s]
@@ -120,7 +126,11 @@ class GaussianNLLTrainer(Trainer):
                 if self.data_processor is not None:
                     out, _ = self.data_processor.postprocess(out, {**sample, "y": y_s})
 
-                loss_s = training_loss(out, y_s)
+                loss_s = training_loss(
+                    out,
+                    y_s,
+                    structural_dry_mask=structural_dry_mask,
+                )
                 total_loss = total_loss + loss_s
 
                 sampled_next, pred_mean, _ = _sample_from_packed_gaussian(
@@ -131,7 +141,11 @@ class GaussianNLLTrainer(Trainer):
                 )
                 if self.rel_l2_loss_fn is not None:
                     with torch.no_grad():
-                        last_rel_l2 = self.rel_l2_loss_fn(pred_mean, y_s)
+                        last_rel_l2 = self.rel_l2_loss_fn(
+                            pred_mean,
+                            y_s,
+                            structural_dry_mask=structural_dry_mask,
+                        )
 
                 dynamic_sliding = torch.cat(
                     [dynamic_sliding[:, 1:], sampled_next.unsqueeze(1)], dim=1
@@ -179,11 +193,20 @@ class GaussianNLLTrainer(Trainer):
         pred_mean = _gaussian_mean_from_packed(out, sample["y"].shape[-1])
 
         eval_step_losses = {}
+        structural_dry_mask = sample.get("structural_dry_mask")
         for loss_name, loss_fn in eval_losses.items():
-            if loss_name == "l2":
-                val = loss_fn(pred_mean, sample["y"])
+            if getattr(loss_fn, "expects_packed", False):
+                val = loss_fn(
+                    out,
+                    sample["y"],
+                    structural_dry_mask=structural_dry_mask,
+                )
             else:
-                val = loss_fn(out, sample["y"])
+                val = loss_fn(
+                    pred_mean,
+                    sample["y"],
+                    structural_dry_mask=structural_dry_mask,
+                )
             eval_step_losses[loss_name] = val
 
         return eval_step_losses, (pred_mean if return_output else None)

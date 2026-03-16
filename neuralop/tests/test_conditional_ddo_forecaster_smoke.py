@@ -208,3 +208,37 @@ def test_conditional_ddo_forecaster_initial_latent_shape_guard():
             stochastic=False,
             initial_latent=bad_latent,
         )
+
+
+def test_conditional_ddo_forecaster_point_weights_affect_training_loss():
+    denoiser = DummyDenoiser(in_features=7, adain_dim=0)
+    gp = PointRFFGaussianProcessSampler(gp_type="independent", sigma=1.0, rff_features=32)
+    model = ConditionalDDOForecaster(
+        denoiser=denoiser,
+        gp_sampler=gp,
+        conditioning=ConditioningConfig(
+            add_noisy_target=True,
+            add_time_features=True,
+            time_feature_type="sincos",
+            time_injection="channel",
+        ),
+        sampler_num_steps=8,
+    )
+
+    sample = _make_sample(b=2, n=12)
+    ones = torch.ones_like(sample["target"])
+    masked = torch.zeros_like(sample["target"])
+    masked[:, :3, :] = 1.0
+
+    torch.manual_seed(7)
+    loss_base, _ = model.training_loss(sample)
+    torch.manual_seed(7)
+    loss_ones, _ = model.training_loss({**sample, "point_weights": ones})
+    torch.manual_seed(7)
+    loss_masked, _ = model.training_loss({**sample, "point_weights": masked})
+
+    assert torch.isfinite(loss_base)
+    assert torch.isfinite(loss_ones)
+    assert torch.isfinite(loss_masked)
+    assert torch.allclose(loss_base, loss_ones, atol=1e-6)
+    assert not torch.allclose(loss_base, loss_masked)

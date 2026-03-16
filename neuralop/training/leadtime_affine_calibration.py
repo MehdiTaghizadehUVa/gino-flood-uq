@@ -39,6 +39,7 @@ def fit_leadtime_affine_calibration(
     mu_ref_by_t: Sequence[np.ndarray],
     sigma_ref_by_t: Sequence[np.ndarray],
     *,
+    domain_mask_by_t: Sequence[np.ndarray] | None = None,
     fit_wet_threshold: float = 0.01,
     min_pred_std: float = 1e-4,
     c_clip_min: float = 0.25,
@@ -61,6 +62,8 @@ def fit_leadtime_affine_calibration(
         and len(sigma_ref_by_t) == n_steps
     ):
         raise ValueError("All input sequences must have the same length.")
+    if domain_mask_by_t is not None and len(domain_mask_by_t) != n_steps:
+        raise ValueError("domain_mask_by_t must have the same length as the lead-time sequences.")
     if n_steps <= 0:
         raise ValueError("Expected at least one lead-time step for calibration fit.")
 
@@ -85,10 +88,18 @@ def fit_leadtime_affine_calibration(
 
         if not (x.size == y.size == sp.size == sr.size):
             raise ValueError(f"Lead-time {t}: inconsistent flattened sizes.")
+        if domain_mask_by_t is not None:
+            domain_mask = np.asarray(domain_mask_by_t[t], dtype=bool).reshape(-1)
+            if domain_mask.size != x.size:
+                raise ValueError(
+                    f"Lead-time {t}: domain_mask size {domain_mask.size} does not match flattened size {x.size}."
+                )
+        else:
+            domain_mask = np.ones_like(x, dtype=bool)
 
         finite_mu = np.isfinite(x) & np.isfinite(y)
         active = np.maximum(x, y) >= wet_thr
-        fit_mask = finite_mu & active
+        fit_mask = finite_mu & domain_mask & active
         n_fit[t] = int(np.sum(fit_mask))
 
         if n_fit[t] > 0:
@@ -105,7 +116,7 @@ def fit_leadtime_affine_calibration(
             a[t] = y_mean - b[t] * x_mean
 
         finite_spread = np.isfinite(sp) & np.isfinite(sr)
-        spread_mask = finite_spread & active
+        spread_mask = finite_spread & domain_mask & active
         n_spread[t] = int(np.sum(spread_mask))
         if n_spread[t] > 0:
             ratio = sr[spread_mask] / np.maximum(sp[spread_mask], std_floor)

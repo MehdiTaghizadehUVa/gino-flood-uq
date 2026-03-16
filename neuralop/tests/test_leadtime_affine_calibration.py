@@ -83,6 +83,33 @@ def test_wet_mask_excludes_dry_dominated_cells():
     assert coeffs["c"][0] == pytest.approx(1.5, abs=1e-6)
 
 
+def test_domain_mask_excludes_structural_dry_cells_before_wet_threshold():
+    mu_pred = [np.array([0.4, 0.2], dtype=np.float64)]
+    mu_ref = [np.array([0.8, 0.5], dtype=np.float64)]
+    sigma_pred = [np.array([0.2, 0.3], dtype=np.float64)]
+    sigma_ref = [np.array([0.4, 0.9], dtype=np.float64)]
+    domain_mask = [np.array([True, False], dtype=bool)]
+
+    coeffs = fit_leadtime_affine_calibration(
+        mu_pred,
+        sigma_pred,
+        mu_ref,
+        sigma_ref,
+        domain_mask_by_t=domain_mask,
+        fit_wet_threshold=0.01,
+        min_pred_std=1e-6,
+        c_clip_min=0.1,
+        c_clip_max=4.0,
+        smooth_window=1,
+    )
+
+    assert coeffs["n_fit"][0] == 1
+    assert coeffs["n_spread"][0] == 1
+    assert coeffs["a"][0] == pytest.approx(0.4, abs=1e-6)
+    assert coeffs["b"][0] == pytest.approx(1.0, abs=1e-6)
+    assert coeffs["c"][0] == pytest.approx(2.0, abs=1e-6)
+
+
 def test_apply_affine_to_ensemble_matches_formula():
     pred = np.array(
         [

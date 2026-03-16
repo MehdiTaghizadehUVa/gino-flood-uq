@@ -6,21 +6,35 @@ import logging
 import os
 from typing import Any, Dict, List, Optional
 
+import matplotlib.pyplot as plt
 import numpy as np
 import torch
 from tqdm import tqdm
 
+from neuralop.flood.losses import FloodMaskedRelLpLoss
 from neuralop.flood.eval.metrics import (
     _build_member_model_indices,
     _compute_csi,
     _crps_ensemble_vs_reference,
-    _sample_from_packed_gaussian,
     _variance_decomposition_by_model,
     _is_gaussian_mode,
+    _pit_rank_counts_from_reference,
 )
 from neuralop.flood.eval.render import (
+    _save_nonspatial_uq_diagnostics,
     _save_generic_rollout_visuals,
     _save_hydrograph_uq_figures_and_animation,
+)
+from neuralop.flood.eval.runtime import (
+    LEGACY_3CH,
+    MIN_EPS,
+    PUBLICATION_TIMESTEPS,
+    ROLLOUT_METRICS_HYDRO_NPZ,
+    ROLLOUT_METRICS_NPZ,
+    ROLLOUT_SUMMARY_HYDRO_FULL_PNG,
+    ROLLOUT_SUMMARY_HYDRO_PNG,
+    ROLLOUT_SUMMARY_PNG,
+    UQ_EXCEEDANCE_THRESHOLD,
 )
 from neuralop.flood.train.operator import (
     FGNTrainer,
@@ -29,11 +43,86 @@ from neuralop.flood.train.operator import (
     sample_fgn_rollout_latent_bank,
     update_fgn_dynamic_members,
 )
+from neuralop.flood.processing.wv_impl import _sample_from_packed_gaussian
 from neuralop.flood.utils.runtime import (
     normalize_fgn_ar_state_update,
     normalize_fgn_latent_temporal_mode,
 )
+from neuralop.flood.visualization.publication import (
+    create_rollout_animation,
+    generate_publication_maps,
+)
+from neuralop.losses.data_losses import LpLoss
 from neuralop.training.trainer import Trainer
+
+
+def _structural_masks_from_sample(
+    sample: Dict[str, Any],
+    *,
+    expected_cells: int,
+) -> tuple[np.ndarray | None, np.ndarray | None]:
+    dry_mask = sample.get("structural_dry_mask")
+    if dry_mask is None:
+        return None, None
+    dry_mask = torch.as_tensor(dry_mask, dtype=torch.bool, device="cpu").reshape(-1).numpy()
+    if dry_mask.size != expected_cells:
+        raise ValueError(
+            f"structural_dry_mask has {dry_mask.size} cells, expected {expected_cells}."
+        )
+    return dry_mask, ~dry_mask
+
+
+def _select_cells(arr: np.ndarray, mask: np.ndarray | None) -> np.ndarray:
+    if mask is None:
+        return np.asarray(arr)
+    return np.asarray(arr)[..., mask]
+
+
+def _masked_mean(arr: np.ndarray, mask: np.ndarray | None) -> float:
+    selected = _select_cells(arr, mask)
+    if selected.size == 0:
+        return 0.0
+    return float(np.mean(selected))
+
+
+def _masked_rmse(pred: np.ndarray, gt: np.ndarray, mask: np.ndarray | None) -> float:
+    diff = np.asarray(pred) - np.asarray(gt)
+    return float(np.sqrt(_masked_mean(diff ** 2, mask)))
+
+
+def _masked_mae(pred: np.ndarray, gt: np.ndarray, mask: np.ndarray | None) -> float:
+    return _masked_mean(np.abs(np.asarray(pred) - np.asarray(gt)), mask)
+
+
+def _masked_csi(
+    threshold: float,
+    pred: np.ndarray,
+    gt: np.ndarray,
+    mask: np.ndarray | None,
+) -> float:
+    pred_sel = _select_cells(pred, mask)
+    gt_sel = _select_cells(gt, mask)
+    if pred_sel.size == 0:
+        return 1.0
+    return float(_compute_csi(threshold, pred_sel, gt_sel))
+
+
+def _dry_falsewet_rate(pred: np.ndarray, dry_mask: np.ndarray | None, threshold: float) -> float:
+    if dry_mask is None or not np.any(dry_mask):
+        return 0.0
+    pred_sel = _select_cells(pred, dry_mask)
+    if pred_sel.size == 0:
+        return 0.0
+    return float(np.mean(pred_sel > float(threshold)))
+
+
+def _dry_pred_std_mean(pred_std: np.ndarray, dry_mask: np.ndarray | None) -> float:
+    if dry_mask is None or not np.any(dry_mask):
+        return 0.0
+    pred_sel = _select_cells(pred_std, dry_mask)
+    if pred_sel.size == 0:
+        return 0.0
+    return float(np.mean(pred_sel))
 
 def _rollout_prediction_per_hydrograph(
     models: List[Any],
@@ -128,9 +217,28 @@ def _rollout_prediction_per_hydrograph(
     per_channel_total_var: Dict[str, List[np.ndarray]] = {name: [] for name in target_variables}
     per_channel_between_frac: Dict[str, List[np.ndarray]] = {name: [] for name in target_variables}
     per_channel_between_to_within: Dict[str, List[np.ndarray]] = {name: [] for name in target_variables}
+    per_channel_rmse_full: Dict[str, List[np.ndarray]] = {name: [] for name in target_variables}
+    per_channel_crps_full: Dict[str, List[np.ndarray]] = {name: [] for name in target_variables}
+    per_channel_gaussian_nll_full: Dict[str, List[np.ndarray]] = {name: [] for name in target_variables}
+    per_channel_spread_pred_full: Dict[str, List[np.ndarray]] = {name: [] for name in target_variables}
+    per_channel_spread_gt_full: Dict[str, List[np.ndarray]] = {name: [] for name in target_variables}
+    per_channel_spread_ratio_full: Dict[str, List[np.ndarray]] = {name: [] for name in target_variables}
+    per_channel_within_var_full: Dict[str, List[np.ndarray]] = {name: [] for name in target_variables}
+    per_channel_between_var_full: Dict[str, List[np.ndarray]] = {name: [] for name in target_variables}
+    per_channel_total_var_full: Dict[str, List[np.ndarray]] = {name: [] for name in target_variables}
+    per_channel_between_frac_full: Dict[str, List[np.ndarray]] = {name: [] for name in target_variables}
+    per_channel_between_to_within_full: Dict[str, List[np.ndarray]] = {name: [] for name in target_variables}
     wd_prob_brier: List[np.ndarray] = []
     wd_prob_mae: List[np.ndarray] = []
     wd_wasserstein: List[np.ndarray] = []
+    wd_prob_brier_full: List[np.ndarray] = []
+    wd_prob_mae_full: List[np.ndarray] = []
+    wd_wasserstein_full: List[np.ndarray] = []
+    wd_rmse_dry_background: List[np.ndarray] = []
+    wd_mae_dry_background: List[np.ndarray] = []
+    wd_falsewet_rate_001_dry_background: List[np.ndarray] = []
+    wd_falsewet_rate_005_dry_background: List[np.ndarray] = []
+    wd_pred_std_mean_dry_background: List[np.ndarray] = []
 
     interval_levels = (0.50, 0.80, 0.90, 0.95)
     wd_interval_coverage: Dict[float, List[np.ndarray]] = {a: [] for a in interval_levels}
@@ -152,6 +260,7 @@ def _rollout_prediction_per_hydrograph(
     spread_skill_samples: List[np.ndarray] = []
     max_scatter_points_per_step = 250
     w_quantiles = np.linspace(0.0, 1.0, 21, dtype=np.float64)
+    structural_mask_active = False
 
     for sample in tqdm(hydrograph_samples, desc="Hydrograph rollout evaluation"):
         hydro_id = sample["hydrograph_id"]
@@ -162,6 +271,11 @@ def _rollout_prediction_per_hydrograph(
         full_boundary = sample["boundary"].to(device)
         dynamic_ref = sample["dynamic_ref"].to(device)
         n_ref = int(sample["n_ref_sims"])
+        dry_mask_np, wettable_mask_np = _structural_masks_from_sample(
+            sample,
+            expected_cells=int(dynamic_ref.shape[2]),
+        )
+        structural_mask_active = structural_mask_active or (wettable_mask_np is not None)
 
         gt_rollout_ref = dynamic_ref[:, start_pred_t:end_pred_t]
         gt_boundary_rollout = full_boundary[start_pred_t:end_pred_t]
@@ -177,6 +291,17 @@ def _rollout_prediction_per_hydrograph(
         run_total_var: Dict[str, List[float]] = {name: [] for name in target_variables}
         run_between_frac: Dict[str, List[float]] = {name: [] for name in target_variables}
         run_between_to_within: Dict[str, List[float]] = {name: [] for name in target_variables}
+        run_rmse_full: Dict[str, List[float]] = {name: [] for name in target_variables}
+        run_crps_full: Dict[str, List[float]] = {name: [] for name in target_variables}
+        run_gaussian_nll_full: Dict[str, List[float]] = {name: [] for name in target_variables}
+        run_spread_pred_full: Dict[str, List[float]] = {name: [] for name in target_variables}
+        run_spread_gt_full: Dict[str, List[float]] = {name: [] for name in target_variables}
+        run_spread_ratio_full: Dict[str, List[float]] = {name: [] for name in target_variables}
+        run_within_var_full: Dict[str, List[float]] = {name: [] for name in target_variables}
+        run_between_var_full: Dict[str, List[float]] = {name: [] for name in target_variables}
+        run_total_var_full: Dict[str, List[float]] = {name: [] for name in target_variables}
+        run_between_frac_full: Dict[str, List[float]] = {name: [] for name in target_variables}
+        run_between_to_within_full: Dict[str, List[float]] = {name: [] for name in target_variables}
         run_pred_mean_by_channel: Dict[str, List[np.ndarray]] = {name: [] for name in target_variables}
         run_pred_std_by_channel: Dict[str, List[np.ndarray]] = {name: [] for name in target_variables}
         run_gt_mean_by_channel: Dict[str, List[np.ndarray]] = {name: [] for name in target_variables}
@@ -187,6 +312,14 @@ def _rollout_prediction_per_hydrograph(
         run_wd_brier: List[float] = []
         run_wd_mae: List[float] = []
         run_wd_wasserstein: List[float] = []
+        run_wd_brier_full: List[float] = []
+        run_wd_mae_full: List[float] = []
+        run_wd_wasserstein_full: List[float] = []
+        run_wd_rmse_dry_background: List[float] = []
+        run_wd_mae_dry_background: List[float] = []
+        run_wd_falsewet_rate_001_dry_background: List[float] = []
+        run_wd_falsewet_rate_005_dry_background: List[float] = []
+        run_wd_pred_std_mean_dry_background: List[float] = []
         run_interval_coverage: Dict[float, List[float]] = {a: [] for a in interval_levels}
         run_interval_width: Dict[float, List[float]] = {a: [] for a in interval_levels}
 
@@ -360,9 +493,11 @@ def _rollout_prediction_per_hydrograph(
                 run_gt_mean_by_channel[ch_name].append(gt_mean_ch)
                 run_gt_std_by_channel[ch_name].append(gt_std_ch)
 
-                rmse_t = float(np.sqrt(np.mean((pred_mean_ch - gt_mean_ch) ** 2)))
+                rmse_full_t = _masked_rmse(pred_mean_ch, gt_mean_ch, None)
+                rmse_t = _masked_rmse(pred_mean_ch, gt_mean_ch, wettable_mask_np)
                 crps_map = _crps_ensemble_vs_reference(pred_ens_ch, gt_ref_ch)
-                crps_t = float(np.mean(crps_map))
+                crps_full_t = _masked_mean(crps_map, None)
+                crps_t = _masked_mean(crps_map, wettable_mask_np)
                 if gaussian_mode and mu_phys_stack is not None and logvar_phys_stack is not None:
                     mu_loc = mu_phys_stack[:, :, ch_idx]
                     var_loc = torch.exp(logvar_phys_stack[:, :, ch_idx])
@@ -377,34 +512,62 @@ def _rollout_prediction_per_hydrograph(
                             torch.tensor(2.0 * torch.pi, device=mix_var.device, dtype=mix_var.dtype)
                         )
                     )
-                    gaussian_nll_t = float(torch.mean(nll_loc).item())
+                    nll_loc_np = nll_loc.detach().cpu().numpy()
+                    gaussian_nll_full_t = _masked_mean(nll_loc_np, None)
+                    gaussian_nll_t = _masked_mean(nll_loc_np, wettable_mask_np)
                 else:
+                    gaussian_nll_full_t = float("nan")
                     gaussian_nll_t = float("nan")
-                spread_pred_t = float(np.mean(np.std(pred_ens_ch, axis=0)))
-                spread_gt_t = float(np.mean(np.std(gt_ref_ch, axis=0)))
+                pred_spread_loc = np.std(pred_ens_ch, axis=0)
+                gt_spread_loc = np.std(gt_ref_ch, axis=0)
+                spread_pred_full_t = _masked_mean(pred_spread_loc, None)
+                spread_pred_t = _masked_mean(pred_spread_loc, wettable_mask_np)
+                spread_gt_full_t = _masked_mean(gt_spread_loc, None)
+                spread_gt_t = _masked_mean(gt_spread_loc, wettable_mask_np)
+                spread_ratio_full_t = spread_pred_full_t / max(spread_gt_full_t, MIN_EPS)
                 spread_ratio_t = spread_pred_t / max(spread_gt_t, MIN_EPS)
                 within_loc, between_loc, total_loc = _variance_decomposition_by_model(
                     pred_ens_ch, member_model_indices, n_models
                 )
-                within_t = float(np.mean(within_loc))
-                between_t = float(np.mean(between_loc))
-                total_t = float(np.mean(total_loc))
+                within_full_t = _masked_mean(within_loc, None)
+                between_full_t = _masked_mean(between_loc, None)
+                total_full_t = _masked_mean(total_loc, None)
+                within_t = _masked_mean(within_loc, wettable_mask_np)
+                between_t = _masked_mean(between_loc, wettable_mask_np)
+                total_t = _masked_mean(total_loc, wettable_mask_np)
+                between_frac_full_t = float(
+                    np.clip(between_full_t / max(total_full_t, MIN_EPS), 0.0, 1.0)
+                )
                 between_frac_t = float(np.clip(between_t / max(total_t, MIN_EPS), 0.0, 1.0))
+                between_to_within_full_t = float(
+                    np.clip(between_full_t / max(within_full_t, MIN_EPS), 0.0, 100.0)
+                )
                 between_to_within_t = float(
                     np.clip(between_t / max(within_t, MIN_EPS), 0.0, 100.0)
                 )
 
                 run_rmse[ch_name].append(rmse_t)
+                run_rmse_full[ch_name].append(rmse_full_t)
                 run_crps[ch_name].append(crps_t)
+                run_crps_full[ch_name].append(crps_full_t)
                 run_gaussian_nll[ch_name].append(gaussian_nll_t)
+                run_gaussian_nll_full[ch_name].append(gaussian_nll_full_t)
                 run_spread_pred[ch_name].append(spread_pred_t)
+                run_spread_pred_full[ch_name].append(spread_pred_full_t)
                 run_spread_gt[ch_name].append(spread_gt_t)
+                run_spread_gt_full[ch_name].append(spread_gt_full_t)
                 run_spread_ratio[ch_name].append(spread_ratio_t)
+                run_spread_ratio_full[ch_name].append(spread_ratio_full_t)
                 run_within_var[ch_name].append(within_t)
+                run_within_var_full[ch_name].append(within_full_t)
                 run_between_var[ch_name].append(between_t)
+                run_between_var_full[ch_name].append(between_full_t)
                 run_total_var[ch_name].append(total_t)
+                run_total_var_full[ch_name].append(total_full_t)
                 run_between_frac[ch_name].append(between_frac_t)
+                run_between_frac_full[ch_name].append(between_frac_full_t)
                 run_between_to_within[ch_name].append(between_to_within_t)
+                run_between_to_within_full[ch_name].append(between_to_within_full_t)
 
                 if ch_name == "wd":
                     pred_prob = np.mean(pred_ens_ch >= UQ_EXCEEDANCE_THRESHOLD, axis=0)
@@ -412,22 +575,45 @@ def _rollout_prediction_per_hydrograph(
                     run_wd_pred_prob.append(pred_prob)
                     run_wd_gt_prob.append(gt_prob)
                     run_wd_crps_map.append(crps_map)
-                    run_wd_brier.append(float(np.mean((pred_prob - gt_prob) ** 2)))
-                    run_wd_mae.append(float(np.mean(np.abs(pred_prob - gt_prob))))
+                    brier_loc = (pred_prob - gt_prob) ** 2
+                    mae_loc = np.abs(pred_prob - gt_prob)
+                    run_wd_brier.append(_masked_mean(brier_loc, wettable_mask_np))
+                    run_wd_brier_full.append(_masked_mean(brier_loc, None))
+                    run_wd_mae.append(_masked_mean(mae_loc, wettable_mask_np))
+                    run_wd_mae_full.append(_masked_mean(mae_loc, None))
+                    run_wd_rmse_dry_background.append(
+                        _masked_rmse(pred_mean_ch, gt_mean_ch, dry_mask_np)
+                    )
+                    run_wd_mae_dry_background.append(
+                        _masked_mae(pred_mean_ch, gt_mean_ch, dry_mask_np)
+                    )
+                    run_wd_falsewet_rate_001_dry_background.append(
+                        _dry_falsewet_rate(pred_mean_ch, dry_mask_np, 0.01)
+                    )
+                    run_wd_falsewet_rate_005_dry_background.append(
+                        _dry_falsewet_rate(pred_mean_ch, dry_mask_np, 0.05)
+                    )
+                    run_wd_pred_std_mean_dry_background.append(
+                        _dry_pred_std_mean(pred_std_ch, dry_mask_np)
+                    )
 
                     # Reliability bins for event probability calibration.
+                    pred_prob_primary = _select_cells(pred_prob, wettable_mask_np)
+                    gt_prob_primary = _select_cells(gt_prob, wettable_mask_np)
                     bins = np.clip(
-                        np.digitize(pred_prob, rel_edges, right=False) - 1, 0, rel_n_bins - 1
+                        np.digitize(pred_prob_primary, rel_edges, right=False) - 1,
+                        0,
+                        rel_n_bins - 1,
                     )
                     for b in range(rel_n_bins):
                         mask_b = bins == b
                         if not np.any(mask_b):
                             continue
                         rel_count[b] += float(np.sum(mask_b))
-                        rel_sum_pred[b] += float(np.sum(pred_prob[mask_b]))
-                        rel_sum_obs[b] += float(np.sum(gt_prob[mask_b]))
-                    rel_brier_sum += float(np.sum((pred_prob - gt_prob) ** 2))
-                    rel_brier_count += int(pred_prob.size)
+                        rel_sum_pred[b] += float(np.sum(pred_prob_primary[mask_b]))
+                        rel_sum_obs[b] += float(np.sum(gt_prob_primary[mask_b]))
+                    rel_brier_sum += float(np.sum((pred_prob_primary - gt_prob_primary) ** 2))
+                    rel_brier_count += int(pred_prob_primary.size)
 
                     # Interval coverage + sharpness.
                     for alpha in interval_levels:
@@ -435,20 +621,23 @@ def _rollout_prediction_per_hydrograph(
                         q_hi = 1.0 - q_lo
                         lo = np.quantile(pred_ens_ch, q_lo, axis=0)
                         hi = np.quantile(pred_ens_ch, q_hi, axis=0)
-                        cover = np.mean((gt_ref_ch >= lo[None, :]) & (gt_ref_ch <= hi[None, :]))
-                        width = np.mean(hi - lo)
+                        cover_mask = (gt_ref_ch >= lo[None, :]) & (gt_ref_ch <= hi[None, :])
+                        cover = _masked_mean(cover_mask.astype(np.float64), wettable_mask_np)
+                        width = _masked_mean(hi - lo, wettable_mask_np)
                         run_interval_coverage[alpha].append(float(cover))
                         run_interval_width[alpha].append(float(width))
 
                     # Distribution distance (approximate Wasserstein-1 via quantiles).
                     pred_q = np.quantile(pred_ens_ch, w_quantiles, axis=0)
                     gt_q = np.quantile(gt_ref_ch, w_quantiles, axis=0)
-                    run_wd_wasserstein.append(float(np.mean(np.abs(pred_q - gt_q))))
+                    wdist = np.abs(pred_q - gt_q)
+                    run_wd_wasserstein.append(_masked_mean(wdist, wettable_mask_np))
+                    run_wd_wasserstein_full.append(_masked_mean(wdist, None))
 
                     # Proper PIT/rank: use all reference members as pseudo-observations.
                     pit_counts_t, rank_counts_t = _pit_rank_counts_from_reference(
-                        pred_ens=pred_ens_ch,
-                        ref_ens=gt_ref_ch,
+                        pred_ens=_select_cells(pred_ens_ch, wettable_mask_np),
+                        ref_ens=_select_cells(gt_ref_ch, wettable_mask_np),
                         pit_edges=pit_edges,
                         n_ens=n_ens,
                         rng=pit_rank_rng,
@@ -459,6 +648,8 @@ def _rollout_prediction_per_hydrograph(
                     # Spread-skill diagnostic samples (subsampled for plotting efficiency).
                     spread_loc = np.std(pred_ens_ch, axis=0)
                     abs_err_loc = np.abs(pred_mean_ch - gt_mean_ch)
+                    spread_loc = _select_cells(spread_loc, wettable_mask_np)
+                    abs_err_loc = _select_cells(abs_err_loc, wettable_mask_np)
                     n_loc = spread_loc.size
                     n_take = min(max_scatter_points_per_step, n_loc)
                     if n_take > 0:
@@ -529,24 +720,75 @@ def _rollout_prediction_per_hydrograph(
 
         for ch_name in target_variables:
             per_channel_rmse[ch_name].append(np.asarray(run_rmse[ch_name], dtype=np.float64))
+            per_channel_rmse_full[ch_name].append(
+                np.asarray(run_rmse_full[ch_name], dtype=np.float64)
+            )
             per_channel_crps[ch_name].append(np.asarray(run_crps[ch_name], dtype=np.float64))
+            per_channel_crps_full[ch_name].append(
+                np.asarray(run_crps_full[ch_name], dtype=np.float64)
+            )
             per_channel_gaussian_nll[ch_name].append(
                 np.asarray(run_gaussian_nll[ch_name], dtype=np.float64)
             )
+            per_channel_gaussian_nll_full[ch_name].append(
+                np.asarray(run_gaussian_nll_full[ch_name], dtype=np.float64)
+            )
             per_channel_spread_pred[ch_name].append(np.asarray(run_spread_pred[ch_name], dtype=np.float64))
+            per_channel_spread_pred_full[ch_name].append(
+                np.asarray(run_spread_pred_full[ch_name], dtype=np.float64)
+            )
             per_channel_spread_gt[ch_name].append(np.asarray(run_spread_gt[ch_name], dtype=np.float64))
+            per_channel_spread_gt_full[ch_name].append(
+                np.asarray(run_spread_gt_full[ch_name], dtype=np.float64)
+            )
             per_channel_spread_ratio[ch_name].append(np.asarray(run_spread_ratio[ch_name], dtype=np.float64))
+            per_channel_spread_ratio_full[ch_name].append(
+                np.asarray(run_spread_ratio_full[ch_name], dtype=np.float64)
+            )
             per_channel_within_var[ch_name].append(np.asarray(run_within_var[ch_name], dtype=np.float64))
+            per_channel_within_var_full[ch_name].append(
+                np.asarray(run_within_var_full[ch_name], dtype=np.float64)
+            )
             per_channel_between_var[ch_name].append(np.asarray(run_between_var[ch_name], dtype=np.float64))
+            per_channel_between_var_full[ch_name].append(
+                np.asarray(run_between_var_full[ch_name], dtype=np.float64)
+            )
             per_channel_total_var[ch_name].append(np.asarray(run_total_var[ch_name], dtype=np.float64))
+            per_channel_total_var_full[ch_name].append(
+                np.asarray(run_total_var_full[ch_name], dtype=np.float64)
+            )
             per_channel_between_frac[ch_name].append(np.asarray(run_between_frac[ch_name], dtype=np.float64))
+            per_channel_between_frac_full[ch_name].append(
+                np.asarray(run_between_frac_full[ch_name], dtype=np.float64)
+            )
             per_channel_between_to_within[ch_name].append(
                 np.asarray(run_between_to_within[ch_name], dtype=np.float64)
             )
+            per_channel_between_to_within_full[ch_name].append(
+                np.asarray(run_between_to_within_full[ch_name], dtype=np.float64)
+            )
         if run_wd_brier:
             wd_prob_brier.append(np.asarray(run_wd_brier, dtype=np.float64))
+            wd_prob_brier_full.append(np.asarray(run_wd_brier_full, dtype=np.float64))
             wd_prob_mae.append(np.asarray(run_wd_mae, dtype=np.float64))
+            wd_prob_mae_full.append(np.asarray(run_wd_mae_full, dtype=np.float64))
             wd_wasserstein.append(np.asarray(run_wd_wasserstein, dtype=np.float64))
+            wd_wasserstein_full.append(np.asarray(run_wd_wasserstein_full, dtype=np.float64))
+            wd_rmse_dry_background.append(
+                np.asarray(run_wd_rmse_dry_background, dtype=np.float64)
+            )
+            wd_mae_dry_background.append(
+                np.asarray(run_wd_mae_dry_background, dtype=np.float64)
+            )
+            wd_falsewet_rate_001_dry_background.append(
+                np.asarray(run_wd_falsewet_rate_001_dry_background, dtype=np.float64)
+            )
+            wd_falsewet_rate_005_dry_background.append(
+                np.asarray(run_wd_falsewet_rate_005_dry_background, dtype=np.float64)
+            )
+            wd_pred_std_mean_dry_background.append(
+                np.asarray(run_wd_pred_std_mean_dry_background, dtype=np.float64)
+            )
             for alpha in interval_levels:
                 wd_interval_coverage[alpha].append(
                     np.asarray(run_interval_coverage[alpha], dtype=np.float64)
@@ -564,27 +806,89 @@ def _rollout_prediction_per_hydrograph(
     metrics: Dict[str, np.ndarray] = {}
     for ch_name in target_variables:
         metrics[f"rmse_{ch_name}"] = np.stack(per_channel_rmse[ch_name], axis=0)
+        if structural_mask_active:
+            metrics[f"rmse_{ch_name}_full_domain"] = np.stack(
+                per_channel_rmse_full[ch_name], axis=0
+            )
         metrics[f"crps_{ch_name}"] = np.stack(per_channel_crps[ch_name], axis=0)
+        if structural_mask_active:
+            metrics[f"crps_{ch_name}_full_domain"] = np.stack(
+                per_channel_crps_full[ch_name], axis=0
+            )
         if gaussian_mode:
             metrics[f"gaussian_nll_{ch_name}"] = np.stack(
                 per_channel_gaussian_nll[ch_name], axis=0
             )
+            if structural_mask_active:
+                metrics[f"gaussian_nll_{ch_name}_full_domain"] = np.stack(
+                    per_channel_gaussian_nll_full[ch_name], axis=0
+                )
         metrics[f"spread_pred_{ch_name}"] = np.stack(per_channel_spread_pred[ch_name], axis=0)
+        if structural_mask_active:
+            metrics[f"spread_pred_{ch_name}_full_domain"] = np.stack(
+                per_channel_spread_pred_full[ch_name], axis=0
+            )
         metrics[f"spread_gt_{ch_name}"] = np.stack(per_channel_spread_gt[ch_name], axis=0)
+        if structural_mask_active:
+            metrics[f"spread_gt_{ch_name}_full_domain"] = np.stack(
+                per_channel_spread_gt_full[ch_name], axis=0
+            )
         metrics[f"spread_ratio_{ch_name}"] = np.stack(per_channel_spread_ratio[ch_name], axis=0)
+        if structural_mask_active:
+            metrics[f"spread_ratio_{ch_name}_full_domain"] = np.stack(
+                per_channel_spread_ratio_full[ch_name], axis=0
+            )
         metrics[f"within_var_{ch_name}"] = np.stack(per_channel_within_var[ch_name], axis=0)
+        if structural_mask_active:
+            metrics[f"within_var_{ch_name}_full_domain"] = np.stack(
+                per_channel_within_var_full[ch_name], axis=0
+            )
         metrics[f"between_var_{ch_name}"] = np.stack(per_channel_between_var[ch_name], axis=0)
+        if structural_mask_active:
+            metrics[f"between_var_{ch_name}_full_domain"] = np.stack(
+                per_channel_between_var_full[ch_name], axis=0
+            )
         metrics[f"total_var_{ch_name}"] = np.stack(per_channel_total_var[ch_name], axis=0)
+        if structural_mask_active:
+            metrics[f"total_var_{ch_name}_full_domain"] = np.stack(
+                per_channel_total_var_full[ch_name], axis=0
+            )
         metrics[f"between_frac_{ch_name}"] = np.stack(per_channel_between_frac[ch_name], axis=0)
+        if structural_mask_active:
+            metrics[f"between_frac_{ch_name}_full_domain"] = np.stack(
+                per_channel_between_frac_full[ch_name], axis=0
+            )
         metrics[f"between_to_within_{ch_name}"] = np.stack(
             per_channel_between_to_within[ch_name], axis=0
         )
+        if structural_mask_active:
+            metrics[f"between_to_within_{ch_name}_full_domain"] = np.stack(
+                per_channel_between_to_within_full[ch_name], axis=0
+            )
     if wd_prob_brier:
         metrics["brier_wd_exceed"] = np.stack(wd_prob_brier, axis=0)
+        if structural_mask_active:
+            metrics["brier_wd_exceed_full_domain"] = np.stack(wd_prob_brier_full, axis=0)
     if wd_prob_mae:
         metrics["prob_mae_wd_exceed"] = np.stack(wd_prob_mae, axis=0)
+        if structural_mask_active:
+            metrics["prob_mae_wd_exceed_full_domain"] = np.stack(wd_prob_mae_full, axis=0)
     if wd_wasserstein:
         metrics["wasserstein_wd"] = np.stack(wd_wasserstein, axis=0)
+        if structural_mask_active:
+            metrics["wasserstein_wd_full_domain"] = np.stack(wd_wasserstein_full, axis=0)
+    if structural_mask_active and wd_rmse_dry_background:
+        metrics["dry_background_rmse_wd"] = np.stack(wd_rmse_dry_background, axis=0)
+        metrics["dry_background_mae_wd"] = np.stack(wd_mae_dry_background, axis=0)
+        metrics["dry_background_falsewet_rate_001_wd"] = np.stack(
+            wd_falsewet_rate_001_dry_background, axis=0
+        )
+        metrics["dry_background_falsewet_rate_005_wd"] = np.stack(
+            wd_falsewet_rate_005_dry_background, axis=0
+        )
+        metrics["dry_background_pred_std_mean_wd"] = np.stack(
+            wd_pred_std_mean_dry_background, axis=0
+        )
     for alpha in interval_levels:
         if wd_interval_coverage[alpha]:
             pct = int(round(alpha * 100))
@@ -820,14 +1124,31 @@ def _rollout_prediction_generic(
     per_channel_gaussian_nll: Dict[str, List[np.ndarray]] = {name: [] for name in target_variables}
     per_channel_spread: Dict[str, List[np.ndarray]] = {name: [] for name in target_variables}
     per_channel_spread_skill: Dict[str, List[np.ndarray]] = {name: [] for name in target_variables}
+    per_channel_rmse_full: Dict[str, List[np.ndarray]] = {name: [] for name in target_variables}
+    per_channel_gaussian_nll_full: Dict[str, List[np.ndarray]] = {name: [] for name in target_variables}
+    per_channel_spread_full: Dict[str, List[np.ndarray]] = {name: [] for name in target_variables}
+    per_channel_spread_skill_full: Dict[str, List[np.ndarray]] = {name: [] for name in target_variables}
     wd_csi_005: List[np.ndarray] = []
     wd_csi_03: List[np.ndarray] = []
+    wd_csi_005_full: List[np.ndarray] = []
+    wd_csi_03_full: List[np.ndarray] = []
+    wd_rmse_dry_background: List[np.ndarray] = []
+    wd_mae_dry_background: List[np.ndarray] = []
+    wd_falsewet_rate_001_dry_background: List[np.ndarray] = []
+    wd_falsewet_rate_005_dry_background: List[np.ndarray] = []
+    wd_pred_std_mean_dry_background: List[np.ndarray] = []
+    structural_mask_active = False
 
     for idx, sample in enumerate(tqdm(rollout_dataset, desc="Rollout evaluation")):
         run_id = sample.get("run_id", f"sample_{idx}")
         full_dynamic = sample["dynamic"].to(device)
         full_boundary = sample["boundary"].to(device)
         geometry = sample["geometry"]
+        dry_mask_np, wettable_mask_np = _structural_masks_from_sample(
+            sample,
+            expected_cells=int(full_dynamic.shape[1]),
+        )
+        structural_mask_active = structural_mask_active or (wettable_mask_np is not None)
         start_pred_t = skip_before_timestep + history_steps
         end_pred_t = start_pred_t + rollout_length
         gt_rollout = full_dynamic[start_pred_t:end_pred_t]
@@ -837,8 +1158,19 @@ def _rollout_prediction_generic(
         run_gaussian_nll: Dict[str, List[float]] = {name: [] for name in target_variables}
         run_spread: Dict[str, List[float]] = {name: [] for name in target_variables}
         run_spread_skill: Dict[str, List[float]] = {name: [] for name in target_variables}
+        run_rmse_full: Dict[str, List[float]] = {name: [] for name in target_variables}
+        run_gaussian_nll_full: Dict[str, List[float]] = {name: [] for name in target_variables}
+        run_spread_full: Dict[str, List[float]] = {name: [] for name in target_variables}
+        run_spread_skill_full: Dict[str, List[float]] = {name: [] for name in target_variables}
         run_csi_005: List[float] = []
         run_csi_03: List[float] = []
+        run_csi_005_full: List[float] = []
+        run_csi_03_full: List[float] = []
+        run_wd_rmse_dry_background: List[float] = []
+        run_wd_mae_dry_background: List[float] = []
+        run_wd_falsewet_rate_001_dry_background: List[float] = []
+        run_wd_falsewet_rate_005_dry_background: List[float] = []
+        run_wd_pred_std_mean_dry_background: List[float] = []
         run_pred_by_channel: Dict[str, List[np.ndarray]] = {name: [] for name in target_variables}
         run_gt_by_channel: Dict[str, List[np.ndarray]] = {name: [] for name in target_variables}
 
@@ -1006,7 +1338,10 @@ def _rollout_prediction_generic(
             for ch_idx, ch_name in enumerate(target_variables):
                 ch_pred = inv_pred[0, :, ch_idx].detach().cpu().numpy()
                 ch_gt = inv_gt[0, :, ch_idx].detach().cpu().numpy()
-                run_rmse[ch_name].append(float(np.sqrt(np.mean((ch_pred - ch_gt) ** 2))))
+                rmse_full_t = _masked_rmse(ch_pred, ch_gt, None)
+                rmse_t = _masked_rmse(ch_pred, ch_gt, wettable_mask_np)
+                run_rmse[ch_name].append(rmse_t)
+                run_rmse_full[ch_name].append(rmse_full_t)
                 if gaussian_mode and mu_phys_stack is not None and logvar_phys_stack is not None:
                     mu_loc = mu_phys_stack[:, :, ch_idx]
                     var_loc = torch.exp(logvar_phys_stack[:, :, ch_idx])
@@ -1021,22 +1356,52 @@ def _rollout_prediction_generic(
                             torch.tensor(2.0 * torch.pi, device=mix_var.device, dtype=mix_var.dtype)
                         )
                     )
-                    run_gaussian_nll[ch_name].append(float(torch.mean(nll_loc).item()))
+                    nll_loc_np = nll_loc.detach().cpu().numpy()
+                    run_gaussian_nll[ch_name].append(_masked_mean(nll_loc_np, wettable_mask_np))
+                    run_gaussian_nll_full[ch_name].append(_masked_mean(nll_loc_np, None))
                 else:
                     run_gaussian_nll[ch_name].append(float("nan"))
+                    run_gaussian_nll_full[ch_name].append(float("nan"))
                 run_pred_by_channel[ch_name].append(ch_pred)
                 run_gt_by_channel[ch_name].append(ch_gt)
                 if use_ensemble:
                     ens_ch = inv_pred_ens[:, :, ch_idx].detach().cpu().numpy()
-                    spread_t = float(np.mean(np.std(ens_ch, axis=0)))
-                    skill_t = float(np.sqrt(np.mean((ch_pred - ch_gt) ** 2)))
+                    spread_loc = np.std(ens_ch, axis=0)
+                    spread_full_t = _masked_mean(spread_loc, None)
+                    spread_t = _masked_mean(spread_loc, wettable_mask_np)
+                    skill_full_t = _masked_rmse(ch_pred, ch_gt, None)
+                    skill_t = _masked_rmse(ch_pred, ch_gt, wettable_mask_np)
                     run_spread[ch_name].append(spread_t)
+                    run_spread_full[ch_name].append(spread_full_t)
                     run_spread_skill[ch_name].append(
                         spread_t / skill_t if skill_t > MIN_EPS else 0.0
                     )
+                    run_spread_skill_full[ch_name].append(
+                        spread_full_t / skill_full_t if skill_full_t > MIN_EPS else 0.0
+                    )
                 if ch_name == "wd":
-                    run_csi_005.append(_compute_csi(0.05, ch_pred, ch_gt))
-                    run_csi_03.append(_compute_csi(0.3, ch_pred, ch_gt))
+                    run_csi_005.append(_masked_csi(0.05, ch_pred, ch_gt, wettable_mask_np))
+                    run_csi_03.append(_masked_csi(0.3, ch_pred, ch_gt, wettable_mask_np))
+                    run_csi_005_full.append(_masked_csi(0.05, ch_pred, ch_gt, None))
+                    run_csi_03_full.append(_masked_csi(0.3, ch_pred, ch_gt, None))
+                    run_wd_rmse_dry_background.append(
+                        _masked_rmse(ch_pred, ch_gt, dry_mask_np)
+                    )
+                    run_wd_mae_dry_background.append(
+                        _masked_mae(ch_pred, ch_gt, dry_mask_np)
+                    )
+                    run_wd_falsewet_rate_001_dry_background.append(
+                        _dry_falsewet_rate(ch_pred, dry_mask_np, 0.01)
+                    )
+                    run_wd_falsewet_rate_005_dry_background.append(
+                        _dry_falsewet_rate(ch_pred, dry_mask_np, 0.05)
+                    )
+                    if use_ensemble:
+                        run_wd_pred_std_mean_dry_background.append(
+                            _dry_pred_std_mean(np.std(ens_ch, axis=0), dry_mask_np)
+                        )
+                    else:
+                        run_wd_pred_std_mean_dry_background.append(0.0)
 
             if use_ensemble:
                 update_stack = state_stack if (gaussian_mode and state_stack is not None) else pred_stack
@@ -1071,16 +1436,45 @@ def _rollout_prediction_generic(
 
         for ch_name in target_variables:
             per_channel_rmse[ch_name].append(np.array(run_rmse[ch_name], dtype=np.float64))
+            per_channel_rmse_full[ch_name].append(
+                np.array(run_rmse_full[ch_name], dtype=np.float64)
+            )
             if gaussian_mode:
                 per_channel_gaussian_nll[ch_name].append(
                     np.array(run_gaussian_nll[ch_name], dtype=np.float64)
                 )
+                per_channel_gaussian_nll_full[ch_name].append(
+                    np.array(run_gaussian_nll_full[ch_name], dtype=np.float64)
+                )
             if use_ensemble:
                 per_channel_spread[ch_name].append(np.array(run_spread[ch_name], dtype=np.float64))
                 per_channel_spread_skill[ch_name].append(np.array(run_spread_skill[ch_name], dtype=np.float64))
+                per_channel_spread_full[ch_name].append(
+                    np.array(run_spread_full[ch_name], dtype=np.float64)
+                )
+                per_channel_spread_skill_full[ch_name].append(
+                    np.array(run_spread_skill_full[ch_name], dtype=np.float64)
+                )
         if "wd" in target_variables:
             wd_csi_005.append(np.array(run_csi_005, dtype=np.float64))
             wd_csi_03.append(np.array(run_csi_03, dtype=np.float64))
+            wd_csi_005_full.append(np.array(run_csi_005_full, dtype=np.float64))
+            wd_csi_03_full.append(np.array(run_csi_03_full, dtype=np.float64))
+            wd_rmse_dry_background.append(
+                np.array(run_wd_rmse_dry_background, dtype=np.float64)
+            )
+            wd_mae_dry_background.append(
+                np.array(run_wd_mae_dry_background, dtype=np.float64)
+            )
+            wd_falsewet_rate_001_dry_background.append(
+                np.array(run_wd_falsewet_rate_001_dry_background, dtype=np.float64)
+            )
+            wd_falsewet_rate_005_dry_background.append(
+                np.array(run_wd_falsewet_rate_005_dry_background, dtype=np.float64)
+            )
+            wd_pred_std_mean_dry_background.append(
+                np.array(run_wd_pred_std_mean_dry_background, dtype=np.float64)
+            )
 
         pred_arr = {k: np.stack(v, axis=0) for k, v in run_pred_by_channel.items()}
         gt_arr = {k: np.stack(v, axis=0) for k, v in run_gt_by_channel.items()}
@@ -1129,16 +1523,45 @@ def _rollout_prediction_generic(
     metrics: Dict[str, np.ndarray] = {}
     for ch_name in target_variables:
         metrics[f"rmse_{ch_name}"] = np.stack(per_channel_rmse[ch_name], axis=0)
+        if structural_mask_active:
+            metrics[f"rmse_{ch_name}_full_domain"] = np.stack(
+                per_channel_rmse_full[ch_name], axis=0
+            )
         if gaussian_mode:
             metrics[f"gaussian_nll_{ch_name}"] = np.stack(
                 per_channel_gaussian_nll[ch_name], axis=0
             )
+            if structural_mask_active:
+                metrics[f"gaussian_nll_{ch_name}_full_domain"] = np.stack(
+                    per_channel_gaussian_nll_full[ch_name], axis=0
+                )
         if use_ensemble:
             metrics[f"spread_{ch_name}"] = np.stack(per_channel_spread[ch_name], axis=0)
             metrics[f"spread_skill_{ch_name}"] = np.stack(per_channel_spread_skill[ch_name], axis=0)
+            if structural_mask_active:
+                metrics[f"spread_{ch_name}_full_domain"] = np.stack(
+                    per_channel_spread_full[ch_name], axis=0
+                )
+                metrics[f"spread_skill_{ch_name}_full_domain"] = np.stack(
+                    per_channel_spread_skill_full[ch_name], axis=0
+                )
     if "wd" in target_variables and wd_csi_005 and wd_csi_03:
         metrics["csi_005"] = np.stack(wd_csi_005, axis=0)
         metrics["csi_03"] = np.stack(wd_csi_03, axis=0)
+        if structural_mask_active:
+            metrics["csi_005_full_domain"] = np.stack(wd_csi_005_full, axis=0)
+            metrics["csi_03_full_domain"] = np.stack(wd_csi_03_full, axis=0)
+            metrics["dry_background_rmse_wd"] = np.stack(wd_rmse_dry_background, axis=0)
+            metrics["dry_background_mae_wd"] = np.stack(wd_mae_dry_background, axis=0)
+            metrics["dry_background_falsewet_rate_001_wd"] = np.stack(
+                wd_falsewet_rate_001_dry_background, axis=0
+            )
+            metrics["dry_background_falsewet_rate_005_wd"] = np.stack(
+                wd_falsewet_rate_005_dry_background, axis=0
+            )
+            metrics["dry_background_pred_std_mean_wd"] = np.stack(
+                wd_pred_std_mean_dry_background, axis=0
+            )
 
     stats = {k: {"mean": v.mean(axis=0), "std": v.std(axis=0)} for k, v in metrics.items()}
     time_hours = (np.arange(1, rollout_length + 1) * dt) / 3600.0
@@ -1207,10 +1630,18 @@ def _make_trainer(
         scheduler_monitor=scheduler_monitor,
         eval_interval=eval_interval,
     )
+    structural_policy = str(
+        _opt(config, "structural_dry", "policy", "legacy_full_domain")
+    ).strip().lower()
+    rel_l2_loss = FloodMaskedRelLpLoss(
+        policy=structural_policy,
+        base_loss=LpLoss(d=2, p=2),
+        reduction="sum",
+    )
     if gaussian_mode:
         return GaussianNLLTrainer(
             **common,
-            rel_l2_loss_fn=LpLoss(d=2, p=2),
+            rel_l2_loss_fn=rel_l2_loss,
             ar_finetune_start_epoch=max(
                 0, int(_opt(config, "opt", "ar_finetune_start_epoch", 0))
             ),
@@ -1226,7 +1657,7 @@ def _make_trainer(
             **common,
             fgn_noise_dim=_opt(config, "gino", "fgn_noise_dim", 32),
             crps_n_samples=max(2, int(_opt(config, "opt", "crps_n_samples", 2))),
-            rel_l2_loss_fn=LpLoss(d=2, p=2),
+            rel_l2_loss_fn=rel_l2_loss,
             crps_l2_weight=float(_opt(config, "opt", "crps_l2_weight", 0.0)),
             ar_finetune_start_epoch=max(
                 0, int(_opt(config, "opt", "ar_finetune_start_epoch", 0))

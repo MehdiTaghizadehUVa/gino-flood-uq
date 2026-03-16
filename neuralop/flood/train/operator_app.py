@@ -16,12 +16,29 @@ from torch.utils.data.distributed import DistributedSampler
 
 from neuralop import get_model
 from neuralop.data.transforms.normalizers import load_normalizers, save_normalizers
+from neuralop.flood.data.structural_dry import (
+    build_structural_dry_artifact,
+    load_structural_dry_artifact,
+    save_structural_dry_artifact,
+    validate_structural_dry_artifact,
+)
 from neuralop.flood.data.wv import (
     FloodDatasetHDF,
     FloodRolloutTestDatasetHDF,
     NormalizedDatasetOnTheFly,
     NormalizedRolloutTestDataset,
     fit_normalizers_streaming,
+)
+from neuralop.flood.losses import (
+    FloodDryBackgroundFalseWetRate,
+    FloodDryBackgroundMAE,
+    FloodDryBackgroundRMSE,
+    FloodEnsembleDryPredStdMean,
+    FloodGaussianDryPredStdMean,
+    FloodMaskedAbsLpLoss,
+    FloodMaskedCRPSLoss,
+    FloodMaskedGaussianNLLLoss,
+    FloodMaskedRelLpLoss,
 )
 from neuralop.flood.processing.wv import (
     FloodGINODataProcessor,
@@ -35,6 +52,7 @@ from neuralop.flood.train.rollout import rollout_prediction
 from neuralop.flood.utils.runtime_core import (
     _cfg_get,
     get_dataset_boundary_kwargs,
+    get_structural_dry_policy_kwargs,
     _is_power_of_two,
     _safe_float,
     _safe_int,
@@ -49,6 +67,7 @@ from neuralop.flood.utils.runtime_core import (
     save_effective_config_snapshot,
     set_seed,
     setup_logging,
+    wait_for_structural_dry_artifact,
     write_train_txt_from_data_root,
 )
 from neuralop.losses.data_losses import LpLoss
@@ -56,6 +75,81 @@ from neuralop.losses.probabilistic_losses import CRPSLoss, GaussianNLLLoss, fair
 from neuralop.training import AdamW
 from neuralop.training.trainer import Trainer
 from neuralop.utils import get_wandb_api_key
+
+
+def _resolve_training_normalizer_path(config):
+    normalizer_path = _cfg_get(config.data, "normalizer_path", None)
+    if normalizer_path is None:
+        return None
+    normalizer_path = Path(normalizer_path)
+    if not normalizer_path.is_absolute():
+        normalizer_root = _cfg_get(config.data, "normalizer_root", None)
+        if normalizer_root is not None:
+            normalizer_path = Path(str(normalizer_root)) / normalizer_path
+        else:
+            normalizer_path = Path(config.data.root) / normalizer_path
+    return normalizer_path.resolve()
+
+
+def _prepare_structural_dry_artifact_for_training(
+    config,
+    *,
+    dataset,
+    normalizer_path,
+    logger,
+    use_distributed,
+    global_rank,
+):
+    policy_kwargs = get_structural_dry_policy_kwargs(
+        config,
+        normalizer_path=normalizer_path,
+        allow_data_root_fallback=True,
+    )
+    if policy_kwargs["policy"] != "masked_primary":
+        return policy_kwargs, None
+
+    artifact_path = policy_kwargs["artifact_path"]
+    summary_path = policy_kwargs["summary_path"]
+    artifact = None
+    if artifact_path.exists():
+        artifact = load_structural_dry_artifact(artifact_path)
+    elif use_distributed and global_rank != 0:
+        artifact = wait_for_structural_dry_artifact(artifact_path)
+    else:
+        artifact = build_structural_dry_artifact(
+            data_root=config.data.root,
+            run_ids=dataset.run_ids,
+            train_txt=_cfg_get(config.data, "train_txt", "train.txt"),
+            hdf_suffix=".hdf",
+            hdf_paths=dataset.hdf_paths,
+            cell_point_index=dataset.cell_point_index,
+            mask_definition=policy_kwargs["mask_definition"],
+        )
+        save_structural_dry_artifact(
+            artifact,
+            artifact_path=artifact_path,
+            summary_path=summary_path,
+        )
+    if use_distributed and dist.is_available() and dist.is_initialized():
+        dist.barrier()
+        if artifact is None:
+            artifact = load_structural_dry_artifact(artifact_path)
+
+    artifact = validate_structural_dry_artifact(
+        artifact,
+        expected_cell_count=dataset.reference_cell_count,
+        expected_run_ids=dataset.run_ids,
+    )
+    dataset.set_structural_dry_mask(artifact["dry_mask"])
+    logger.info(
+        "Structural-dry policy=%s mask_definition=%s n_dry=%s n_wettable=%s artifact=%s",
+        policy_kwargs["policy"],
+        policy_kwargs["mask_definition"],
+        artifact["n_dry"],
+        artifact["n_wettable"],
+        artifact_path,
+    )
+    return policy_kwargs, artifact
 
 def main():
     config, device, is_logger = load_config_and_setup()
@@ -87,6 +181,7 @@ def main():
     deterministic = _cfg_get(config, "deterministic", True)
     global_rank = dist.get_rank() if dist.is_available() and dist.is_initialized() else 0
     world_size = dist.get_world_size() if dist.is_available() and dist.is_initialized() else 1
+    use_distributed = bool(_cfg_get(config.distributed, "use_distributed", False)) and dist.is_available() and dist.is_initialized()
     effective_seed = int(seed) + int(global_rank)
     set_seed(effective_seed, deterministic=deterministic)
     logger.info(
@@ -166,6 +261,15 @@ def main():
         target_variables=target_variables,
         **data_boundary_kwargs,
     )
+    normalizer_path = _resolve_training_normalizer_path(config)
+    structural_dry_policy, structural_dry_artifact = _prepare_structural_dry_artifact_for_training(
+        config,
+        dataset=full_dataset,
+        normalizer_path=normalizer_path,
+        logger=logger,
+        use_distributed=use_distributed,
+        global_rank=global_rank,
+    )
     n_samples_max = _cfg_get(config.data, "n_samples_max", None)
     if n_samples_max is not None:
         total_avail = len(full_dataset)
@@ -186,18 +290,16 @@ def main():
     # No leakage: normalizers are fit only on train_data_raw. Test data is transformed with
     # train-fit stats in NormalizedDatasetOnTheFly; evaluation uses model.eval() and torch.no_grad().
     # Normalizers: load from disk if path exists and is set; otherwise fit and optionally save
-    normalizer_path = _cfg_get(config.data, "normalizer_path", None)
-    if normalizer_path is not None:
-        normalizer_path = Path(normalizer_path)
-        if not normalizer_path.is_absolute():
-            normalizer_path = Path(config.data.root) / normalizer_path
     if normalizer_path is not None and normalizer_path.exists():
         normalizers = load_normalizers(normalizer_path, device=None)
         logger.info("Loaded normalizers from %s", normalizer_path)
     else:
         norm_chunk_size = _cfg_get(config.data, "normalizer_chunk_size", 10000)
         normalizers = fit_normalizers_streaming(
-            train_data_raw, chunk_size=norm_chunk_size, expect_target=True
+            train_data_raw,
+            chunk_size=norm_chunk_size,
+            expect_target=True,
+            structural_dry_policy=structural_dry_policy["policy"],
         )
         if normalizer_path is not None:
             save_normalizers(normalizers, normalizer_path)
@@ -223,7 +325,6 @@ def main():
         )
         persistent_workers = False
 
-    use_distributed = bool(_cfg_get(config.distributed, "use_distributed", False)) and dist.is_available() and dist.is_initialized()
     worker_seed_base = int(seed) + int(global_rank) * 100_000
     worker_init_fn = partial(dataloader_worker_init, base_seed=worker_seed_base) if num_workers > 0 else None
     loader_kwargs = {
@@ -316,6 +417,16 @@ def main():
     # Loss (LpLoss(d=2,p=2): relative L2 by default; use 'l2_abs' if relative plateaus)
     # reduction='sum' so train_err = sum(loss)/n_samples = mean per sample (same scale as test_l2)
     l2loss = LpLoss(d=2, p=2)
+    structural_policy_name = structural_dry_policy["policy"]
+    primary_l2_loss = FloodMaskedRelLpLoss(
+        policy=structural_policy_name,
+        base_loss=l2loss,
+        reduction="sum",
+    )
+    primary_l2_abs_loss = FloodMaskedAbsLpLoss(
+        policy=structural_policy_name,
+        reduction="sum",
+    )
     use_fgn = bool(_cfg_get(config.gino, "use_fgn_noise", False))
     output_distribution = str(_cfg_get(config.gino, "output_distribution", "deterministic")).strip().lower()
     if output_distribution not in {"deterministic", "gaussian"}:
@@ -367,7 +478,7 @@ def main():
         )
 
     if training_loss_name == "l2":
-        train_loss_fn = l2loss
+        train_loss_fn = primary_l2_loss
         if use_fgn:
             warnings.warn(
                 "gino.use_fgn_noise is True but training_loss is 'l2'. "
@@ -378,24 +489,30 @@ def main():
     elif training_loss_name == "crps" and use_fgn:
         crps_n_samples = max(2, _safe_int(_cfg_get(config.opt, "crps_n_samples", 2), 2))
         crps_channel_weights = _cfg_get(config.opt, "crps_channel_weights", None)
-        train_loss_fn = CRPSLoss(
-            n_samples=crps_n_samples,
-            channel_weights=crps_channel_weights,
-            reduction="mean",
+        train_loss_fn = FloodMaskedCRPSLoss(
+            policy=structural_policy_name,
+            base_loss=CRPSLoss(
+                n_samples=crps_n_samples,
+                channel_weights=crps_channel_weights,
+                reduction="mean",
+            ),
         )
     elif training_loss_name == "gaussian_nll":
-        train_loss_fn = GaussianNLLLoss(
-            channel_weights=_cfg_get(config.opt, "crps_channel_weights", None),
-            reduction="mean",
-            min_logvar=_safe_float(_cfg_get(config.opt, "gaussian_min_logvar", -9.0), -9.0),
-            max_logvar=_safe_float(_cfg_get(config.opt, "gaussian_max_logvar", 4.0), 4.0),
-            logvar_reg_weight=_safe_float(
-                _cfg_get(config.opt, "gaussian_logvar_reg_weight", 1e-6), 1e-6
+        train_loss_fn = FloodMaskedGaussianNLLLoss(
+            policy=structural_policy_name,
+            base_loss=GaussianNLLLoss(
+                channel_weights=_cfg_get(config.opt, "crps_channel_weights", None),
+                reduction="mean",
+                min_logvar=_safe_float(_cfg_get(config.opt, "gaussian_min_logvar", -9.0), -9.0),
+                max_logvar=_safe_float(_cfg_get(config.opt, "gaussian_max_logvar", 4.0), 4.0),
+                logvar_reg_weight=_safe_float(
+                    _cfg_get(config.opt, "gaussian_logvar_reg_weight", 1e-6), 1e-6
+                ),
             ),
         )
     elif training_loss_name == "l2_abs":
         # Absolute L2 (||pred-y||) instead of relative (||pred-y||/||y||); can help if relative plateaus
-        train_loss_fn = lambda y_pred, y, **kw: l2loss.abs(y_pred, y)
+        train_loss_fn = primary_l2_abs_loss
         if use_fgn:
             warnings.warn(
                 "gino.use_fgn_noise is True but training_loss is 'l2_abs'. FGN will not be trained.",
@@ -409,9 +526,9 @@ def main():
         )
 
     if config.opt.testing_loss == "l2":
-        test_loss_fn = l2loss
+        test_loss_fn = primary_l2_loss
     else:
-        test_loss_fn = l2loss
+        test_loss_fn = primary_l2_loss
 
     # Eval metrics:
     # - FGN/CRPS: L2 on ensemble mean + CRPS.
@@ -419,12 +536,15 @@ def main():
     if output_distribution == "gaussian" and training_loss_name == "gaussian_nll":
         eval_losses = {
             "l2": test_loss_fn,
-            "gaussian_nll": GaussianNLLLoss(
-                channel_weights=_cfg_get(config.opt, "crps_channel_weights", None),
-                reduction="mean",
-                min_logvar=_safe_float(_cfg_get(config.opt, "gaussian_min_logvar", -9.0), -9.0),
-                max_logvar=_safe_float(_cfg_get(config.opt, "gaussian_max_logvar", 4.0), 4.0),
-                logvar_reg_weight=0.0,
+            "gaussian_nll": FloodMaskedGaussianNLLLoss(
+                policy=structural_policy_name,
+                base_loss=GaussianNLLLoss(
+                    channel_weights=_cfg_get(config.opt, "crps_channel_weights", None),
+                    reduction="mean",
+                    min_logvar=_safe_float(_cfg_get(config.opt, "gaussian_min_logvar", -9.0), -9.0),
+                    max_logvar=_safe_float(_cfg_get(config.opt, "gaussian_max_logvar", 4.0), 4.0),
+                    logvar_reg_weight=0.0,
+                ),
             ),
         }
     elif use_fgn and training_loss_name == "crps":
@@ -432,10 +552,51 @@ def main():
         crps_channel_weights = _cfg_get(config.opt, "crps_channel_weights", None)
         eval_losses = {
             "l2": test_loss_fn,
-            "crps": CRPSLoss(n_samples=crps_n_samples, channel_weights=crps_channel_weights, reduction="mean"),
+            "crps": FloodMaskedCRPSLoss(
+                policy=structural_policy_name,
+                base_loss=CRPSLoss(
+                    n_samples=crps_n_samples,
+                    channel_weights=crps_channel_weights,
+                    reduction="mean",
+                ),
+            ),
         }
     else:
         eval_losses = {config.opt.testing_loss: test_loss_fn}
+
+    if structural_policy_name == "masked_primary":
+        eval_losses["l2_full_domain"] = l2loss
+        eval_losses["rmse_dry_background_wd"] = FloodDryBackgroundRMSE()
+        eval_losses["mae_dry_background_wd"] = FloodDryBackgroundMAE()
+        eval_losses["falsewet_rate_001_dry_background_wd"] = FloodDryBackgroundFalseWetRate(
+            threshold=0.01
+        )
+        eval_losses["falsewet_rate_005_dry_background_wd"] = FloodDryBackgroundFalseWetRate(
+            threshold=0.05
+        )
+        if output_distribution == "gaussian" and training_loss_name == "gaussian_nll":
+            eval_losses["gaussian_nll_full_domain"] = GaussianNLLLoss(
+                channel_weights=_cfg_get(config.opt, "crps_channel_weights", None),
+                reduction="mean",
+                min_logvar=_safe_float(_cfg_get(config.opt, "gaussian_min_logvar", -9.0), -9.0),
+                max_logvar=_safe_float(_cfg_get(config.opt, "gaussian_max_logvar", 4.0), 4.0),
+                logvar_reg_weight=0.0,
+            )
+            eval_losses["pred_std_mean_dry_background_wd"] = FloodGaussianDryPredStdMean(
+                n_channels=n_target_channels,
+                min_logvar=_safe_float(_cfg_get(config.opt, "gaussian_min_logvar", -9.0), -9.0),
+                max_logvar=_safe_float(_cfg_get(config.opt, "gaussian_max_logvar", 4.0), 4.0),
+            )
+        elif use_fgn and training_loss_name == "crps":
+            eval_losses["crps_full_domain"] = FloodMaskedCRPSLoss(
+                policy="legacy_full_domain",
+                base_loss=CRPSLoss(
+                    n_samples=crps_n_samples,
+                    channel_weights=crps_channel_weights,
+                    reduction="mean",
+                ),
+            )
+            eval_losses["pred_std_mean_dry_background_wd"] = FloodEnsembleDryPredStdMean()
 
     # DataProcessor: training loss is always in normalized space (pred and y from dataset are normalized).
     # Eval: when inverse_test=True, pred and y are inverse-transformed so test_l2/test_crps are in physical space.
@@ -498,7 +659,7 @@ def main():
             grad_accum_steps=grad_accum_steps,
             fgn_noise_dim=fgn_noise_dim,
             crps_n_samples=crps_n_samples,
-            rel_l2_loss_fn=l2loss,
+            rel_l2_loss_fn=primary_l2_loss,
             crps_l2_weight=crps_l2_weight,
             ar_finetune_start_epoch=ar_finetune_start_epoch,
             ar_rollout_steps=ar_rollout_steps,
@@ -533,7 +694,7 @@ def main():
             use_distributed=use_distributed,
             mixed_precision=mixed_precision,
             grad_accum_steps=grad_accum_steps,
-            rel_l2_loss_fn=l2loss,
+            rel_l2_loss_fn=primary_l2_loss,
             ar_finetune_start_epoch=max(0, _safe_int(_cfg_get(config.opt, "ar_finetune_start_epoch", 0), 0)),
             ar_rollout_steps=ar_rollout_steps,
             ar_curriculum_epochs_per_step=max(0, _safe_int(_cfg_get(config.opt, "ar_curriculum_epochs_per_step", 0), 0)),
@@ -703,6 +864,8 @@ def main():
         skip_before_timestep=rollout_skip_before_timestep,
         **rollout_boundary_kwargs,
     )
+    if structural_dry_artifact is not None:
+        rollout_test_dataset.set_structural_dry_mask(structural_dry_artifact["dry_mask"])
 
     # Normalizing rollout data
     rollout_geom_list, rollout_static_list, rollout_boundary_list, rollout_dyn_list, _ = collect_all_fields(
@@ -769,6 +932,11 @@ def main():
             "static": transformed_rollout["static"][i],
             "boundary": transformed_rollout["boundary"][i],
             "dynamic": transformed_rollout["dynamic"][i],
+            **(
+                {"structural_dry_mask": structural_dry_artifact["dry_mask"]}
+                if structural_dry_artifact is not None
+                else {}
+            ),
         })
 
     rollout_normalized_dataset = NormalizedRolloutTestDataset(

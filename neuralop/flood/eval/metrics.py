@@ -7,6 +7,16 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 import torch
 
+from neuralop.flood.losses import (
+    FloodDryBackgroundFalseWetRate,
+    FloodDryBackgroundMAE,
+    FloodDryBackgroundRMSE,
+    FloodEnsembleDryPredStdMean,
+    FloodGaussianDryPredStdMean,
+    FloodMaskedCRPSLoss,
+    FloodMaskedGaussianNLLLoss,
+    FloodMaskedRelLpLoss,
+)
 from neuralop.flood.eval.runtime import MIN_EPS, _opt, _opt_float
 from neuralop.losses.data_losses import LpLoss
 from neuralop.losses.probabilistic_losses import CRPSLoss, GaussianNLLLoss, split_gaussian_packed
@@ -32,28 +42,84 @@ def _sample_from_packed_gaussian(
 def _build_eval_losses(config: Any, use_fgn: bool) -> Dict[str, Any]:
     """Build loss dict for one-step evaluation (L2 and optionally CRPS)."""
     l2_loss = LpLoss(d=2, p=2)
+    structural_policy = str(
+        _opt(config, "structural_dry", "policy", "legacy_full_domain")
+    ).strip().lower()
+    primary_l2 = FloodMaskedRelLpLoss(
+        policy=structural_policy,
+        base_loss=l2_loss,
+        reduction="sum",
+    )
     if _is_gaussian_mode(config):
-        return {
-            "l2": l2_loss,
-            "gaussian_nll": GaussianNLLLoss(
+        out = {
+            "l2": primary_l2,
+            "gaussian_nll": FloodMaskedGaussianNLLLoss(
+                policy=structural_policy,
+                base_loss=GaussianNLLLoss(
+                    channel_weights=_opt(config, "opt", "crps_channel_weights", None),
+                    reduction="mean",
+                    min_logvar=_opt_float(config, "opt", "gaussian_min_logvar", -9.0),
+                    max_logvar=_opt_float(config, "opt", "gaussian_max_logvar", 4.0),
+                    logvar_reg_weight=0.0,
+                ),
+            ),
+        }
+        if structural_policy == "masked_primary":
+            out["l2_full_domain"] = l2_loss
+            out["gaussian_nll_full_domain"] = GaussianNLLLoss(
                 channel_weights=_opt(config, "opt", "crps_channel_weights", None),
                 reduction="mean",
                 min_logvar=_opt_float(config, "opt", "gaussian_min_logvar", -9.0),
                 max_logvar=_opt_float(config, "opt", "gaussian_max_logvar", 4.0),
                 logvar_reg_weight=0.0,
-            ),
-        }
+            )
+            out["rmse_dry_background_wd"] = FloodDryBackgroundRMSE()
+            out["mae_dry_background_wd"] = FloodDryBackgroundMAE()
+            out["falsewet_rate_001_dry_background_wd"] = FloodDryBackgroundFalseWetRate(0.01)
+            out["falsewet_rate_005_dry_background_wd"] = FloodDryBackgroundFalseWetRate(0.05)
+            out["pred_std_mean_dry_background_wd"] = FloodGaussianDryPredStdMean(
+                n_channels=1,
+                min_logvar=_opt_float(config, "opt", "gaussian_min_logvar", -9.0),
+                max_logvar=_opt_float(config, "opt", "gaussian_max_logvar", 4.0),
+            )
+        return out
     if use_fgn and _opt(config, "opt", "training_loss", "l2") == "crps":
         n_samples = max(2, int(_opt(config, "opt", "crps_n_samples", 2)))
         ch_weights = _opt(config, "opt", "crps_channel_weights", None)
-        return {
-            "l2": l2_loss,
-            "crps": CRPSLoss(
-                n_samples=n_samples, channel_weights=ch_weights, reduction="mean"
+        out = {
+            "l2": primary_l2,
+            "crps": FloodMaskedCRPSLoss(
+                policy=structural_policy,
+                base_loss=CRPSLoss(
+                    n_samples=n_samples, channel_weights=ch_weights, reduction="mean"
+                ),
             ),
         }
+        if structural_policy == "masked_primary":
+            out["l2_full_domain"] = l2_loss
+            out["crps_full_domain"] = FloodMaskedCRPSLoss(
+                policy="legacy_full_domain",
+                base_loss=CRPSLoss(
+                    n_samples=n_samples,
+                    channel_weights=ch_weights,
+                    reduction="mean",
+                ),
+            )
+            out["rmse_dry_background_wd"] = FloodDryBackgroundRMSE()
+            out["mae_dry_background_wd"] = FloodDryBackgroundMAE()
+            out["falsewet_rate_001_dry_background_wd"] = FloodDryBackgroundFalseWetRate(0.01)
+            out["falsewet_rate_005_dry_background_wd"] = FloodDryBackgroundFalseWetRate(0.05)
+            out["pred_std_mean_dry_background_wd"] = FloodEnsembleDryPredStdMean()
+        return out
     test_loss_name = _opt(config, "opt", "testing_loss", "l2")
-    return {test_loss_name: l2_loss}
+    out = {test_loss_name: primary_l2}
+    if structural_policy == "masked_primary":
+        out["l2_full_domain"] = l2_loss
+        out["rmse_dry_background_wd"] = FloodDryBackgroundRMSE()
+        out["mae_dry_background_wd"] = FloodDryBackgroundMAE()
+        out["falsewet_rate_001_dry_background_wd"] = FloodDryBackgroundFalseWetRate(0.01)
+        out["falsewet_rate_005_dry_background_wd"] = FloodDryBackgroundFalseWetRate(0.05)
+    return out
 
     fp = np.sum(event_pred & (~event_gt))
     fn = np.sum((~event_pred) & event_gt)

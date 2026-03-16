@@ -17,7 +17,9 @@ from neuralop.flood.eval.datasets import (
     _build_one_step_datasets,
     _build_rollout_normalized_dataset,
     _build_test_loader,
+    _load_structural_dry_artifact_for_eval,
     _load_or_fit_normalizers,
+    _set_dataset_structural_dry_mask,
 )
 from neuralop.flood.eval.rollout import _make_trainer, _rollout_prediction_per_hydrograph
 from neuralop.flood.eval.runtime import (
@@ -116,7 +118,17 @@ def main() -> int:
     train_raw, test_raw, target_variables = _build_one_step_datasets(
         config, seed, logger
     )
-    normalizers = _load_or_fit_normalizers(config, train_raw, primary_dir, logger)
+    normalizers, normalizer_path = _load_or_fit_normalizers(config, train_raw, primary_dir, logger)
+    structural_dry_policy, structural_dry_artifact = _load_structural_dry_artifact_for_eval(
+        config,
+        normalizer_path=normalizer_path,
+        expected_cell_count=getattr(getattr(train_raw, "dataset", train_raw), "reference_cell_count", None),
+        expected_run_ids=getattr(getattr(train_raw, "dataset", train_raw), "run_ids", None),
+        logger=logger,
+    )
+    if structural_dry_artifact is not None:
+        _set_dataset_structural_dry_mask(train_raw, structural_dry_artifact["dry_mask"])
+        _set_dataset_structural_dry_mask(test_raw, structural_dry_artifact["dry_mask"])
     with _PhaseTimer(logger, "Wrapping normalized datasets"):
         train_norm = NormalizedDatasetOnTheFly(
             train_raw, normalizers, query_res=config.data.query_res
@@ -283,6 +295,7 @@ def main() -> int:
             normalizers,
             target_variables,
             logger,
+            structural_dry_artifact=structural_dry_artifact,
             split_txt=str(test_txt),
             split_name="test",
             config_section="rollout_data",
@@ -303,6 +316,7 @@ def main() -> int:
             normalizers,
             target_variables,
             logger,
+            structural_dry_artifact=structural_dry_artifact,
             split_txt=str(calib_txt),
             split_name="val",
             config_section="rollout_calibration",
@@ -408,7 +422,12 @@ def main() -> int:
         )
     else:
         rollout_norm_ds, hydrograph_samples = _build_rollout_normalized_dataset(
-            config, normalizers, target_variables, logger, config_section="rollout_data"
+            config,
+            normalizers,
+            target_variables,
+            logger,
+            structural_dry_artifact=structural_dry_artifact,
+            config_section="rollout_data",
         )
         logger.info("Rollout normalized dataset: %d runs", len(rollout_norm_ds))
         if hydrograph_samples:

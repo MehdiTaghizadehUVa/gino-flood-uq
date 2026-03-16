@@ -12,6 +12,13 @@ from torch.utils.data import DataLoader, Subset, random_split
 from torch.utils.data.distributed import DistributedSampler
 
 from neuralop.data.transforms.normalizers import load_normalizers, save_normalizers
+from neuralop.flood.data.structural_dry import (
+    build_structural_dry_artifact,
+    dry_mask_to_wettable_mask,
+    load_structural_dry_artifact,
+    save_structural_dry_artifact,
+    validate_structural_dry_artifact,
+)
 from neuralop.flood.data.wv import FloodDatasetHDF, NormalizedDatasetOnTheFly, fit_normalizers_streaming
 from neuralop.flood.train.diffusion_runtime import (
     DEFAULT_BOUNDARY_CHANNELS,
@@ -25,8 +32,10 @@ from neuralop.flood.utils.diffusion_script_utils import safe_get
 from neuralop.flood.utils.runtime import (
     dataloader_worker_init,
     get_dataset_boundary_kwargs,
+    get_structural_dry_policy_kwargs,
     make_dataloader_generator,
     make_split_generator,
+    wait_for_structural_dry_artifact,
 )
 
 
@@ -110,6 +119,53 @@ def _prepare_datasets(
         full_dataset = FloodDatasetHDF(**dataset_kwargs)
     _dist_barrier(dist_ctx)
 
+    structural_dry_policy = get_structural_dry_policy_kwargs(
+        config,
+        normalizer_path=_resolve_normalizer_path(config),
+        allow_data_root_fallback=True,
+    )
+    if structural_dry_policy["policy"] == "masked_primary":
+        artifact_path = structural_dry_policy["artifact_path"]
+        artifact = None
+        if artifact_path.exists():
+            artifact = load_structural_dry_artifact(artifact_path)
+        elif dist_ctx.use_distributed and not dist_ctx.is_rank0:
+            artifact = wait_for_structural_dry_artifact(artifact_path)
+        elif dist_ctx.is_rank0:
+            artifact = build_structural_dry_artifact(
+                data_root=dataset_kwargs["data_root"],
+                run_ids=full_dataset.run_ids,
+                train_txt=dataset_kwargs["train_txt"],
+                hdf_suffix=dataset_kwargs["hdf_suffix"],
+                hdf_paths=full_dataset.hdf_paths,
+                cell_point_index=full_dataset.cell_point_index,
+                mask_definition=structural_dry_policy["mask_definition"],
+            )
+            save_structural_dry_artifact(
+                artifact,
+                artifact_path=artifact_path,
+                summary_path=structural_dry_policy["summary_path"],
+            )
+        _dist_barrier(dist_ctx)
+        if artifact is None:
+            artifact = load_structural_dry_artifact(artifact_path)
+        artifact = validate_structural_dry_artifact(
+            artifact,
+            expected_cell_count=full_dataset.reference_cell_count,
+            expected_run_ids=full_dataset.run_ids,
+        )
+        full_dataset.set_structural_dry_mask(artifact["dry_mask"])
+        _rank0_info(
+            logger,
+            dist_ctx,
+            "Structural-dry policy=%s mask_definition=%s n_dry=%d n_wettable=%d artifact=%s",
+            structural_dry_policy["policy"],
+            structural_dry_policy["mask_definition"],
+            artifact["n_dry"],
+            artifact["n_wettable"],
+            artifact_path,
+        )
+
     n_samples_max = safe_get(data_cfg, "n_samples_max", None)
     if n_samples_max is not None and int(n_samples_max) > 0:
         n_use = min(int(n_samples_max), len(full_dataset))
@@ -141,6 +197,7 @@ def _prepare_datasets(
                 train_raw,
                 chunk_size=int(safe_get(data_cfg, "normalizer_chunk_size", 10000)),
                 expect_target=True,
+                structural_dry_policy=structural_dry_policy["policy"],
             )
             if normalizer_path is not None:
                 save_normalizers(normalizers, normalizer_path)
@@ -286,10 +343,18 @@ def _prepare_batch(batch: Dict[str, Any], device: torch.device) -> Dict[str, tor
     if y.ndim == 2:
         y = y.unsqueeze(0)
 
-    return {
+    out = {
         "context": context,
         "target": y,
         "input_geom": geom_shared,
         "latent_queries": q_shared,
         "output_queries": geom_shared.clone(),
     }
+    if "structural_dry_mask" in sample:
+        structural_dry_mask = sample["structural_dry_mask"]
+        wettable = dry_mask_to_wettable_mask(structural_dry_mask).to(device=device)
+        if wettable.ndim == 1:
+            wettable = wettable.unsqueeze(0).expand(y.shape[0], -1)
+        out["structural_dry_mask"] = structural_dry_mask
+        out["point_weights"] = wettable.unsqueeze(-1).to(dtype=y.dtype)
+    return out

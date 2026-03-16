@@ -10,6 +10,7 @@ import torch.distributed as dist
 from torch.utils.data import DataLoader
 
 from neuralop.diffusion import ConditionalDDOForecaster
+from neuralop.flood.losses import dry_falsewet_rate
 from neuralop.flood.train.diffusion_data import _prepare_batch
 from neuralop.flood.train.diffusion_runtime import (
     DEFAULT_MAX_VAL_BATCHES,
@@ -34,6 +35,18 @@ def _evaluate_validation(
     rmse_norm_count = torch.tensor(0.0, device=device, dtype=torch.float64)
     rmse_phys_sse = torch.tensor(0.0, device=device, dtype=torch.float64)
     rmse_phys_count = torch.tensor(0.0, device=device, dtype=torch.float64)
+    loss_sum_full = torch.tensor(0.0, device=device, dtype=torch.float64)
+    rmse_norm_sse_full = torch.tensor(0.0, device=device, dtype=torch.float64)
+    rmse_norm_count_full = torch.tensor(0.0, device=device, dtype=torch.float64)
+    rmse_phys_sse_full = torch.tensor(0.0, device=device, dtype=torch.float64)
+    rmse_phys_count_full = torch.tensor(0.0, device=device, dtype=torch.float64)
+    dry_rmse_sse = torch.tensor(0.0, device=device, dtype=torch.float64)
+    dry_rmse_count = torch.tensor(0.0, device=device, dtype=torch.float64)
+    dry_mae_sum = torch.tensor(0.0, device=device, dtype=torch.float64)
+    dry_mae_count = torch.tensor(0.0, device=device, dtype=torch.float64)
+    falsewet_001_sum = torch.tensor(0.0, device=device, dtype=torch.float64)
+    falsewet_005_sum = torch.tensor(0.0, device=device, dtype=torch.float64)
+    falsewet_count = torch.tensor(0.0, device=device, dtype=torch.float64)
 
     if target_norm is not None:
         target_norm.to(device)
@@ -44,9 +57,12 @@ def _evaluate_validation(
                 break
             sample = _prepare_batch(batch, device)
             loss, _ = forecaster.training_loss(sample)
+            full_loss_input = {k: v for k, v in sample.items() if k != "point_weights"}
+            loss_full, _ = forecaster.training_loss(full_loss_input)
             bsz = float(sample["target"].shape[0])
             loss_sum += float(loss.item()) * bsz
             loss_count += bsz
+            loss_sum_full += float(loss_full.item()) * bsz
 
             pred = forecaster.sample_next(
                 context=sample["context"],
@@ -58,24 +74,79 @@ def _evaluate_validation(
             )
             tgt = sample["target"]
             err_norm = pred - tgt
-            rmse_norm_sse += float(torch.sum(err_norm.pow(2)).item())
-            rmse_norm_count += float(err_norm.numel())
+            point_weights = sample.get("point_weights")
+            if point_weights is not None:
+                weights = point_weights.to(device=device, dtype=err_norm.dtype)
+                rmse_norm_sse += float(torch.sum(err_norm.pow(2) * weights).item())
+                rmse_norm_count += float(weights.sum().item())
+            else:
+                rmse_norm_sse += float(torch.sum(err_norm.pow(2)).item())
+                rmse_norm_count += float(err_norm.numel())
+            rmse_norm_sse_full += float(torch.sum(err_norm.pow(2)).item())
+            rmse_norm_count_full += float(err_norm.numel())
 
             if target_norm is not None:
                 pred_phys = target_norm.inverse_transform(pred)
                 tgt_phys = target_norm.inverse_transform(tgt)
                 err_phys = pred_phys - tgt_phys
-                rmse_phys_sse += float(torch.sum(err_phys.pow(2)).item())
-                rmse_phys_count += float(err_phys.numel())
+                if point_weights is not None:
+                    weights_phys = point_weights.to(device=device, dtype=err_phys.dtype)
+                    rmse_phys_sse += float(torch.sum(err_phys.pow(2) * weights_phys).item())
+                    rmse_phys_count += float(weights_phys.sum().item())
+                else:
+                    rmse_phys_sse += float(torch.sum(err_phys.pow(2)).item())
+                    rmse_phys_count += float(err_phys.numel())
+                rmse_phys_sse_full += float(torch.sum(err_phys.pow(2)).item())
+                rmse_phys_count_full += float(err_phys.numel())
+
+                structural_dry_mask = sample.get("structural_dry_mask")
+                if structural_dry_mask is not None:
+                    dry_mask = structural_dry_mask.to(device=device, dtype=torch.bool)
+                    if dry_mask.ndim == 1:
+                        dry_mask = dry_mask.unsqueeze(0).expand(pred.shape[0], -1)
+                    dry_mask_exp = dry_mask.unsqueeze(-1).expand_as(pred_phys)
+                    dry_rmse_sse += float(torch.sum((err_phys.pow(2) * dry_mask_exp).double()).item())
+                    dry_rmse_count += float(dry_mask_exp.sum().item())
+                    dry_mae_sum += float(torch.sum((err_phys.abs() * dry_mask_exp).double()).item())
+                    dry_mae_count += float(dry_mask_exp.sum().item())
+                    falsewet_001_sum += float(
+                        dry_falsewet_rate(
+                            pred_phys,
+                            structural_dry_mask=dry_mask,
+                            threshold=0.01,
+                        ).item()
+                        * pred.shape[0]
+                    )
+                    falsewet_005_sum += float(
+                        dry_falsewet_rate(
+                            pred_phys,
+                            structural_dry_mask=dry_mask,
+                            threshold=0.05,
+                        ).item()
+                        * pred.shape[0]
+                    )
+                    falsewet_count += float(pred.shape[0])
 
     if dist_ctx.use_distributed and dist.is_initialized():
         for t in (
             loss_sum,
             loss_count,
+            loss_sum_full,
             rmse_norm_sse,
             rmse_norm_count,
+            rmse_norm_sse_full,
+            rmse_norm_count_full,
             rmse_phys_sse,
             rmse_phys_count,
+            rmse_phys_sse_full,
+            rmse_phys_count_full,
+            dry_rmse_sse,
+            dry_rmse_count,
+            dry_mae_sum,
+            dry_mae_count,
+            falsewet_001_sum,
+            falsewet_005_sum,
+            falsewet_count,
         ):
             dist.all_reduce(t, op=dist.ReduceOp.SUM)
 
@@ -84,12 +155,35 @@ def _evaluate_validation(
         val_rmse_phys = torch.tensor(0.0, device=device, dtype=torch.float64)
     else:
         val_rmse_phys = torch.sqrt(rmse_phys_sse / torch.clamp(rmse_phys_count, min=1.0))
+    val_rmse_norm_full = torch.sqrt(rmse_norm_sse_full / torch.clamp(rmse_norm_count_full, min=1.0))
+    if torch.all(rmse_phys_count_full <= 0):
+        val_rmse_phys_full = torch.tensor(0.0, device=device, dtype=torch.float64)
+    else:
+        val_rmse_phys_full = torch.sqrt(
+            rmse_phys_sse_full / torch.clamp(rmse_phys_count_full, min=1.0)
+        )
 
     out = {
         "val_loss": float((loss_sum / torch.clamp(loss_count, min=1.0)).item()),
         "val_rmse_norm": float(val_rmse_norm.item()),
         "val_rmse_phys": float(val_rmse_phys.item()),
+        "val_loss_full_domain": float((loss_sum_full / torch.clamp(loss_count, min=1.0)).item()),
+        "val_rmse_norm_full_domain": float(val_rmse_norm_full.item()),
+        "val_rmse_phys_full_domain": float(val_rmse_phys_full.item()),
     }
+    if dry_rmse_count.item() > 0:
+        out["val_rmse_dry_background_wd"] = float(
+            torch.sqrt(dry_rmse_sse / torch.clamp(dry_rmse_count, min=1.0)).item()
+        )
+        out["val_mae_dry_background_wd"] = float(
+            (dry_mae_sum / torch.clamp(dry_mae_count, min=1.0)).item()
+        )
+        out["val_falsewet_rate_001_dry_background_wd"] = float(
+            (falsewet_001_sum / torch.clamp(falsewet_count, min=1.0)).item()
+        )
+        out["val_falsewet_rate_005_dry_background_wd"] = float(
+            (falsewet_005_sum / torch.clamp(falsewet_count, min=1.0)).item()
+        )
     forecaster.train()
     return out
 

@@ -265,6 +265,7 @@ class ConditionalDDOForecaster(nn.Module):
         input_geom = sample["input_geom"]
         latent_queries = sample["latent_queries"]
         output_queries = sample["output_queries"]
+        point_weights = sample.get("point_weights")
 
         if target.ndim != 3:
             raise ValueError(f"target must be [B, N, C], got {tuple(target.shape)}")
@@ -301,7 +302,17 @@ class ConditionalDDOForecaster(nn.Module):
 
         # 0.5 * ||eps_hat - eps||^2, averaged over locations/channels then over batch.
         mse = 0.5 * (eps_hat - eps) ** 2
-        per_sample = mse.reshape(bsz, -1).mean(dim=1)
+        if point_weights is not None:
+            point_weights = point_weights.to(device=target.device, dtype=target.dtype)
+            if point_weights.shape != target.shape:
+                raise ValueError(
+                    f"point_weights must match target shape {tuple(target.shape)}, got {tuple(point_weights.shape)}."
+                )
+            weighted = mse * point_weights
+            denom = point_weights.reshape(bsz, -1).sum(dim=1).clamp_min(1e-12)
+            per_sample = weighted.reshape(bsz, -1).sum(dim=1) / denom
+        else:
+            per_sample = mse.reshape(bsz, -1).mean(dim=1)
         if self.weight_method:
             w = get_weight(lmbd, weight_method=self.weight_method)
             per_sample = per_sample * (w / torch.clamp(pdf, min=1e-12))

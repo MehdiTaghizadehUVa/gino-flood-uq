@@ -6,6 +6,7 @@ import json
 import logging
 import random
 import sys
+import time
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
@@ -119,6 +120,8 @@ def _cfg_get(obj, key, default):
 FGN_LATENT_TEMPORAL_MODES = {"stepwise", "persistent"}
 FGN_AR_STATE_UPDATE_MODES = {"mean_feedback", "member_feedback"}
 BOUNDARY_SOURCE_MODES = {"member_hdf", "clean_family"}
+STRUCTURAL_DRY_POLICIES = {"legacy_full_domain", "masked_primary"}
+STRUCTURAL_DRY_MASK_DEFINITIONS = {"exact_zero"}
 DEFAULT_CLEAN_BOUNDARY_FILES = {
     "train": "Hydrographs_Train_Clean.txt",
     "val": "Hydrographs_Val_Clean.txt",
@@ -162,6 +165,183 @@ def normalize_boundary_source(value, default="member_hdf"):
         default=default,
         allowed=BOUNDARY_SOURCE_MODES,
         label="boundary_source",
+    )
+
+
+def normalize_structural_dry_policy(value, default="legacy_full_domain"):
+    return _normalize_choice(
+        value,
+        default=default,
+        allowed=STRUCTURAL_DRY_POLICIES,
+        label="structural_dry.policy",
+    )
+
+
+def normalize_structural_dry_mask_definition(value, default="exact_zero"):
+    return _normalize_choice(
+        value,
+        default=default,
+        allowed=STRUCTURAL_DRY_MASK_DEFINITIONS,
+        label="structural_dry.mask_definition",
+    )
+
+
+def _resolve_normalizer_path_from_config(
+    config,
+    *,
+    allow_data_root_fallback: bool = False,
+):
+    data_cfg = _cfg_get(config, "data", None)
+    normalizer_path = _cfg_get(data_cfg, "normalizer_path", None)
+    if normalizer_path is None:
+        if not allow_data_root_fallback:
+            return None
+        root = _cfg_get(data_cfg, "normalizer_root", None) or _cfg_get(data_cfg, "root", None)
+        if root is None:
+            return None
+        return (Path(str(root)).resolve() / "normalizers_depth_only.pt").resolve()
+
+    p = Path(str(normalizer_path))
+    if p.is_absolute():
+        return p.resolve()
+    normalizer_root = _cfg_get(data_cfg, "normalizer_root", None)
+    if normalizer_root is not None:
+        return (Path(str(normalizer_root)).resolve() / p).resolve()
+    if allow_data_root_fallback:
+        data_root = _cfg_get(data_cfg, "root", None)
+        if data_root is not None:
+            return (Path(str(data_root)).resolve() / p).resolve()
+    raise ValueError(
+        "Relative data.normalizer_path requires data.normalizer_root. "
+        "Refusing to resolve structural-dry artifacts against data.root in this mode."
+    )
+
+
+def resolve_structural_dry_artifact_path(
+    config,
+    *,
+    normalizer_path=None,
+    allow_data_root_fallback: bool = False,
+):
+    structural_cfg = _cfg_get(config, "structural_dry", None)
+    mask_definition = normalize_structural_dry_mask_definition(
+        _cfg_get(structural_cfg, "mask_definition", "exact_zero")
+    )
+    explicit_mask_path = _cfg_get(structural_cfg, "mask_path", None)
+    resolved_normalizer_path = None
+    if normalizer_path is not None:
+        resolved_normalizer_path = Path(str(normalizer_path)).resolve()
+    else:
+        resolved_normalizer_path = _resolve_normalizer_path_from_config(
+            config,
+            allow_data_root_fallback=allow_data_root_fallback,
+        )
+
+    if explicit_mask_path is not None:
+        mask_path = Path(str(explicit_mask_path))
+        if not mask_path.is_absolute():
+            if resolved_normalizer_path is not None:
+                base_dir = (
+                    resolved_normalizer_path.parent
+                    if resolved_normalizer_path.suffix
+                    else resolved_normalizer_path
+                )
+            elif allow_data_root_fallback:
+                data_root = _cfg_get(_cfg_get(config, "data", None), "root", None)
+                if data_root is None:
+                    raise ValueError(
+                        "Relative structural_dry.mask_path requires either an explicit normalizer path "
+                        "or data.root fallback."
+                    )
+                base_dir = Path(str(data_root)).resolve()
+            else:
+                raise ValueError(
+                    "Relative structural_dry.mask_path requires an explicit normalizer path or "
+                    "data.normalizer_root."
+                )
+            mask_path = (base_dir / mask_path).resolve()
+    else:
+        if resolved_normalizer_path is not None:
+            base_dir = (
+                resolved_normalizer_path.parent
+                if resolved_normalizer_path.suffix
+                else resolved_normalizer_path
+            )
+        elif allow_data_root_fallback:
+            data_root = _cfg_get(_cfg_get(config, "data", None), "root", None)
+            if data_root is None:
+                raise ValueError(
+                    "Unable to resolve default structural-dry artifact path without data.root."
+                )
+            base_dir = Path(str(data_root)).resolve()
+        else:
+            raise ValueError(
+                "Unable to resolve structural-dry artifact path without a normalizer path."
+            )
+        mask_path = (base_dir / f"structural_dry_mask_{mask_definition}.pt").resolve()
+
+    summary_path = mask_path.with_name(f"{mask_path.stem}_summary.json")
+    return mask_path, summary_path
+
+
+def get_structural_dry_policy_kwargs(
+    config,
+    *,
+    normalizer_path=None,
+    allow_data_root_fallback: bool = False,
+):
+    structural_cfg = _cfg_get(config, "structural_dry", None)
+    policy = normalize_structural_dry_policy(
+        _cfg_get(structural_cfg, "policy", "legacy_full_domain")
+    )
+    mask_definition = normalize_structural_dry_mask_definition(
+        _cfg_get(structural_cfg, "mask_definition", "exact_zero")
+    )
+    artifact_path = summary_path = None
+    if policy == "masked_primary":
+        artifact_path, summary_path = resolve_structural_dry_artifact_path(
+            config,
+            normalizer_path=normalizer_path,
+            allow_data_root_fallback=allow_data_root_fallback,
+        )
+    return {
+        "policy": policy,
+        "mask_definition": mask_definition,
+        "artifact_path": artifact_path,
+        "summary_path": summary_path,
+        "report_full_domain_secondary": bool(
+            _cfg_get(structural_cfg, "report_full_domain_secondary", True)
+        ),
+        "report_dry_background_secondary": bool(
+            _cfg_get(structural_cfg, "report_dry_background_secondary", True)
+        ),
+    }
+
+
+def wait_for_structural_dry_artifact(
+    artifact_path,
+    *,
+    timeout_seconds: float = 7200.0,
+    poll_interval_seconds: float = 5.0,
+):
+    from neuralop.flood.data.structural_dry import load_structural_dry_artifact
+
+    artifact_path = Path(str(artifact_path)).resolve()
+    deadline = time.monotonic() + float(timeout_seconds)
+    last_error = None
+    while time.monotonic() < deadline:
+        if artifact_path.exists():
+            try:
+                return load_structural_dry_artifact(artifact_path)
+            except Exception as exc:  # pragma: no cover - race-safe polling
+                last_error = exc
+        time.sleep(float(poll_interval_seconds))
+    if last_error is not None:
+        raise RuntimeError(
+            f"Timed out waiting for a readable structural-dry artifact at {artifact_path}."
+        ) from last_error
+    raise TimeoutError(
+        f"Timed out waiting for structural-dry artifact to appear at {artifact_path}."
     )
 
 

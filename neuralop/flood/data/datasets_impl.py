@@ -128,6 +128,7 @@ class FloodDatasetHDF(Dataset):
         self.static_data = None
         self.cell_point_index = None  # index into full-cell arrays to get Cell Points subset
         self.sample_index = []
+        self.structural_dry_mask = None
         self._load_static_and_build_indices()
 
     def _hdf_file(self, run_id: str) -> Path:
@@ -233,6 +234,20 @@ class FloodDatasetHDF(Dataset):
     def __len__(self):
         return len(self.sample_index)
 
+    def set_structural_dry_mask(self, dry_mask: torch.Tensor | np.ndarray | None):
+        if dry_mask is None:
+            self.structural_dry_mask = None
+            return
+        mask = torch.as_tensor(dry_mask, dtype=torch.bool, device="cpu").reshape(-1)
+        if self.reference_cell_count is None:
+            raise RuntimeError("reference_cell_count is not initialized yet.")
+        if int(mask.numel()) != int(self.reference_cell_count):
+            raise ValueError(
+                f"structural_dry_mask length {mask.numel()} does not match reference_cell_count "
+                f"{self.reference_cell_count}."
+            )
+        self.structural_dry_mask = mask
+
     def __getitem__(self, idx):
         run_id, target_t = self.sample_index[idx]
         t0 = target_t - self.n_history
@@ -276,7 +291,7 @@ class FloodDatasetHDF(Dataset):
         boundary_sequence = torch.stack(boundary_sequence_list, dim=0)
         in_geom = self.xy_coords if self.xy_coords is not None else torch.tensor(geom, device="cpu", dtype=torch.float32)
         static_feats = self.static_data
-        return {
+        out = {
             "geometry": in_geom,
             "static": static_feats,
             "boundary": bc_hist,
@@ -287,6 +302,9 @@ class FloodDatasetHDF(Dataset):
             "run_id": run_id,
             "time_index": target_t,
         }
+        if self.structural_dry_mask is not None:
+            out["structural_dry_mask"] = self.structural_dry_mask
+        return out
 
 
 def _pad_or_truncate(arr: np.ndarray, size: int) -> np.ndarray:
@@ -373,6 +391,7 @@ class FloodRolloutTestDatasetHDF(Dataset):
         self.static_data = None
         self.cell_point_index = None
         self._reference_cell_count = None
+        self.structural_dry_mask = None
         self._load_static_and_validate_runs()
 
     def _hdf_file(self, run_id: str) -> Path:
@@ -458,6 +477,20 @@ class FloodRolloutTestDatasetHDF(Dataset):
     def __len__(self):
         return len(self.valid_run_ids)
 
+    def set_structural_dry_mask(self, dry_mask: torch.Tensor | np.ndarray | None):
+        if dry_mask is None:
+            self.structural_dry_mask = None
+            return
+        mask = torch.as_tensor(dry_mask, dtype=torch.bool, device="cpu").reshape(-1)
+        if self._reference_cell_count is None:
+            raise RuntimeError("_reference_cell_count is not initialized yet.")
+        if int(mask.numel()) != int(self._reference_cell_count):
+            raise ValueError(
+                f"structural_dry_mask length {mask.numel()} does not match reference cell count "
+                f"{self._reference_cell_count}."
+            )
+        self.structural_dry_mask = mask
+
     def __getitem__(self, idx):
         run_id = self.valid_run_ids[idx]
         hpath = self._hdf_file(run_id)
@@ -472,13 +505,16 @@ class FloodRolloutTestDatasetHDF(Dataset):
         flow_col = flow_col[:, np.newaxis, :]  # (n_time, 1, 1) for broadcast over cells
         boundary = np.broadcast_to(flow_col, (n_time, n_cells, 1))
         boundary = torch.tensor(boundary, device="cpu", dtype=torch.float32)
-        return {
+        out = {
             "run_id": run_id,
             "dynamic": dynamic,
             "boundary": boundary,
             "geometry": self.geometry,
             "static": self.static,
         }
+        if self.structural_dry_mask is not None:
+            out["structural_dry_mask"] = self.structural_dry_mask
+        return out
 
 
 ###############################################################################

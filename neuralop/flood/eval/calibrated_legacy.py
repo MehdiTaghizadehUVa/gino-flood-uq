@@ -3517,6 +3517,15 @@ def main() -> int:
     _validate_args(args)
     cli_config_path = _resolve_cli_config_path(_get_cli_arg_value("--config_path"))
     config, device, is_logger = load_config_and_setup()
+    structural_policy = str(
+        _opt(config, "structural_dry", "policy", "legacy_full_domain")
+    ).strip().lower()
+    if structural_policy != "legacy_full_domain":
+        raise ValueError(
+            "Legacy calibrated evaluation only supports structural_dry.policy="
+            "'legacy_full_domain'. Use the maintained evaluation app for "
+            "'masked_primary'."
+        )
     device = _resolve_device(device)
     seed = _opt(config, "distributed", "seed", 123)
     deterministic = _opt(config, None, "deterministic", True)

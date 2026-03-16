@@ -8,6 +8,7 @@ from torch.utils.data import Dataset
 from tqdm import tqdm
 
 from neuralop.data.transforms.normalizers import UnitGaussianNormalizer
+from neuralop.flood.data.structural_dry import dry_mask_to_wettable_mask
 
 def collect_all_fields(dataset, expect_target=True):
     geometry_list = []
@@ -29,7 +30,65 @@ def collect_all_fields(dataset, expect_target=True):
 ###############################################################################
 # 4b) Streaming normalizer fit (avoids stacking full dataset in RAM)
 ###############################################################################
-def fit_normalizers_streaming(dataset, chunk_size=1000, expect_target=True):
+class _MaskedChannelAccumulator:
+    """Streaming per-channel stats over the wettable domain."""
+
+    def __init__(self):
+        self.sum = None
+        self.sq_sum = None
+        self.count = None
+
+    def update(self, batch: torch.Tensor, dry_mask: torch.Tensor) -> None:
+        batch = batch.to(dtype=torch.float32)
+        dry_mask = torch.as_tensor(dry_mask, dtype=torch.bool, device=batch.device)
+        wettable = dry_mask_to_wettable_mask(dry_mask)
+        if batch.ndim == 3:
+            if wettable.ndim == 1:
+                wettable = wettable.unsqueeze(0).expand(batch.shape[0], -1)
+            expanded = wettable.unsqueeze(-1).to(dtype=batch.dtype)
+        elif batch.ndim == 4:
+            if wettable.ndim == 1:
+                wettable = wettable.unsqueeze(0).expand(batch.shape[0], -1)
+            expanded = wettable.unsqueeze(1).unsqueeze(-1).to(dtype=batch.dtype)
+        else:
+            raise ValueError(
+                f"Masked water-state normalization only supports 3D/4D batches, got {tuple(batch.shape)}."
+            )
+        expanded = expanded.expand_as(batch)
+        masked = batch * expanded
+        reduce_dims = tuple(range(batch.ndim - 1))
+        chunk_sum = masked.sum(dim=reduce_dims)
+        chunk_sq_sum = masked.pow(2).sum(dim=reduce_dims)
+        chunk_count = expanded.sum(dim=reduce_dims)
+        if self.sum is None:
+            self.sum = chunk_sum
+            self.sq_sum = chunk_sq_sum
+            self.count = chunk_count
+        else:
+            self.sum = self.sum + chunk_sum
+            self.sq_sum = self.sq_sum + chunk_sq_sum
+            self.count = self.count + chunk_count
+
+    def to_normalizer(self) -> UnitGaussianNormalizer:
+        if self.sum is None or self.sq_sum is None or self.count is None:
+            raise RuntimeError("No masked water-state samples were accumulated.")
+        count = self.count.clamp_min(1.0)
+        mean = self.sum / count
+        var = torch.clamp((self.sq_sum / count) - mean.pow(2), min=0.0)
+        std = torch.sqrt(var)
+        return UnitGaussianNormalizer(
+            mean=mean.view(1, 1, -1),
+            std=std.view(1, 1, -1),
+            dim=[0, 1],
+        )
+
+
+def fit_normalizers_streaming(
+    dataset,
+    chunk_size=1000,
+    expect_target=True,
+    structural_dry_policy: str = "legacy_full_domain",
+):
     """
     Fit UnitGaussianNormalizers by iterating over the dataset in chunks.
     Returns a dict of normalizers (geometry, static, boundary, dynamic, target)
@@ -56,11 +115,15 @@ def fit_normalizers_streaming(dataset, chunk_size=1000, expect_target=True):
     active_keys_dims = [(k, d) for (k, d) in keys_dims if not (k == "target" and not expect_target)]
     normalizers = {k: UnitGaussianNormalizer(dim=d) for (k, d) in active_keys_dims}
     fitted = {k: False for (k, _) in active_keys_dims}
+    masked_primary = str(structural_dry_policy).strip().lower() == "masked_primary"
+    water_state_accum = _MaskedChannelAccumulator() if (masked_primary and expect_target) else None
 
     for start in tqdm(range(0, n, chunk_size), desc="Fitting normalizers (single pass)", leave=False):
         end = min(start + chunk_size, n)
         chunk_samples = [dataset[i] for i in range(start, end)]
         for key, _ in active_keys_dims:
+            if masked_primary and key == "target":
+                continue
             vals = [s.get(key, None) for s in chunk_samples]
             vals = [v for v in vals if v is not None]
             if not vals:
@@ -74,8 +137,25 @@ def fit_normalizers_streaming(dataset, chunk_size=1000, expect_target=True):
             else:
                 normalizers[key].partial_fit(batch, batch_size=batch.shape[0])
             del batch
+        if water_state_accum is not None:
+            target_vals = [s.get("target", None) for s in chunk_samples]
+            target_vals = [v for v in target_vals if v is not None]
+            dry_masks = [s.get("structural_dry_mask", None) for s in chunk_samples]
+            dry_masks = [m for m in dry_masks if m is not None]
+            if target_vals and len(dry_masks) == len(target_vals):
+                target_batch = torch.stack(target_vals, dim=0)
+                dry_batch = torch.stack([torch.as_tensor(m, dtype=torch.bool) for m in dry_masks], dim=0)
+                water_state_accum.update(target_batch, dry_batch)
+                dynamic_vals = [s.get("dynamic", None) for s in chunk_samples]
+                dynamic_vals = [v for v in dynamic_vals if v is not None]
+                if dynamic_vals and len(dynamic_vals) == len(target_vals):
+                    dynamic_batch = torch.stack(dynamic_vals, dim=0)
+                    water_state_accum.update(dynamic_batch, dry_batch)
         del chunk_samples
 
+    if water_state_accum is not None:
+        normalizers["target"] = water_state_accum.to_normalizer()
+        fitted["target"] = True
     if "target" in normalizers:
         # Dynamic channels mirror selected target channels, so they share normalizer stats.
         normalizers["dynamic"] = normalizers["target"]
@@ -173,6 +253,8 @@ class NormalizedDatasetOnTheFly(Dataset):
             out["boundary_sequence"] = self._normalize("boundary", bs)
         elif "boundary_sequence" in sample and sample["boundary_sequence"] is not None:
             out["boundary_sequence"] = sample["boundary_sequence"]
+        if "structural_dry_mask" in sample and sample["structural_dry_mask"] is not None:
+            out["structural_dry_mask"] = sample["structural_dry_mask"]
         # Latent queries must be in the same (normalized) coordinate system as geometry for GNO.
         out["query_points"] = self._query_points
         return out
@@ -206,5 +288,6 @@ class NormalizedRolloutTestDataset(Dataset):
 
     def __getitem__(self, idx):
         sample = self.normalized_samples[idx]
-        sample["query_points"] = self.query_points
-        return sample
+        out = dict(sample)
+        out["query_points"] = self.query_points
+        return out

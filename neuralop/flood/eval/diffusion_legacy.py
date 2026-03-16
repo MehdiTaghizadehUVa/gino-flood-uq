@@ -355,6 +355,15 @@ def main() -> int:
     if not config_path.is_absolute():
         config_path = (_REPO_ROOT / config_path).resolve()
     config = _load_config(config_path)
+    structural_policy = str(
+        safe_get(safe_get(config, "structural_dry", {}), "policy", "legacy_full_domain")
+    ).strip().lower()
+    if structural_policy != "legacy_full_domain":
+        raise ValueError(
+            "Legacy diffusion evaluation only supports structural_dry.policy="
+            "'legacy_full_domain'. Use the maintained evaluation app for "
+            "'masked_primary'."
+        )
 
     device = _resolve_device(config)
     log_file = safe_get(config, "log_file", "eval_diffusion.log")

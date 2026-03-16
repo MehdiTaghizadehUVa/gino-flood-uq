@@ -60,6 +60,13 @@ flood: &FLOOD
       - "M40_CU.txt"
       - "M40_FA.txt"
 
+  structural_dry:
+    policy: "legacy_full_domain"
+    mask_path: null
+    mask_definition: "exact_zero"
+    report_full_domain_secondary: true
+    report_dry_background_secondary: true
+
   gino:
     data_channels: 20   # overwritten at runtime for diffusion conditioning channels
     out_channels: 1     # depth-only

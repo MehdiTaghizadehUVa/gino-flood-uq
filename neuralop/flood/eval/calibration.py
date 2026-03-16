@@ -116,6 +116,7 @@ def _fit_wd_leadtime_calibration_from_hydrographs(
     sigma_pred_by_t: List[List[np.ndarray]] = [[] for _ in range(rollout_length)]
     mu_ref_by_t: List[List[np.ndarray]] = [[] for _ in range(rollout_length)]
     sigma_ref_by_t: List[List[np.ndarray]] = [[] for _ in range(rollout_length)]
+    domain_mask_by_t: List[List[np.ndarray]] = [[] for _ in range(rollout_length)]
 
     for sample in tqdm(hydrograph_samples, desc="Calibration rollout (hydrograph)"):
         static_0 = sample["static"].to(device).unsqueeze(0)
@@ -126,6 +127,17 @@ def _fit_wd_leadtime_calibration_from_hydrographs(
 
         gt_rollout_ref = dynamic_ref[:, start_pred_t:end_pred_t]
         gt_boundary_rollout = full_boundary[start_pred_t:end_pred_t]
+        structural_dry_mask = sample.get("structural_dry_mask")
+        if structural_dry_mask is not None:
+            structural_dry_mask = (
+                torch.as_tensor(structural_dry_mask, dtype=torch.bool)
+                .reshape(-1)
+                .cpu()
+                .numpy()
+            )
+            structural_wettable_mask = ~structural_dry_mask
+        else:
+            structural_wettable_mask = None
 
         init_history = dynamic_ref[:, skip_before_timestep:start_pred_t].mean(dim=0)
         if use_ensemble:
@@ -265,6 +277,10 @@ def _fit_wd_leadtime_calibration_from_hydrographs(
             sigma_pred_by_t[t].append(np.std(pred_wd, axis=0, ddof=0))
             mu_ref_by_t[t].append(np.mean(gt_wd, axis=0))
             sigma_ref_by_t[t].append(np.std(gt_wd, axis=0, ddof=0))
+            if structural_wettable_mask is not None:
+                domain_mask_by_t[t].append(
+                    np.asarray(structural_wettable_mask, dtype=bool).copy()
+                )
 
             if use_ensemble:
                 if state_stack is None:
@@ -310,6 +326,11 @@ def _fit_wd_leadtime_calibration_from_hydrographs(
         _flatten_by_lead(sigma_pred_by_t, "sigma_pred"),
         _flatten_by_lead(mu_ref_by_t, "mu_ref"),
         _flatten_by_lead(sigma_ref_by_t, "sigma_ref"),
+        domain_mask_by_t=(
+            _flatten_by_lead(domain_mask_by_t, "domain_mask")
+            if any(domain_mask_by_t[t] for t in range(rollout_length))
+            else None
+        ),
         fit_wet_threshold=float(fit_wet_threshold),
         min_pred_std=float(min_pred_std),
         c_clip_min=float(c_clip_min),

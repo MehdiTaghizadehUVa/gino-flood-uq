@@ -10,6 +10,10 @@ import torch
 from torch.utils.data import DataLoader, Subset, random_split
 
 from neuralop.data.transforms.normalizers import load_normalizers
+from neuralop.flood.data.structural_dry import (
+    load_structural_dry_artifact,
+    validate_structural_dry_artifact,
+)
 from neuralop.flood.data.wv import (
     FloodDatasetHDF,
     FloodRolloutTestDatasetHDF,
@@ -27,6 +31,7 @@ from neuralop.flood.eval.runtime import (
 )
 from neuralop.flood.utils.runtime import (
     get_dataset_boundary_kwargs,
+    get_structural_dry_policy_kwargs,
     make_split_generator,
     parse_target_variables,
 )
@@ -36,7 +41,7 @@ def _load_or_fit_normalizers(
     train_data: Any,
     save_dir: Path,
     logger: logging.Logger,
-) -> Dict[str, Any]:
+) -> Tuple[Dict[str, Any], Path]:
     """
     Load pre-fit normalizers from training-data location only.
 
@@ -68,7 +73,51 @@ def _load_or_fit_normalizers(
             f"Training normalizer file not found: {normalizer_path}"
         )
     with _PhaseTimer(logger, f"Loading normalizers from {normalizer_path}"):
-        return load_normalizers(normalizer_path, device=None)
+        return load_normalizers(normalizer_path, device=None), normalizer_path
+
+
+def _set_dataset_structural_dry_mask(dataset: Any, dry_mask: torch.Tensor | None) -> None:
+    if dry_mask is None:
+        return
+    if hasattr(dataset, "set_structural_dry_mask"):
+        dataset.set_structural_dry_mask(dry_mask)
+        return
+    if hasattr(dataset, "dataset"):
+        _set_dataset_structural_dry_mask(dataset.dataset, dry_mask)
+        return
+    raise TypeError(f"Dataset of type {type(dataset)!r} does not support structural_dry_mask injection.")
+
+
+def _load_structural_dry_artifact_for_eval(
+    config: Any,
+    *,
+    normalizer_path: Path,
+    expected_cell_count: int | None = None,
+    expected_run_ids: List[str] | None = None,
+    logger: logging.Logger | None = None,
+) -> Tuple[Dict[str, Any], Dict[str, Any] | None]:
+    policy_kwargs = get_structural_dry_policy_kwargs(
+        config,
+        normalizer_path=normalizer_path,
+        allow_data_root_fallback=False,
+    )
+    if policy_kwargs["policy"] != "masked_primary":
+        return policy_kwargs, None
+    artifact = load_structural_dry_artifact(policy_kwargs["artifact_path"])
+    artifact = validate_structural_dry_artifact(
+        artifact,
+        expected_cell_count=expected_cell_count,
+        expected_run_ids=expected_run_ids,
+    )
+    if logger is not None:
+        logger.info(
+            "Loaded structural-dry artifact policy=%s n_dry=%d n_wettable=%d from %s",
+            policy_kwargs["policy"],
+            artifact["n_dry"],
+            artifact["n_wettable"],
+            policy_kwargs["artifact_path"],
+        )
+    return policy_kwargs, artifact
 
 
 def _build_one_step_datasets(
@@ -150,20 +199,23 @@ def _build_rollout_normalized_dataset(
     normalizers: Dict[str, Any],
     target_variables: List[str],
     logger: logging.Logger,
+    structural_dry_artifact: Dict[str, Any] | None = None,
+    split_txt: str | None = None,
+    split_name: str = "test",
+    config_section: str = "rollout_data",
 ) -> Tuple[Any, Optional[List[Dict[str, Any]]]]:
     """Build rollout dataset and optional grouped hydrograph samples."""
+    cfg = getattr(config, config_section)
     rollout_length = config.data.rollout_length
     history_steps = config.data.n_history
     skip = _opt(config, "data", "skip_before_timestep", 0)
     target_indices = [CHANNEL_INDEX[v] for v in target_variables]
-    rollout_static = _opt(
-        config, "rollout_data", "static_text_files", DEFAULT_STATIC_FILES
-    )
+    rollout_static = _opt(config, config_section, "static_text_files", DEFAULT_STATIC_FILES)
     if not isinstance(rollout_static, list):
         rollout_static = list(rollout_static)
 
     with _PhaseTimer(logger, "Building rollout test dataset"):
-        rollout_boundary_kwargs = get_dataset_boundary_kwargs(config.rollout_data, split="test")
+        rollout_boundary_kwargs = get_dataset_boundary_kwargs(cfg, split=split_name)
         logger.info(
             "Rollout dataset boundary_source=%s%s",
             rollout_boundary_kwargs["boundary_source"],
@@ -172,17 +224,19 @@ def _build_rollout_normalized_dataset(
             else "",
         )
         rds = FloodRolloutTestDatasetHDF(
-            rollout_data_root=config.rollout_data.root,
+            rollout_data_root=cfg.root,
             n_history=history_steps,
             rollout_length=rollout_length,
             run_ids=None,
-            test_txt=_opt(config, "rollout_data", "test_txt", "test.txt"),
+            test_txt=split_txt or _opt(config, config_section, "test_txt", "test.txt"),
             static_text_files=rollout_static,
             hdf_suffix=".hdf",
             raise_on_smaller=True,
             skip_before_timestep=skip,
             **rollout_boundary_kwargs,
         )
+    if structural_dry_artifact is not None:
+        rds.set_structural_dry_mask(structural_dry_artifact["dry_mask"])
 
     groups = group_run_ids_by_hydrograph(rds.valid_run_ids)
     sims_per_hydro = [len(v) for v in groups.values()] if groups else []
@@ -227,6 +281,11 @@ def _build_rollout_normalized_dataset(
             "static": static_big[i],
             "boundary": boundary_big[i],
             "dynamic": dynamic_big[i],
+            **(
+                {"structural_dry_mask": structural_dry_artifact["dry_mask"]}
+                if structural_dry_artifact is not None
+                else {}
+            ),
         }
         for i in range(len(rds))
     ]
@@ -254,6 +313,11 @@ def _build_rollout_normalized_dataset(
                     "dynamic_ref": torch.stack([dynamic_big[i] for i in indices], dim=0),
                     "query_points": query_points,
                     "n_ref_sims": len(indices),
+                    **(
+                        {"structural_dry_mask": structural_dry_artifact["dry_mask"]}
+                        if structural_dry_artifact is not None
+                        else {}
+                    ),
                 }
             )
         logger.info(

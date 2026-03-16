@@ -18,6 +18,69 @@ from neuralop.flood.visualization.publication import (
     generate_publication_maps,
 )
 
+
+def _structural_masks_from_sample(sample, *, expected_cells):
+    dry_mask = sample.get("structural_dry_mask")
+    if dry_mask is None:
+        return None, None
+    dry_mask = torch.as_tensor(dry_mask, dtype=torch.bool, device="cpu").reshape(-1).numpy()
+    if dry_mask.size != expected_cells:
+        raise ValueError(
+            f"structural_dry_mask has {dry_mask.size} cells, expected {expected_cells}."
+        )
+    return dry_mask, ~dry_mask
+
+
+def _select_cells(arr, mask):
+    if mask is None:
+        return np.asarray(arr)
+    return np.asarray(arr)[..., mask]
+
+
+def _masked_mean(arr, mask):
+    selected = _select_cells(arr, mask)
+    if selected.size == 0:
+        return 0.0
+    return float(np.mean(selected))
+
+
+def _masked_rmse(pred, gt, mask):
+    diff = np.asarray(pred) - np.asarray(gt)
+    return float(np.sqrt(_masked_mean(diff ** 2, mask)))
+
+
+def _masked_mae(pred, gt, mask):
+    return _masked_mean(np.abs(np.asarray(pred) - np.asarray(gt)), mask)
+
+
+def _masked_csi(threshold, pred, gt, mask):
+    pred_sel = _select_cells(pred, mask)
+    gt_sel = _select_cells(gt, mask)
+    event_pred = pred_sel >= threshold
+    event_gt = gt_sel >= threshold
+    tp = np.sum(event_pred & event_gt)
+    fp = np.sum(event_pred & (~event_gt))
+    fn = np.sum((~event_pred) & event_gt)
+    return tp / (tp + fp + fn) if (tp + fp + fn) > 0 else 1.0
+
+
+def _dry_falsewet_rate(pred, dry_mask, threshold):
+    if dry_mask is None or not np.any(dry_mask):
+        return 0.0
+    pred_sel = _select_cells(pred, dry_mask)
+    if pred_sel.size == 0:
+        return 0.0
+    return float(np.mean(pred_sel > float(threshold)))
+
+
+def _dry_pred_std_mean(pred_std, dry_mask):
+    if dry_mask is None or not np.any(dry_mask):
+        return 0.0
+    pred_sel = _select_cells(pred_std, dry_mask)
+    if pred_sel.size == 0:
+        return 0.0
+    return float(np.mean(pred_sel))
+
 def rollout_prediction(
         trainer,
         rollout_dataset,
@@ -63,13 +126,25 @@ def rollout_prediction(
     # Containers to aggregate metrics from all rollout samples
     aggregated_rmse, aggregated_csi_005, aggregated_csi_03 = [], [], []
     aggregated_rmse_vx, aggregated_rmse_vy = [], []
+    aggregated_rmse_full, aggregated_csi_005_full, aggregated_csi_03_full = [], [], []
+    aggregated_rmse_vx_full, aggregated_rmse_vy_full = [], []
     aggregated_spread_wd, aggregated_spread_vx, aggregated_spread_vy = [], [], []
+    aggregated_spread_wd_full, aggregated_spread_vx_full, aggregated_spread_vy_full = [], [], []
+    aggregated_dry_rmse_wd, aggregated_dry_mae_wd = [], []
+    aggregated_dry_falsewet_001_wd, aggregated_dry_falsewet_005_wd = [], []
+    aggregated_dry_pred_std_mean_wd = []
+    structural_mask_active = False
 
     for idx, sample in enumerate(tqdm(rollout_dataset, desc="Performing rollout evaluation")):
         run_id = sample.get("run_id", f"sample_{idx}")
         full_dynamic = sample["dynamic"].to(device)
         full_boundary = sample["boundary"].to(device)
         geometry = sample["geometry"]
+        dry_mask_np, wettable_mask_np = _structural_masks_from_sample(
+            sample,
+            expected_cells=int(full_dynamic.shape[1]),
+        )
+        structural_mask_active = structural_mask_active or (wettable_mask_np is not None)
 
         start_pred_t = skip_before_timestep + history_steps
         end_pred_t = start_pred_t + rollout_length
@@ -82,7 +157,13 @@ def rollout_prediction(
         # Containers for per-run metrics
         run_rmse, run_csi_005, run_csi_03 = [], [], []
         run_rmse_vx, run_rmse_vy = [], []
+        run_rmse_full, run_csi_005_full, run_csi_03_full = [], [], []
+        run_rmse_vx_full, run_rmse_vy_full = [], []
         run_spread_wd, run_spread_vx, run_spread_vy = [], [], []
+        run_spread_wd_full, run_spread_vx_full, run_spread_vy_full = [], [], []
+        run_dry_rmse_wd, run_dry_mae_wd = [], []
+        run_dry_falsewet_001_wd, run_dry_falsewet_005_wd = [], []
+        run_dry_pred_std_mean_wd = []
 
         use_fgn_ensemble = fgn_noise_dim is not None and n_ens > 1
         if (use_gaussian and n_ens > 1) or use_fgn_ensemble:
@@ -222,16 +303,32 @@ def rollout_prediction(
 
             # --- Compute metrics for the current step ---
             # Water Depth metrics
-            run_rmse.append(np.sqrt(np.mean((wd_pred - wd_gt) ** 2)))
-            run_csi_005.append(compute_csi(0.05, wd_pred, wd_gt))
-            run_csi_03.append(compute_csi(0.3, wd_pred, wd_gt))
+            run_rmse.append(_masked_rmse(wd_pred, wd_gt, wettable_mask_np))
+            run_csi_005.append(_masked_csi(0.05, wd_pred, wd_gt, wettable_mask_np))
+            run_csi_03.append(_masked_csi(0.3, wd_pred, wd_gt, wettable_mask_np))
+            run_rmse_full.append(_masked_rmse(wd_pred, wd_gt, None))
+            run_csi_005_full.append(_masked_csi(0.05, wd_pred, wd_gt, None))
+            run_csi_03_full.append(_masked_csi(0.3, wd_pred, wd_gt, None))
 
             # Velocity metrics
-            run_rmse_vx.append(np.sqrt(np.mean((vx_pred - vx_gt) ** 2)))
-            run_rmse_vy.append(np.sqrt(np.mean((vy_pred - vy_gt) ** 2)))
-            run_spread_wd.append(float(np.mean(np.std(wd_ens, axis=0))))
-            run_spread_vx.append(float(np.mean(np.std(vx_ens, axis=0))))
-            run_spread_vy.append(float(np.mean(np.std(vy_ens, axis=0))))
+            run_rmse_vx.append(_masked_rmse(vx_pred, vx_gt, wettable_mask_np))
+            run_rmse_vy.append(_masked_rmse(vy_pred, vy_gt, wettable_mask_np))
+            run_rmse_vx_full.append(_masked_rmse(vx_pred, vx_gt, None))
+            run_rmse_vy_full.append(_masked_rmse(vy_pred, vy_gt, None))
+            wd_spread = np.std(wd_ens, axis=0)
+            vx_spread = np.std(vx_ens, axis=0)
+            vy_spread = np.std(vy_ens, axis=0)
+            run_spread_wd.append(_masked_mean(wd_spread, wettable_mask_np))
+            run_spread_vx.append(_masked_mean(vx_spread, wettable_mask_np))
+            run_spread_vy.append(_masked_mean(vy_spread, wettable_mask_np))
+            run_spread_wd_full.append(_masked_mean(wd_spread, None))
+            run_spread_vx_full.append(_masked_mean(vx_spread, None))
+            run_spread_vy_full.append(_masked_mean(vy_spread, None))
+            run_dry_rmse_wd.append(_masked_rmse(wd_pred, wd_gt, dry_mask_np))
+            run_dry_mae_wd.append(_masked_mae(wd_pred, wd_gt, dry_mask_np))
+            run_dry_falsewet_001_wd.append(_dry_falsewet_rate(wd_pred, dry_mask_np, 0.01))
+            run_dry_falsewet_005_wd.append(_dry_falsewet_rate(wd_pred, dry_mask_np, 0.05))
+            run_dry_pred_std_mean_wd.append(_dry_pred_std_mean(wd_spread, dry_mask_np))
 
             # Update state for next step
             if use_gaussian:
@@ -264,9 +361,22 @@ def rollout_prediction(
         aggregated_csi_03.append(np.array(run_csi_03))
         aggregated_rmse_vx.append(np.array(run_rmse_vx))
         aggregated_rmse_vy.append(np.array(run_rmse_vy))
+        aggregated_rmse_full.append(np.array(run_rmse_full))
+        aggregated_csi_005_full.append(np.array(run_csi_005_full))
+        aggregated_csi_03_full.append(np.array(run_csi_03_full))
+        aggregated_rmse_vx_full.append(np.array(run_rmse_vx_full))
+        aggregated_rmse_vy_full.append(np.array(run_rmse_vy_full))
         aggregated_spread_wd.append(np.array(run_spread_wd))
         aggregated_spread_vx.append(np.array(run_spread_vx))
         aggregated_spread_vy.append(np.array(run_spread_vy))
+        aggregated_spread_wd_full.append(np.array(run_spread_wd_full))
+        aggregated_spread_vx_full.append(np.array(run_spread_vx_full))
+        aggregated_spread_vy_full.append(np.array(run_spread_vy_full))
+        aggregated_dry_rmse_wd.append(np.array(run_dry_rmse_wd))
+        aggregated_dry_mae_wd.append(np.array(run_dry_mae_wd))
+        aggregated_dry_falsewet_001_wd.append(np.array(run_dry_falsewet_001_wd))
+        aggregated_dry_falsewet_005_wd.append(np.array(run_dry_falsewet_005_wd))
+        aggregated_dry_pred_std_mean_wd.append(np.array(run_dry_pred_std_mean_wd))
 
         generate_publication_maps(
             geometry=geometry,
@@ -300,6 +410,22 @@ def rollout_prediction(
             'spread_vx': np.stack(aggregated_spread_vx),
             'spread_vy': np.stack(aggregated_spread_vy),
         }
+        if structural_mask_active:
+            metrics.update({
+                'rmse_wd_full_domain': np.stack(aggregated_rmse_full),
+                'csi_005_full_domain': np.stack(aggregated_csi_005_full),
+                'csi_03_full_domain': np.stack(aggregated_csi_03_full),
+                'rmse_vx_full_domain': np.stack(aggregated_rmse_vx_full),
+                'rmse_vy_full_domain': np.stack(aggregated_rmse_vy_full),
+                'spread_wd_full_domain': np.stack(aggregated_spread_wd_full),
+                'spread_vx_full_domain': np.stack(aggregated_spread_vx_full),
+                'spread_vy_full_domain': np.stack(aggregated_spread_vy_full),
+                'dry_background_rmse_wd': np.stack(aggregated_dry_rmse_wd),
+                'dry_background_mae_wd': np.stack(aggregated_dry_mae_wd),
+                'dry_background_falsewet_rate_001_wd': np.stack(aggregated_dry_falsewet_001_wd),
+                'dry_background_falsewet_rate_005_wd': np.stack(aggregated_dry_falsewet_005_wd),
+                'dry_background_pred_std_mean_wd': np.stack(aggregated_dry_pred_std_mean_wd),
+            })
         stats = {key: {'mean': arr.mean(axis=0), 'std': arr.std(axis=0)} for key, arr in metrics.items()}
 
         time_hours = (np.arange(1, rollout_length + 1) * dt) / 3600.0

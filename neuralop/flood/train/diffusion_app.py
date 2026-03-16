@@ -420,16 +420,13 @@ def main() -> int:
             )
 
             if run is not None:
-                wandb.log(
-                    {
-                        "epoch": epoch,
-                        "train/loss_epoch": train_loss_epoch,
-                        "val/loss": val_stats["val_loss"],
-                        "val/rmse_norm": val_stats["val_rmse_norm"],
-                        "val/rmse_phys": val_stats["val_rmse_phys"],
-                    },
-                    step=global_step,
-                )
+                payload = {
+                    "epoch": epoch,
+                    "train/loss_epoch": train_loss_epoch,
+                }
+                for key, value in val_stats.items():
+                    payload[f"val/{key}"] = value
+                wandb.log(payload, step=global_step)
 
             improved = val_stats["val_loss"] < best_val_loss
             checkpoint_best_val_loss = float(
