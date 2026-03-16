@@ -24,7 +24,8 @@ def _make_training_stack(seed: int):
     np.random.seed(seed)
     torch.manual_seed(seed)
     dataset = DummyDataset(32)
-    loader = DataLoader(dataset, batch_size=8, shuffle=False)
+    generator = torch.Generator().manual_seed(seed)
+    loader = DataLoader(dataset, batch_size=8, shuffle=True, generator=generator)
     model = DummyModel(50)
     optimizer = torch.optim.SGD(model.parameters(), lr=0.05)
     scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=1, gamma=0.9)
@@ -62,6 +63,26 @@ def test_training_state_restores_rng_progression(tmp_path):
     assert random.random() == expected_python
     assert float(np.random.rand()) == expected_numpy
     assert torch.equal(torch.rand(4), expected_torch)
+
+
+def test_load_training_state_accepts_torch_device_map_location(tmp_path):
+    save_dir = tmp_path / "map_location"
+    model = DummyModel(50)
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+    save_training_state(save_dir=save_dir, save_name="model", model=model, optimizer=optimizer, epoch=0)
+
+    restored_model = DummyModel(50)
+    restored_optimizer = torch.optim.Adam(restored_model.parameters(), lr=1e-3)
+    load_training_state(
+        save_dir=save_dir,
+        save_name="model",
+        model=restored_model,
+        optimizer=restored_optimizer,
+        map_location={"cpu": torch.device("cpu")},
+    )
+
+    for expected, actual in zip(model.parameters(), restored_model.parameters()):
+        assert torch.equal(expected, actual)
 
 
 def test_trainer_resume_restores_stochastic_training_progression(tmp_path):

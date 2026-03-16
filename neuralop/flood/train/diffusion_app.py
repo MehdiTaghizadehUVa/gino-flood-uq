@@ -44,7 +44,7 @@ from neuralop.flood.utils.diffusion_script_utils import (
     shutdown_dataloader_workers,
 )
 from neuralop.flood.utils.runtime import parse_target_variables, set_seed, setup_logging
-from neuralop.training.determinism import restore_rng_state
+from neuralop.training.determinism import restore_rng_state, seed_dataloader_for_epoch
 
 def main() -> int:
     config = _load_config(_REPO_ROOT / "config" / "gino_pluvial_flood_config_WV_depth_only_diffusion.yaml")
@@ -322,6 +322,8 @@ def main() -> int:
 
             if train_sampler is not None:
                 train_sampler.set_epoch(epoch)
+            else:
+                seed_dataloader_for_epoch(train_loader, base_seed=seed, epoch=epoch)
 
             train_iter = train_loader
             pbar = None

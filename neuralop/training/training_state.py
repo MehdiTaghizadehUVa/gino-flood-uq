@@ -12,6 +12,20 @@ from neuralop.mpu.comm import get_local_rank
 from .determinism import collect_rng_state_across_ranks, restore_rng_state
 
 
+def _normalize_map_location(map_location):
+    """Make torch.load map_location robust to torch.device values."""
+    if isinstance(map_location, torch.device):
+        return str(map_location)
+    if isinstance(map_location, dict):
+        normalized = {}
+        for src, dst in map_location.items():
+            norm_src = str(src) if isinstance(src, torch.device) else src
+            norm_dst = str(dst) if isinstance(dst, torch.device) else dst
+            normalized[norm_src] = norm_dst
+        return normalized
+    return map_location
+
+
 def load_training_state(save_dir: Union[str, Path], 
                         save_name: str,
                         model: nn.Module,
@@ -54,6 +68,7 @@ def load_training_state(save_dir: Union[str, Path],
             map_location = {"cuda:0": f"cuda:{get_local_rank()}"}
         else:
             map_location = "cpu"
+    map_location = _normalize_map_location(map_location)
 
     if isinstance(save_dir, str):
         save_dir = Path(save_dir)

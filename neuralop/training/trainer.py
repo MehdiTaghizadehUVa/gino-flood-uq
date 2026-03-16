@@ -19,7 +19,11 @@ except ModuleNotFoundError:
     wandb_available = False
 
 from neuralop.losses import LpLoss
-from .determinism import deterministic_seed_context, stable_seed_from_parts
+from .determinism import (
+    deterministic_seed_context,
+    seed_dataloader_for_epoch,
+    stable_seed_from_parts,
+)
 from .training_state import load_training_state, save_training_state
 
 try:
@@ -51,6 +55,7 @@ class Trainer:
         grad_accum_steps: int=1,
         deterministic_eval: bool=False,
         eval_seed: int | None=None,
+        train_seed: int | None=None,
     ):
         """
         Parameters
@@ -95,6 +100,7 @@ class Trainer:
         self.grad_accum_steps = max(1, int(grad_accum_steps))
         self.deterministic_eval = bool(deterministic_eval)
         self.eval_seed = None if eval_seed is None else int(eval_seed)
+        self.train_seed = int(torch.initial_seed()) if train_seed is None else int(train_seed)
         # handle autocast device
         if isinstance(self.device, torch.device):
             self.autocast_device_type = self.device.type
@@ -284,6 +290,8 @@ class Trainer:
 
         if self.use_distributed and hasattr(train_loader, "sampler") and hasattr(train_loader.sampler, "set_epoch"):
             train_loader.sampler.set_epoch(epoch)
+        elif self.train_seed is not None:
+            seed_dataloader_for_epoch(train_loader, base_seed=self.train_seed, epoch=epoch)
 
         use_pbar = (
             self.verbose

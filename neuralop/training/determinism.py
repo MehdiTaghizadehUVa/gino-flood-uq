@@ -145,3 +145,33 @@ def deterministic_seed_context(seed: int | None):
         yield
     finally:
         restore_rng_state(previous_state)
+
+
+def seed_sampler_for_epoch(sampler: Any, *, base_seed: int | None, epoch: int) -> bool:
+    """Seed sampler-local RNG from an epoch-stable seed for reproducible resumes."""
+    if sampler is None or base_seed is None:
+        return False
+
+    if not hasattr(sampler, "generator"):
+        return False
+
+    generator = getattr(sampler, "generator", None)
+    if generator is None:
+        generator = torch.Generator()
+        sampler.generator = generator
+
+    generator.manual_seed(stable_seed_from_parts("train_sampler", int(base_seed), int(epoch)))
+    return True
+
+
+def seed_dataloader_for_epoch(loader: Any, *, base_seed: int | None, epoch: int) -> bool:
+    if loader is None or base_seed is None:
+        return False
+
+    sampler = getattr(loader, "sampler", None)
+    if seed_sampler_for_epoch(sampler, base_seed=base_seed, epoch=epoch):
+        return True
+
+    batch_sampler = getattr(loader, "batch_sampler", None)
+    nested_sampler = getattr(batch_sampler, "sampler", None)
+    return seed_sampler_for_epoch(nested_sampler, base_seed=base_seed, epoch=epoch)
