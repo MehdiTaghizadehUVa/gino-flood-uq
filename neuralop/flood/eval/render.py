@@ -16,6 +16,7 @@ import torch
 
 from neuralop.flood.eval.metrics import (
     _build_member_model_indices,
+    _compute_csi,
     _median_positive_step,
     _nanmax_floor,
     _pit_rank_counts_from_reference,
@@ -149,13 +150,6 @@ def _save_generic_rollout_visuals(
     )
     ani.save(os.path.join(out_dir, f"rollout_{rid}.gif"), writer="pillow", fps=ANIMATION_FPS)
     plt.close(fig)
-
-
-def _compute_csi(threshold: float, pred: np.ndarray, gt: np.ndarray) -> float:
-    """Critical Success Index at given threshold."""
-    event_pred = pred >= threshold
-    event_gt = gt >= threshold
-    tp = np.sum(event_pred & event_gt)
 
 def _adaptive_marker_size(
     x: np.ndarray,

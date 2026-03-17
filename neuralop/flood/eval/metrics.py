@@ -121,6 +121,12 @@ def _build_eval_losses(config: Any, use_fgn: bool) -> Dict[str, Any]:
         out["falsewet_rate_005_dry_background_wd"] = FloodDryBackgroundFalseWetRate(0.05)
     return out
 
+
+def _compute_csi(threshold: float, pred: np.ndarray, gt: np.ndarray) -> float:
+    """Critical Success Index at a given threshold."""
+    event_pred = np.asarray(pred) >= float(threshold)
+    event_gt = np.asarray(gt) >= float(threshold)
+    tp = np.sum(event_pred & event_gt)
     fp = np.sum(event_pred & (~event_gt))
     fn = np.sum((~event_pred) & event_gt)
     denom = tp + fp + fn
