@@ -13,6 +13,22 @@ except:
     pass
 
 
+def _build_neighbor_row_splits(nbrhd_sizes: torch.Tensor, device: torch.device) -> torch.Tensor:
+    """Build CSR row splits, avoiding unsupported CUDA deterministic cumsum kernels."""
+    cumsum_input = nbrhd_sizes
+    if nbrhd_sizes.is_cuda and torch.are_deterministic_algorithms_enabled():
+        cumsum_input = nbrhd_sizes.cpu()
+
+    nbrhd_sizes_cumsum = torch.cumsum(cumsum_input, dim=0)
+    splits = torch.cat(
+        (torch.zeros(1, device=nbrhd_sizes_cumsum.device, dtype=nbrhd_sizes_cumsum.dtype), nbrhd_sizes_cumsum),
+        dim=0,
+    )
+    if splits.device != device:
+        splits = splits.to(device=device)
+    return splits
+
+
 def native_neighbor_search(data: torch.Tensor, queries: torch.Tensor, radius: float):
     """
     Native PyTorch implementation of a neighborhood search
@@ -37,25 +53,19 @@ def native_neighbor_search(data: torch.Tensor, queries: torch.Tensor, radius: fl
             - 'neighbor_counts': Tensor of shape (num_queries,) with the number of neighbors for each query
     """
     # Compute pairwise distances between queries and data points
-    dists = torch.cdist(queries, data).to(queries.device)  # (num_queries, num_data_points)
+    dists = torch.cdist(queries, data)  # (num_queries, num_data_points)
 
     # Create a binary mask where True indicates the data point is within the radius of the query
-    in_nbr = (dists <= radius).float()  # (num_queries, num_data_points)
+    in_nbr = dists <= radius  # (num_queries, num_data_points)
 
     # Extract the indices of data points that are neighbors to any query
     nbr_indices = in_nbr.nonzero(as_tuple=False)[:, 1]  # (total_num_neighbors,)
 
     # Compute the number of neighbors for each query
-    nbrhd_sizes = torch.sum(in_nbr, dim=1)  # (num_queries,)
+    nbrhd_sizes = torch.sum(in_nbr, dim=1, dtype=torch.long)  # (num_queries,)
 
-    # Compute cumulative sum to create row splits
-    nbrhd_sizes_cumsum = torch.cumsum(nbrhd_sizes, dim=0)  # (num_queries,)
-
-    # Create row splits by prepending a zero
-    splits = torch.cat(
-        (torch.tensor([0], device=queries.device, dtype=nbrhd_sizes_cumsum.dtype),
-         nbrhd_sizes_cumsum)
-    )
+    # Compute row splits in a deterministic-safe way when CUDA determinism is enabled.
+    splits = _build_neighbor_row_splits(nbrhd_sizes, device=queries.device)
 
     # Calculate the average number of neighbors per query
     total_neighbors = torch.sum(nbrhd_sizes)
@@ -63,7 +73,7 @@ def native_neighbor_search(data: torch.Tensor, queries: torch.Tensor, radius: fl
     if num_queries == 0:
         average_num_neighbors = torch.tensor(0.0, device=queries.device)
     else:
-        average_num_neighbors = total_neighbors / num_queries
+        average_num_neighbors = total_neighbors.to(torch.float32) / num_queries
 
     # Prepare the neighborhood dictionary
     nbr_dict = {

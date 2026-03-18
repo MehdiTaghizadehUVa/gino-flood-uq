@@ -28,6 +28,35 @@ def test_fallback_nb_search():
     mesh_grid = np.stack(np.meshgrid(*[np.linspace(0,1,5) for _ in range(2)], indexing="ij"), axis=-1)
     coords = torch.Tensor(mesh_grid.reshape(-1,2)) # reshape into n**d x d coord points
     return_dict = native_neighbor_search(data=coords, queries=coords, radius=0.3)
-    
+
     assert return_dict['neighbors_index'].tolist() == indices
     assert return_dict['neighbors_row_splits'].tolist() == splits
+
+
+def test_fallback_nb_search_with_deterministic_algorithms_cpu():
+    mesh_grid = np.stack(np.meshgrid(*[np.linspace(0, 1, 5) for _ in range(2)], indexing="ij"), axis=-1)
+    coords = torch.tensor(mesh_grid.reshape(-1, 2), dtype=torch.float32)
+    prev = torch.are_deterministic_algorithms_enabled()
+    torch.use_deterministic_algorithms(True)
+    try:
+        return_dict = native_neighbor_search(data=coords, queries=coords, radius=0.3)
+    finally:
+        torch.use_deterministic_algorithms(prev)
+
+    assert return_dict["neighbors_index"].tolist() == indices
+    assert return_dict["neighbors_row_splits"].tolist() == splits
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
+def test_fallback_nb_search_with_deterministic_algorithms_cuda():
+    mesh_grid = np.stack(np.meshgrid(*[np.linspace(0, 1, 5) for _ in range(2)], indexing="ij"), axis=-1)
+    coords = torch.tensor(mesh_grid.reshape(-1, 2), dtype=torch.float32, device="cuda")
+    prev = torch.are_deterministic_algorithms_enabled()
+    torch.use_deterministic_algorithms(True)
+    try:
+        return_dict = native_neighbor_search(data=coords, queries=coords, radius=0.3)
+    finally:
+        torch.use_deterministic_algorithms(prev)
+
+    assert return_dict["neighbors_index"].cpu().tolist() == indices
+    assert return_dict["neighbors_row_splits"].cpu().tolist() == splits
