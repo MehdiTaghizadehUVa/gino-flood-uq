@@ -36,6 +36,8 @@ from neuralop.flood.eval.runtime import (
     ROLLOUT_SUMMARY_HYDRO_PNG,
     ROLLOUT_SUMMARY_PNG,
     UQ_EXCEEDANCE_THRESHOLD,
+    _opt,
+    _opt_float,
 )
 from neuralop.flood.train.operator import (
     FGNTrainer,

@@ -33,6 +33,7 @@ from neuralop.flood.eval.runtime import (
     UQ_BOXPLOT_PNG,
     UQ_EXCEEDANCE_THRESHOLD,
     UQ_INTERVAL_COVERAGE_PNG,
+    UQ_OVERALL_JSON,
     UQ_PIT_RANK_PNG,
     UQ_RELIABILITY_PNG,
     UQ_SPREAD_SKILL_PNG,

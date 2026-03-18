@@ -23,12 +23,13 @@ from neuralop.flood.data.wv import (
 from neuralop.flood.eval.runtime import (
     CHANNEL_INDEX,
     DEFAULT_STATIC_FILES,
-    DEVICE_REF_KEYS,
-    NORMALIZER_KEYS,
     TRAIN_FRAC,
     _PhaseTimer,
     _opt,
+    _move_normalizers_to_device,
+    group_run_ids_by_hydrograph,
 )
+from neuralop.flood.eval.metrics import _build_query_points_from_geometry
 from neuralop.flood.utils.runtime import (
     get_dataset_boundary_kwargs,
     get_structural_dry_policy_kwargs,

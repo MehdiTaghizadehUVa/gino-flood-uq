@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import logging
 import re
 import sys
@@ -12,6 +13,10 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import torch
+
+from neuralop import get_model
+from neuralop.models.base_model import BaseModel
+from neuralop.training.training_state import load_training_state
 
 CHECKPOINT_BEST = "best_model"
 CHECKPOINT_LAST = "model"
@@ -44,6 +49,7 @@ UQ_VAR_DECOMP_PNG = "uq_variance_decomposition_wd.png"
 DEFAULT_EVAL_LOG = "eval_post_training.log"
 HYDROGRAPH_SIM_PATTERN = re.compile(r"^(.+)_sim(\d+)$")
 UQ_EXCEEDANCE_THRESHOLD = 0.05
+_REPO_ROOT = Path(__file__).resolve().parents[3]
 
 def _opt(config: Any, section: Optional[str], key: str, default: Any) -> Any:
     """Get config.section.key with default. Use section=None for top-level config keys."""
