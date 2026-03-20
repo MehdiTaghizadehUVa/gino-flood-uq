@@ -26,8 +26,14 @@ from neuralop.flood.data.wv import (
     FloodRolloutTestDatasetHDF,
     NormalizedDatasetOnTheFly,
     NormalizedRolloutTestDataset,
+    build_normalizer_metadata,
     collect_all_fields,
-    fit_normalizers_streaming,
+    fit_normalizers,
+    load_normalizer_metadata,
+    normalizer_metadata_matches,
+    resolve_normalizer_fit_method,
+    resolve_normalizer_metadata_path,
+    save_normalizer_metadata,
 )
 from neuralop.flood.losses import (
     FloodDryBackgroundFalseWetRate,
@@ -291,20 +297,65 @@ def main():
     # No leakage: normalizers are fit only on train_data_raw. Test data is transformed with
     # train-fit stats in NormalizedDatasetOnTheFly; evaluation uses model.eval() and torch.no_grad().
     # Normalizers: load from disk if path exists and is set; otherwise fit and optionally save
-    if normalizer_path is not None and normalizer_path.exists():
+    normalizer_fit_method = resolve_normalizer_fit_method(
+        train_data_raw,
+        method=_cfg_get(config.data, "normalizer_fit_method", "auto"),
+        structural_dry_policy=structural_dry_policy["policy"],
+    )
+    expected_normalizer_metadata = build_normalizer_metadata(
+        train_data_raw,
+        structural_dry_policy=structural_dry_policy["policy"],
+        fit_method=normalizer_fit_method,
+    )
+    metadata_path = (
+        resolve_normalizer_metadata_path(normalizer_path)
+        if normalizer_path is not None
+        else None
+    )
+    can_load_cached_normalizers = (
+        normalizer_path is not None
+        and normalizer_path.exists()
+        and metadata_path is not None
+        and metadata_path.exists()
+        and normalizer_metadata_matches(
+            expected_normalizer_metadata,
+            load_normalizer_metadata(metadata_path),
+        )
+    )
+    if can_load_cached_normalizers:
         normalizers = load_normalizers(normalizer_path, device=None)
-        logger.info("Loaded normalizers from %s", normalizer_path)
+        logger.info(
+            "Loaded normalizers from %s (method=%s)",
+            normalizer_path,
+            normalizer_fit_method,
+        )
     else:
         norm_chunk_size = _cfg_get(config.data, "normalizer_chunk_size", 10000)
-        normalizers = fit_normalizers_streaming(
+        normalizers, normalizer_fit_method = fit_normalizers(
             train_data_raw,
             chunk_size=norm_chunk_size,
             expect_target=True,
             structural_dry_policy=structural_dry_policy["policy"],
+            method=normalizer_fit_method,
+            return_method=True,
         )
         if normalizer_path is not None:
             save_normalizers(normalizers, normalizer_path)
-            logger.info("Saved normalizers to %s", normalizer_path)
+            if metadata_path is not None:
+                save_normalizer_metadata(
+                    metadata_path,
+                    build_normalizer_metadata(
+                        train_data_raw,
+                        structural_dry_policy=structural_dry_policy["policy"],
+                        fit_method=normalizer_fit_method,
+                    ),
+                )
+            logger.info(
+                "Saved normalizers to %s (method=%s)",
+                normalizer_path,
+                normalizer_fit_method,
+            )
+    logger.info("normalizer_fit_method=%s", normalizer_fit_method)
 
     train_normalized_dataset = NormalizedDatasetOnTheFly(
         train_data_raw, normalizers, query_res=config.data.query_res

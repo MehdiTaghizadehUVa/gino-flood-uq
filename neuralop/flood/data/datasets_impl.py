@@ -14,6 +14,7 @@ from neuralop.flood.data.hec_ras import (
     HDF_PATHS,
     build_cell_point_index,
     get_hec_ras_hdf_shape,
+    read_hec_ras_hdf_run_series,
     h5py,
     read_hec_ras_hdf_slice,
     read_hec_ras_hdf_static,
@@ -149,6 +150,7 @@ class FloodDatasetHDF(Dataset):
         self.static_data = None
         self.cell_point_index = None  # index into full-cell arrays to get Cell Points subset
         self.sample_index = []
+        self.run_time_steps = {}
         self.structural_dry_mask = None
         self._load_static_and_build_indices()
 
@@ -261,6 +263,7 @@ class FloodDatasetHDF(Dataset):
             start_t = max(self.n_history, self.skip_before_timestep)
             # For AR training we need target_t + ar_rollout_steps <= n_time (exclusive end: indices up to n_time-1)
             end_t = n_time - self.ar_rollout_steps + 1
+            self.run_time_steps[run_id] = int(n_time)
             for t in range(start_t, end_t):
                 self.sample_index.append((run_id, t))
 
@@ -286,6 +289,28 @@ class FloodDatasetHDF(Dataset):
         else:
             warnings.warn(f"Unknown noise_type {self.noise_type}, skipping.")
         return dynamic_hist
+
+    def _load_run_aligned_arrays(self, run_id: str) -> dict[str, np.ndarray]:
+        """Load aligned full-run target and boundary arrays without window materialization."""
+        hpath = self._hdf_file(run_id)
+        if not hpath.exists():
+            raise FileNotFoundError(f"HDF not found for run {run_id!r}: {hpath}")
+        wd, vx, vy, inflow = read_hec_ras_hdf_run_series(
+            hpath,
+            self.hdf_paths,
+            cell_index=self.cell_point_index,
+            boundary_channels=self._member_hdf_boundary_spec,
+        )
+        n_time = int(self.run_time_steps.get(run_id, wd.shape[0]))
+        boundary = self._resolve_boundary_matrix(run_id, inflow, slice_start=0, slice_end=n_time)
+        target_all = [wd, vx, vy]
+        target = np.stack([target_all[i] for i in self.target_indices], axis=-1).astype(np.float32, copy=False)
+        return {
+            "target": target,
+            "boundary": boundary.astype(np.float32, copy=False),
+            "n_time": n_time,
+            "n_cells": int(target.shape[1]),
+        }
 
     def __len__(self):
         return len(self.sample_index)

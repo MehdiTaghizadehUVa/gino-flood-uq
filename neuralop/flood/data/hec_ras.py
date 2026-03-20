@@ -158,6 +158,48 @@ def read_hec_ras_hdf_slice(
     return geom, wd, vx, vy, inflow
 
 
+def read_hec_ras_hdf_run_series(
+    hdf_path: Path,
+    paths: dict = None,
+    cell_index: np.ndarray = None,
+    boundary_channels: list[dict] | None = None,
+) -> tuple:
+    """
+    Read full-run time series from a HEC-RAS 2D result HDF file without loading geometry.
+
+    Returns
+    -------
+    wd, vx, vy : np.ndarray (T, n_cell_points)
+    inflow : np.ndarray (T, bc_dim)
+    """
+    if h5py is None:
+        raise ImportError("h5py is required for HDF data. Install with: pip install h5py")
+    paths = paths or HDF_PATHS
+    with h5py.File(hdf_path, "r") as f:
+        wd = np.asarray(f[paths["wd"]][:, :], dtype=np.float32)
+        vx = np.asarray(f[paths["vx"]][:, :], dtype=np.float32)
+        vy = np.asarray(f[paths["vy"]][:, :], dtype=np.float32)
+        if cell_index is not None:
+            wd = wd[:, cell_index]
+            vx = vx[:, cell_index]
+            vy = vy[:, cell_index]
+
+        resolved_boundary_channels = _resolve_member_hdf_boundary_channels(
+            boundary_channels, paths
+        )
+        n_time = wd.shape[0]
+        inflow_list = [
+            _read_boundary_channel_slice(f, channel, t0=0, t1=n_time)
+            for channel in resolved_boundary_channels
+        ]
+        inflow = (
+            np.concatenate(inflow_list, axis=1)
+            if inflow_list
+            else np.zeros((n_time, 0), dtype=np.float32)
+        )
+    return wd, vx, vy, inflow
+
+
 def get_hec_ras_hdf_shape(hdf_path: Path, paths: dict = None) -> tuple:
     """Return (n_cell_points, n_time). n_cell_points = Cell Points count (geometry)."""
     if h5py is None:

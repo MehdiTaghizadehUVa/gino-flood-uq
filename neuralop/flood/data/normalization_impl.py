@@ -2,9 +2,16 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
+import subprocess
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
 import numpy as np
 import torch
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, Subset
 from tqdm import tqdm
 
 from neuralop.data.transforms.normalizers import UnitGaussianNormalizer
@@ -81,6 +88,322 @@ class _MaskedChannelAccumulator:
             std=std.view(1, 1, -1),
             dim=[0, 1],
         )
+
+
+class _ExactChannelAccumulator:
+    """Exact per-channel moments with streaming-compatible std semantics."""
+
+    def __init__(self, *, view_shape, dim):
+        self.view_shape = tuple(view_shape)
+        self.dim = list(dim)
+        self.sum = None
+        self.sq_sum = None
+        self.count = 0.0
+
+    def update(self, sum_vec, sq_sum_vec, count: float) -> None:
+        sum_arr = np.asarray(sum_vec, dtype=np.float64)
+        sq_sum_arr = np.asarray(sq_sum_vec, dtype=np.float64)
+        if self.sum is None:
+            self.sum = sum_arr
+            self.sq_sum = sq_sum_arr
+        else:
+            self.sum = self.sum + sum_arr
+            self.sq_sum = self.sq_sum + sq_sum_arr
+        self.count += float(count)
+
+    def to_normalizer(self) -> UnitGaussianNormalizer:
+        if self.sum is None or self.sq_sum is None or self.count <= 0:
+            raise RuntimeError("No samples were accumulated for exact normalizer fitting.")
+        count = float(max(self.count, 1.0))
+        mean = self.sum / count
+        var = np.clip((self.sq_sum / count) - np.square(mean), a_min=0.0, a_max=None)
+        std = np.sqrt(var)
+        if count > 1.0:
+            # Match UnitGaussianNormalizer.incremental_update_mean_std semantics.
+            std = std * (count / (count - 1.0))
+        mean_t = torch.as_tensor(mean, dtype=torch.float32).reshape(self.view_shape)
+        std_t = torch.as_tensor(std, dtype=torch.float32).reshape(self.view_shape)
+        return UnitGaussianNormalizer(mean=mean_t, std=std_t, dim=self.dim)
+
+
+def _repo_git_sha() -> str | None:
+    repo_root = Path(__file__).resolve().parents[3]
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=repo_root,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=2.0,
+        )
+    except Exception:
+        return None
+    sha = result.stdout.strip()
+    return sha or None
+
+
+def _json_safe(value: Any):
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, dict):
+        return {str(k): _json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(v) for v in value]
+    if isinstance(value, np.generic):
+        return value.item()
+    return value
+
+
+def _resolve_base_dataset_and_indices(dataset):
+    selected = None
+    current = dataset
+    while isinstance(current, Subset):
+        current_indices = np.asarray(current.indices, dtype=np.int64)
+        if selected is None:
+            selected = current_indices
+        else:
+            selected = selected[current_indices]
+        current = current.dataset
+    if selected is None:
+        selected = np.arange(len(current), dtype=np.int64)
+    return current, selected
+
+
+def _supports_fast_exact(dataset, structural_dry_policy: str) -> bool:
+    if str(structural_dry_policy).strip().lower() != "legacy_full_domain":
+        return False
+    base_dataset, _ = _resolve_base_dataset_and_indices(dataset)
+    return all(
+        hasattr(base_dataset, attr)
+        for attr in (
+            "sample_index",
+            "xy_coords",
+            "static_data",
+            "boundary_spec",
+            "target_variables",
+            "_load_run_aligned_arrays",
+        )
+    )
+
+
+def resolve_normalizer_fit_method(
+    dataset,
+    *,
+    method: str = "auto",
+    structural_dry_policy: str = "legacy_full_domain",
+) -> str:
+    normalized = str(method or "auto").strip().lower()
+    if normalized not in {"auto", "fast_exact", "streaming"}:
+        raise ValueError(
+            f"Unknown normalizer fit method {method!r}. Expected one of ['auto', 'fast_exact', 'streaming']."
+        )
+    if normalized == "streaming":
+        return "streaming"
+    supported = _supports_fast_exact(dataset, structural_dry_policy)
+    if normalized == "auto":
+        return "fast_exact" if supported else "streaming"
+    if not supported:
+        raise ValueError(
+            "fast_exact normalizer fitting is only supported for maintained FloodDatasetHDF "
+            "(or Subset[FloodDatasetHDF]) with structural_dry.policy='legacy_full_domain'."
+        )
+    return "fast_exact"
+
+
+def _count_boundary_history_usage(target_indices: np.ndarray, *, n_history: int, n_time: int) -> np.ndarray:
+    diff = np.zeros(int(n_time) + 1, dtype=np.int64)
+    for target_t in np.asarray(target_indices, dtype=np.int64):
+        start = int(target_t) - int(n_history)
+        end = int(target_t)
+        diff[start] += 1
+        diff[end] -= 1
+    return np.cumsum(diff[:-1], dtype=np.int64)
+
+
+def fit_normalizers_fast_exact(
+    dataset,
+    *,
+    expect_target: bool = True,
+    structural_dry_policy: str = "legacy_full_domain",
+):
+    if str(structural_dry_policy).strip().lower() != "legacy_full_domain":
+        raise ValueError(
+            "fast_exact normalizer fitting currently supports only structural_dry.policy='legacy_full_domain'."
+        )
+
+    base_dataset, selected_indices = _resolve_base_dataset_and_indices(dataset)
+    if len(selected_indices) == 0:
+        return {}
+    if not _supports_fast_exact(dataset, structural_dry_policy):
+        raise ValueError(
+            "fast_exact normalizer fitting requires maintained FloodDatasetHDF accessors."
+        )
+
+    sample_count = int(selected_indices.shape[0])
+    geometry = torch.as_tensor(base_dataset.xy_coords, dtype=torch.float32).cpu().numpy()
+    static = torch.as_tensor(base_dataset.static_data, dtype=torch.float32).cpu().numpy()
+    n_cells = int(geometry.shape[0])
+
+    normalizers = {
+        "geometry": _ExactChannelAccumulator(view_shape=(1, 1, geometry.shape[1]), dim=[0, 1]),
+        "static": _ExactChannelAccumulator(view_shape=(1, 1, static.shape[1]), dim=[0, 1]),
+        "boundary": _ExactChannelAccumulator(view_shape=(1, 1, 1, len(base_dataset.boundary_spec)), dim=[0, 1, 2]),
+    }
+    if expect_target:
+        normalizers["target"] = _ExactChannelAccumulator(
+            view_shape=(1, 1, len(base_dataset.target_variables)),
+            dim=[0, 1],
+        )
+
+    geom64 = geometry.astype(np.float64, copy=False)
+    static64 = static.astype(np.float64, copy=False)
+    repeated_count = float(sample_count * n_cells)
+    normalizers["geometry"].update(
+        sample_count * geom64.sum(axis=0),
+        sample_count * np.square(geom64).sum(axis=0),
+        repeated_count,
+    )
+    normalizers["static"].update(
+        sample_count * static64.sum(axis=0),
+        sample_count * np.square(static64).sum(axis=0),
+        repeated_count,
+    )
+
+    grouped_by_run: dict[str, list[int]] = {}
+    for sample_idx in np.asarray(selected_indices, dtype=np.int64):
+        run_id, target_t = base_dataset.sample_index[int(sample_idx)]
+        grouped_by_run.setdefault(str(run_id), []).append(int(target_t))
+
+    for run_id, target_ts in grouped_by_run.items():
+        run_payload = base_dataset._load_run_aligned_arrays(run_id)
+        target_counts = np.bincount(
+            np.asarray(target_ts, dtype=np.int64),
+            minlength=int(run_payload["n_time"]),
+        ).astype(np.float64, copy=False)
+
+        if expect_target:
+            target = np.asarray(run_payload["target"], dtype=np.float64)
+            normalizers["target"].update(
+                np.einsum("t,tnc->c", target_counts, target),
+                np.einsum("t,tnc->c", target_counts, np.square(target)),
+                float(target_counts.sum() * run_payload["n_cells"]),
+            )
+
+        boundary = np.asarray(run_payload["boundary"], dtype=np.float64)
+        boundary_counts = _count_boundary_history_usage(
+            np.asarray(target_ts, dtype=np.int64),
+            n_history=int(base_dataset.n_history),
+            n_time=int(run_payload["n_time"]),
+        ).astype(np.float64, copy=False)
+        normalizers["boundary"].update(
+            np.einsum("t,tc->c", boundary_counts, boundary) * float(run_payload["n_cells"]),
+            np.einsum("t,tc->c", boundary_counts, np.square(boundary)) * float(run_payload["n_cells"]),
+            float(boundary_counts.sum() * run_payload["n_cells"]),
+        )
+
+    out = {key: acc.to_normalizer() for key, acc in normalizers.items()}
+    if "target" in out:
+        out["dynamic"] = out["target"]
+    return out
+
+
+def fit_normalizers(
+    dataset,
+    chunk_size=1000,
+    expect_target=True,
+    structural_dry_policy: str = "legacy_full_domain",
+    method: str = "auto",
+    return_method: bool = False,
+):
+    resolved_method = resolve_normalizer_fit_method(
+        dataset,
+        method=method,
+        structural_dry_policy=structural_dry_policy,
+    )
+    if resolved_method == "fast_exact":
+        normalizers = fit_normalizers_fast_exact(
+            dataset,
+            expect_target=expect_target,
+            structural_dry_policy=structural_dry_policy,
+        )
+    else:
+        normalizers = fit_normalizers_streaming(
+            dataset,
+            chunk_size=chunk_size,
+            expect_target=expect_target,
+            structural_dry_policy=structural_dry_policy,
+        )
+    if return_method:
+        return normalizers, resolved_method
+    return normalizers
+
+
+def resolve_normalizer_metadata_path(normalizer_path: Path | str) -> Path:
+    path = Path(normalizer_path)
+    return path.with_name(f"{path.stem}.metadata.json")
+
+
+def build_normalizer_metadata(
+    dataset,
+    *,
+    structural_dry_policy: str,
+    fit_method: str,
+) -> dict[str, Any]:
+    base_dataset, selected_indices = _resolve_base_dataset_and_indices(dataset)
+    boundary_spec = _json_safe(getattr(base_dataset, "boundary_spec", None))
+    boundary_spec_payload = json.dumps(boundary_spec, sort_keys=True, separators=(",", ":"))
+    split_indices = np.asarray(selected_indices, dtype=np.int64)
+    return {
+        "fit_method": str(fit_method),
+        "dataset_root": str(getattr(base_dataset, "data_root", "")),
+        "dataset_class": type(base_dataset).__name__,
+        "structural_dry_policy": str(structural_dry_policy),
+        "target_variables": list(_json_safe(getattr(base_dataset, "target_variables", []))),
+        "static_text_files": list(_json_safe(getattr(base_dataset, "static_text_files", []))),
+        "boundary_spec": boundary_spec,
+        "boundary_spec_fingerprint": hashlib.sha256(boundary_spec_payload.encode("utf-8")).hexdigest(),
+        "split_sample_count": int(split_indices.shape[0]),
+        "split_fingerprint": hashlib.sha256(split_indices.tobytes()).hexdigest(),
+        "code_version": _repo_git_sha(),
+    }
+
+
+def normalizer_metadata_matches(expected: dict[str, Any], actual: dict[str, Any] | None) -> bool:
+    if actual is None:
+        return False
+    stable_keys = (
+        "fit_method",
+        "dataset_root",
+        "dataset_class",
+        "structural_dry_policy",
+        "target_variables",
+        "static_text_files",
+        "boundary_spec_fingerprint",
+        "split_sample_count",
+        "split_fingerprint",
+        "code_version",
+    )
+    return all(actual.get(key) == expected.get(key) for key in stable_keys)
+
+
+def load_normalizer_metadata(metadata_path: Path | str) -> dict[str, Any] | None:
+    path = Path(metadata_path)
+    if not path.exists():
+        return None
+    with path.open("r", encoding="utf-8") as handle:
+        return json.load(handle)
+
+
+def save_normalizer_metadata(metadata_path: Path | str, metadata: dict[str, Any]) -> Path:
+    path = Path(metadata_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = dict(metadata)
+    payload["created_at_utc"] = datetime.now(timezone.utc).isoformat()
+    with path.open("w", encoding="utf-8") as handle:
+        json.dump(payload, handle, indent=2, sort_keys=True)
+        handle.write("\n")
+    return path
 
 
 def fit_normalizers_streaming(

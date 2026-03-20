@@ -183,7 +183,11 @@ def _resolve_normalizer_path(config: Any) -> Optional[Path]:
         return None
     p = Path(str(normalizer_path))
     if not p.is_absolute():
-        p = Path(str(safe_get(safe_get(config, "data", {}), "root", "."))) / p
+        normalizer_root = safe_get(safe_get(config, "data", {}), "normalizer_root", None)
+        if normalizer_root is not None:
+            p = Path(str(normalizer_root)) / p
+        else:
+            p = Path(str(safe_get(safe_get(config, "data", {}), "root", "."))) / p
     return p.resolve()
 
 def _configure_denoiser(
