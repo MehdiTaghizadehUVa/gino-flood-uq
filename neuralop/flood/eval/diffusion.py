@@ -23,7 +23,7 @@ from neuralop.flood.eval.rollout import (  # noqa: E402
     _rollout_prediction_generic,
     _rollout_prediction_per_hydrograph,
 )
-from neuralop.flood.eval.runtime import _opt  # noqa: E402
+from neuralop.flood.eval.runtime import _opt, normalize_rollout_init_mode  # noqa: E402
 from neuralop import get_model  # noqa: E402
 from neuralop.data.transforms.normalizers import load_normalizers  # noqa: E402
 from neuralop.diffusion import (  # noqa: E402
@@ -453,6 +453,10 @@ def main() -> int:
         n_ensemble,
         bool(hydrograph_samples),
     )
+    rollout_init_mode = normalize_rollout_init_mode(
+        _opt(config, "rollout", "init_mode", "mean_history")
+    )
+    logger.info("Diffusion rollout initialization mode=%s", rollout_init_mode)
 
     if hydrograph_samples:
         _rollout_prediction_per_hydrograph(
@@ -473,6 +477,7 @@ def main() -> int:
             gaussian_mode=False,
             gaussian_min_logvar=-9.0,
             gaussian_max_logvar=4.0,
+            rollout_init_mode=rollout_init_mode,
         )
     else:
         _rollout_prediction_generic(

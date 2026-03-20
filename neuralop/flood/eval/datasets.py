@@ -31,7 +31,11 @@ from neuralop.flood.eval.runtime import (
 )
 from neuralop.flood.eval.metrics import _build_query_points_from_geometry
 from neuralop.flood.utils.runtime import (
+    assert_boundary_channel_compatibility,
+    describe_boundary_spec,
     get_dataset_boundary_kwargs,
+    get_boundary_channel_count,
+    get_dataset_hdf_paths,
     get_structural_dry_policy_kwargs,
     make_split_generator,
     parse_target_variables,
@@ -137,17 +141,16 @@ def _build_one_step_datasets(
     n_target = len(target_variables)
     n_static = 2 + len(static_files)
     n_history = config.data.n_history
-    data_channels = n_static + n_history * 1 + n_history * n_target
+    data_boundary_kwargs = get_dataset_boundary_kwargs(config.data)
+    n_boundary_channels = get_boundary_channel_count(data_boundary_kwargs["boundary_spec"])
+    data_channels = n_static + n_history * n_boundary_channels + n_history * n_target
     if hasattr(config, "gino"):
         setattr(config.gino, "data_channels", data_channels)
         setattr(config.gino, "out_channels", n_target)
-    data_boundary_kwargs = get_dataset_boundary_kwargs(config.data)
     logger.info(
-        "One-step dataset boundary_source=%s%s",
-        data_boundary_kwargs["boundary_source"],
-        f", clean_boundary_file={data_boundary_kwargs['clean_boundary_file']}"
-        if data_boundary_kwargs["boundary_source"] == "clean_family"
-        else "",
+        "One-step dataset boundary=%s (bc_dim=%d)",
+        describe_boundary_spec(data_boundary_kwargs["boundary_spec"]),
+        n_boundary_channels,
     )
 
     with _PhaseTimer(logger, "Building one-step dataset"):
@@ -158,6 +161,7 @@ def _build_one_step_datasets(
             run_ids=None,
             train_txt=_opt(config, "data", "train_txt", "train.txt"),
             static_text_files=static_files,
+            hdf_paths=get_dataset_hdf_paths(config.data),
             hdf_suffix=".hdf",
             raise_on_smaller=True,
             skip_before_timestep=_opt(config, "data", "skip_before_timestep", 0),
@@ -217,12 +221,17 @@ def _build_rollout_normalized_dataset(
 
     with _PhaseTimer(logger, "Building rollout test dataset"):
         rollout_boundary_kwargs = get_dataset_boundary_kwargs(cfg, split=split_name)
+        data_boundary_kwargs = get_dataset_boundary_kwargs(config.data)
+        assert_boundary_channel_compatibility(
+            data_boundary_kwargs["boundary_spec"],
+            rollout_boundary_kwargs["boundary_spec"],
+            label_a="data",
+            label_b=config_section,
+        )
         logger.info(
-            "Rollout dataset boundary_source=%s%s",
-            rollout_boundary_kwargs["boundary_source"],
-            f", clean_boundary_file={rollout_boundary_kwargs['clean_boundary_file']}"
-            if rollout_boundary_kwargs["boundary_source"] == "clean_family"
-            else "",
+            "Rollout dataset boundary=%s (bc_dim=%d)",
+            describe_boundary_spec(rollout_boundary_kwargs["boundary_spec"]),
+            get_boundary_channel_count(rollout_boundary_kwargs["boundary_spec"]),
         )
         rds = FloodRolloutTestDatasetHDF(
             rollout_data_root=cfg.root,
@@ -231,6 +240,7 @@ def _build_rollout_normalized_dataset(
             run_ids=None,
             test_txt=split_txt or _opt(config, config_section, "test_txt", "test.txt"),
             static_text_files=rollout_static,
+            hdf_paths=get_dataset_hdf_paths(cfg),
             hdf_suffix=".hdf",
             raise_on_smaller=True,
             skip_before_timestep=skip,
@@ -308,6 +318,7 @@ def _build_rollout_normalized_dataset(
             hydrograph_samples.append(
                 {
                     "hydrograph_id": hydro_id,
+                    "reference_run_ids": [rds.valid_run_ids[i] for i in indices],
                     "geometry": geometry_big[indices[0]],
                     "static": static_big[indices[0]],
                     "boundary": boundary_big[indices[0]],

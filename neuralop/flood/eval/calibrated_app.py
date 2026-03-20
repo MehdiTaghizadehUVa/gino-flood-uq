@@ -40,6 +40,7 @@ from neuralop.flood.eval.runtime import (
     _resolve_cli_config_path,
     _resolve_device,
     _validate_args,
+    normalize_rollout_init_mode,
 )
 from neuralop.flood.processing.wv import FloodGINODataProcessor
 from neuralop.flood.utils.runtime import (
@@ -228,6 +229,10 @@ def main() -> int:
         )
         return 0
 
+    rollout_init_mode = normalize_rollout_init_mode(
+        _opt(config, "rollout", "init_mode", "mean_history")
+    )
+    logger.info("Rollout initialization mode=%s", rollout_init_mode)
     rollout_n_ensemble = int(_opt(config, "rollout", "n_ensemble_samples", 1))
     gaussian_state_update_cfg = str(
         _opt(config, "rollout", "gaussian_state_update", "sample")
@@ -363,6 +368,7 @@ def main() -> int:
                 gaussian_min_logvar=_opt_float(config, "opt", "gaussian_min_logvar", -9.0),
                 gaussian_max_logvar=_opt_float(config, "opt", "gaussian_max_logvar", 4.0),
                 gaussian_state_update=gaussian_state_update,
+                rollout_init_mode=rollout_init_mode,
                 fit_wet_threshold=fit_wet_threshold,
                 min_pred_std=min_pred_std,
                 c_clip_min=c_clip_min,
@@ -395,6 +401,7 @@ def main() -> int:
                 gaussian_min_logvar=_opt_float(config, "opt", "gaussian_min_logvar", -9.0),
                 gaussian_max_logvar=_opt_float(config, "opt", "gaussian_max_logvar", 4.0),
                 gaussian_state_update=gaussian_state_update,
+                rollout_init_mode=rollout_init_mode,
                 calibration_coeffs_wd=None,
             )
         with _PhaseTimer(logger, "Rollout evaluation + plotting (calibrated)"):
@@ -419,6 +426,7 @@ def main() -> int:
                 gaussian_min_logvar=_opt_float(config, "opt", "gaussian_min_logvar", -9.0),
                 gaussian_max_logvar=_opt_float(config, "opt", "gaussian_max_logvar", 4.0),
                 gaussian_state_update=gaussian_state_update,
+                rollout_init_mode=rollout_init_mode,
                 calibration_coeffs_wd=wd_coeffs,
             )
 
@@ -469,6 +477,7 @@ def main() -> int:
                     gaussian_min_logvar=_opt_float(config, "opt", "gaussian_min_logvar", -9.0),
                     gaussian_max_logvar=_opt_float(config, "opt", "gaussian_max_logvar", 4.0),
                     gaussian_state_update=gaussian_state_update,
+                    rollout_init_mode=rollout_init_mode,
                     calibration_coeffs_wd=None,
                 )
             else:

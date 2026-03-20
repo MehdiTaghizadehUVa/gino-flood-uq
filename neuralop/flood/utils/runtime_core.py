@@ -14,6 +14,7 @@ import numpy as np
 import torch
 from configmypy import ArgparseConfig, ConfigPipeline, YamlConfig
 
+from neuralop.flood.data.hec_ras import HDF_PATHS
 from neuralop.training.determinism import seed_all
 from neuralop.training import setup
 
@@ -108,9 +109,26 @@ def _cfg_get(obj, key, default):
         return default
 
 
+def _cfg_has(obj, key) -> bool:
+    if obj is None:
+        return False
+    try:
+        getattr(obj, key)
+        return True
+    except (AttributeError, KeyError, TypeError):
+        pass
+    try:
+        obj[key]
+        return True
+    except (TypeError, KeyError, IndexError):
+        return False
+
+
 FGN_LATENT_TEMPORAL_MODES = {"stepwise", "persistent"}
 FGN_AR_STATE_UPDATE_MODES = {"mean_feedback", "member_feedback"}
 BOUNDARY_SOURCE_MODES = {"member_hdf", "clean_family"}
+MULTI_CHANNEL_BOUNDARY_SOURCE = "multi_channel"
+DEFAULT_BOUNDARY_CHANNEL_NAME = "inflow"
 STRUCTURAL_DRY_POLICIES = {"legacy_full_domain", "masked_primary"}
 STRUCTURAL_DRY_MASK_DEFINITIONS = {"exact_zero"}
 DEFAULT_CLEAN_BOUNDARY_FILES = {
@@ -157,6 +175,179 @@ def normalize_boundary_source(value, default="member_hdf"):
         allowed=BOUNDARY_SOURCE_MODES,
         label="boundary_source",
     )
+
+
+def _coerce_channels_list(boundary) -> list:
+    if boundary is None:
+        return []
+    if isinstance(boundary, (list, tuple)):
+        return list(boundary)
+    channels = _cfg_get(boundary, "channels", None)
+    if channels is None:
+        return []
+    return list(channels)
+
+
+def _normalize_boundary_channel(
+    channel_cfg,
+    *,
+    section_root=None,
+    split=None,
+    index: int,
+):
+    name = _cfg_get(channel_cfg, "name", None)
+    if name is None:
+        raise ValueError(
+            f"boundary.channels[{index}] requires a non-empty 'name'."
+        )
+    name = str(name).strip()
+    if not name:
+        raise ValueError(
+            f"boundary.channels[{index}] requires a non-empty 'name'."
+        )
+
+    mode = normalize_boundary_source(_cfg_get(channel_cfg, "mode", None))
+    normalized = {
+        "name": name,
+        "mode": mode,
+    }
+    if mode == "member_hdf":
+        hdf_path = _cfg_get(channel_cfg, "hdf_path", None)
+        if hdf_path is None:
+            raise ValueError(
+                f"boundary.channels[{index}] ({name!r}) with mode='member_hdf' requires hdf_path."
+            )
+        normalized["hdf_path"] = str(hdf_path)
+        column_index = _cfg_get(channel_cfg, "column_index", None)
+        if column_index is not None:
+            normalized["column_index"] = int(column_index)
+        return normalized
+
+    clean_boundary_root = _resolve_clean_boundary_root(
+        _cfg_get(channel_cfg, "clean_boundary_root", None),
+        section_root,
+    )
+    clean_boundary_file = _cfg_get(channel_cfg, "clean_boundary_file", None)
+    if clean_boundary_file is None:
+        raise ValueError(
+            f"boundary.channels[{index}] ({name!r}) with mode='clean_family' requires clean_boundary_file."
+        )
+    normalized["clean_boundary_root"] = str(clean_boundary_root)
+    normalized["clean_boundary_file"] = str(clean_boundary_file)
+    return normalized
+
+
+def normalize_boundary_spec(
+    *,
+    boundary=None,
+    boundary_source="member_hdf",
+    clean_boundary_root=None,
+    clean_boundary_file=None,
+    section_root=None,
+    split=None,
+):
+    channels = _coerce_channels_list(boundary)
+    if channels:
+        normalized = [
+            _normalize_boundary_channel(
+                channel_cfg,
+                section_root=section_root,
+                split=split,
+                index=idx,
+            )
+            for idx, channel_cfg in enumerate(channels)
+        ]
+    else:
+        mode = normalize_boundary_source(boundary_source)
+        channel = {
+            "name": DEFAULT_BOUNDARY_CHANNEL_NAME,
+            "mode": mode,
+        }
+        if mode == "clean_family":
+            channel["clean_boundary_root"] = str(
+                _resolve_clean_boundary_root(clean_boundary_root, section_root)
+            )
+            if clean_boundary_file is None and split is not None:
+                clean_boundary_file = DEFAULT_CLEAN_BOUNDARY_FILES.get(str(split).strip().lower())
+            if clean_boundary_file is None:
+                raise ValueError(
+                    "boundary_source='clean_family' requires clean_boundary_file to be set."
+                )
+            channel["clean_boundary_file"] = str(clean_boundary_file)
+        normalized = [channel]
+
+    seen = set()
+    for channel in normalized:
+        channel_name = str(channel["name"]).strip()
+        if channel_name in seen:
+            raise ValueError(
+                f"Duplicate boundary channel name {channel_name!r} in boundary spec."
+            )
+        seen.add(channel_name)
+    return normalized
+
+
+def describe_boundary_spec(boundary_spec) -> str:
+    parts = []
+    for channel in boundary_spec or []:
+        mode = str(channel["mode"])
+        name = str(channel["name"])
+        if mode == "clean_family":
+            source = Path(str(channel["clean_boundary_file"])).name
+        else:
+            source = str(channel.get("hdf_path", "default"))
+        parts.append(f"{name}:{mode}@{source}")
+    if not parts:
+        return "<none>"
+    if len(parts) == 1:
+        return parts[0]
+    return "multi_channel[" + ", ".join(parts) + "]"
+
+
+def get_boundary_channel_count(boundary_spec) -> int:
+    return len(boundary_spec or [])
+
+
+def boundary_spec_is_multichannel(boundary_spec) -> bool:
+    return get_boundary_channel_count(boundary_spec) > 1
+
+
+def assert_boundary_channel_compatibility(
+    boundary_spec_a,
+    boundary_spec_b,
+    *,
+    label_a="data",
+    label_b="rollout_data",
+):
+    count_a = get_boundary_channel_count(boundary_spec_a)
+    count_b = get_boundary_channel_count(boundary_spec_b)
+    if count_a != count_b:
+        raise ValueError(
+            f"Boundary channel mismatch between {label_a} ({count_a}) and {label_b} ({count_b}). "
+            "Train and rollout configs must agree on bc_dim."
+        )
+
+
+def _load_clean_boundary_channels(boundary_spec):
+    bundles = {}
+    expected_n_time = None
+    for channel in boundary_spec:
+        if channel["mode"] != "clean_family":
+            continue
+        bundle = _load_clean_boundary_table(
+            channel["clean_boundary_root"],
+            channel["clean_boundary_file"],
+        )
+        if expected_n_time is None:
+            expected_n_time = int(bundle["n_time"])
+        elif int(bundle["n_time"]) != expected_n_time:
+            raise ValueError(
+                "Clean boundary channel tables must all have the same number of timesteps. "
+                f"Channel {channel['name']!r} from {bundle['path']} has n_time={bundle['n_time']} "
+                f"but expected {expected_n_time}."
+            )
+        bundles[str(channel["name"])] = bundle
+    return bundles
 
 
 def normalize_structural_dry_policy(value, default="legacy_full_domain"):
@@ -400,28 +591,52 @@ def _resolve_clean_boundary_root(clean_boundary_root, section_root):
     return (Path(str(section_root)) / root_path).resolve()
 
 
+def get_dataset_hdf_paths(config_section):
+    override = _cfg_get(config_section, "hdf_paths", None)
+    if override is None:
+        return None
+    resolved = dict(HDF_PATHS)
+    override_builtin = _to_builtin(override)
+    if not isinstance(override_builtin, dict):
+        raise ValueError("data.hdf_paths must resolve to a key/value mapping.")
+    for key, value in override_builtin.items():
+        resolved[str(key)] = str(value)
+    return resolved
+
+
 def get_dataset_boundary_kwargs(config_section, *, split=None):
     section_root = _cfg_get(config_section, "root", None)
-    boundary_source = normalize_boundary_source(
-        _cfg_get(config_section, "boundary_source", "member_hdf")
-    )
-    kwargs = {"boundary_source": boundary_source}
-    if boundary_source != "clean_family":
-        return kwargs
-
-    clean_boundary_root = _resolve_clean_boundary_root(
-        _cfg_get(config_section, "clean_boundary_root", None),
-        section_root,
-    )
-    clean_boundary_file = _cfg_get(config_section, "clean_boundary_file", None)
-    if clean_boundary_file is None and split is not None:
-        clean_boundary_file = DEFAULT_CLEAN_BOUNDARY_FILES.get(str(split).strip().lower())
-    if clean_boundary_file is None:
+    boundary_cfg = _cfg_get(config_section, "boundary", None)
+    has_explicit_channels = bool(_coerce_channels_list(boundary_cfg))
+    if has_explicit_channels and any(
+        _cfg_has(config_section, key)
+        for key in ("boundary_source", "clean_boundary_root", "clean_boundary_file")
+    ):
         raise ValueError(
-            "boundary_source='clean_family' requires clean_boundary_file to be set."
+            "When boundary.channels is configured, do not also set top-level "
+            "boundary_source/clean_boundary_root/clean_boundary_file in the same section."
         )
-    kwargs["clean_boundary_root"] = str(clean_boundary_root)
-    kwargs["clean_boundary_file"] = str(clean_boundary_file)
+
+    boundary_spec = normalize_boundary_spec(
+        boundary=boundary_cfg,
+        boundary_source=_cfg_get(config_section, "boundary_source", "member_hdf"),
+        clean_boundary_root=_cfg_get(config_section, "clean_boundary_root", None),
+        clean_boundary_file=_cfg_get(config_section, "clean_boundary_file", None),
+        section_root=section_root,
+        split=split,
+    )
+    boundary_source = (
+        MULTI_CHANNEL_BOUNDARY_SOURCE
+        if boundary_spec_is_multichannel(boundary_spec)
+        else str(boundary_spec[0]["mode"])
+    )
+    kwargs = {
+        "boundary_source": boundary_source,
+        "boundary_spec": boundary_spec,
+    }
+    if boundary_source == "clean_family":
+        kwargs["clean_boundary_root"] = str(boundary_spec[0]["clean_boundary_root"])
+        kwargs["clean_boundary_file"] = str(boundary_spec[0]["clean_boundary_file"])
     return kwargs
 
 

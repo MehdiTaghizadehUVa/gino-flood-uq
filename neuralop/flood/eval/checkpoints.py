@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import copy
 import logging
 import sys
 from pathlib import Path
@@ -11,6 +10,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import torch
 
 from neuralop import get_model
+from neuralop.flood.eval.runtime import clone_model_config_for_get_model
 from neuralop.models.base_model import BaseModel
 from neuralop.training.training_state import load_training_state
 from neuralop.flood.eval.runtime import CHECKPOINT_BEST, CHECKPOINT_FILES, CHECKPOINT_LAST
@@ -146,7 +146,7 @@ def _build_model_for_run(
                 exc,
             )
 
-    model_cfg = copy.deepcopy(config)
+    model_cfg = clone_model_config_for_get_model(config)
     logger.info(
         "Model '%s': metadata not used; initializing from evaluation config snapshot.",
         label,

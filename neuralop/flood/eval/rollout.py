@@ -30,6 +30,7 @@ from neuralop.flood.eval.runtime import (
     LEGACY_3CH,
     MIN_EPS,
     PUBLICATION_TIMESTEPS,
+    ROLLOUT_INIT_MEMBER_HISTORY,
     ROLLOUT_METRICS_HYDRO_NPZ,
     ROLLOUT_METRICS_NPZ,
     ROLLOUT_SUMMARY_HYDRO_FULL_PNG,
@@ -38,6 +39,8 @@ from neuralop.flood.eval.runtime import (
     UQ_EXCEEDANCE_THRESHOLD,
     _opt,
     _opt_float,
+    build_rollout_initial_histories,
+    normalize_rollout_init_mode,
 )
 from neuralop.flood.train.operator import (
     FGNTrainer,
@@ -148,6 +151,7 @@ def _rollout_prediction_per_hydrograph(
     gaussian_min_logvar: float = -9.0,
     gaussian_max_logvar: float = 4.0,
     gaussian_state_update: str = "sample",
+    rollout_init_mode: str = "mean_history",
 ) -> None:
     """
     Evaluate per hydrograph using all reference simulations as ground-truth uncertainty.
@@ -179,6 +183,7 @@ def _rollout_prediction_per_hydrograph(
         fgn_latent_temporal_mode
     )
     fgn_ar_state_update = normalize_fgn_ar_state_update(fgn_ar_state_update)
+    rollout_init_mode = normalize_rollout_init_mode(rollout_init_mode)
     gaussian_state_update = str(gaussian_state_update).strip().lower()
     if gaussian_mode and gaussian_state_update not in {"sample", "mu"}:
         raise ValueError(
@@ -189,6 +194,7 @@ def _rollout_prediction_per_hydrograph(
         "Hydrograph rollout ensemble members=%d across models=%d with per-model counts=%s",
         n_ens, n_models, model_counts,
     )
+    logger.info("Hydrograph rollout initialization mode='%s'", rollout_init_mode)
     if gaussian_mode:
         logger.info(
             "Gaussian rollout state update mode='%s' (predictions are still sampled for ensemble metrics).",
@@ -265,6 +271,7 @@ def _rollout_prediction_per_hydrograph(
     w_quantiles = np.linspace(0.0, 1.0, 21, dtype=np.float64)
     structural_mask_active = False
 
+    member_history_mapping_logged = False
     for sample in tqdm(hydrograph_samples, desc="Hydrograph rollout evaluation"):
         hydro_id = sample["hydrograph_id"]
         geometry = sample["geometry"]
@@ -326,13 +333,38 @@ def _rollout_prediction_per_hydrograph(
         run_interval_coverage: Dict[float, List[float]] = {a: [] for a in interval_levels}
         run_interval_width: Dict[float, List[float]] = {a: [] for a in interval_levels}
 
-        # Do not condition on a specific hidden Manning's-n realization:
-        # initialize from the mean history across reference simulations.
-        init_history = dynamic_ref[:, skip_before_timestep:start_pred_t].mean(dim=0)
+        init_histories, init_ref_indices = build_rollout_initial_histories(
+            dynamic_ref,
+            skip_before_timestep=skip_before_timestep,
+            start_pred_t=start_pred_t,
+            n_members=n_ens if use_ensemble else 1,
+            rollout_init_mode=rollout_init_mode,
+        )
+        if (
+            rollout_init_mode == ROLLOUT_INIT_MEMBER_HISTORY
+            and not member_history_mapping_logged
+        ):
+            reference_run_ids = list(sample.get("reference_run_ids", []))
+            if reference_run_ids:
+                selected_refs = [
+                    reference_run_ids[idx] for idx in init_ref_indices[: min(len(init_ref_indices), n_ens if use_ensemble else 1)]
+                ]
+                logger.info(
+                    "Member-history rollout initialization for hydrograph %s uses reference members=%s",
+                    hydro_id,
+                    selected_refs,
+                )
+            else:
+                logger.info(
+                    "Member-history rollout initialization for hydrograph %s uses reference indices=%s",
+                    hydro_id,
+                    init_ref_indices[: min(len(init_ref_indices), n_ens if use_ensemble else 1)],
+                )
+            member_history_mapping_logged = True
         if use_ensemble:
-            current_dynamics = [init_history.clone() for _ in range(n_ens)]
+            current_dynamics = [hist.clone() for hist in init_histories]
         else:
-            current_dynamic = init_history.clone()
+            current_dynamic = init_histories[0].clone()
         current_boundary = full_boundary[skip_before_timestep:start_pred_t].clone()
         fgn_latent_bank = None
         if fgn_noise_dim is not None:

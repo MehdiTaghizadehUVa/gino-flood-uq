@@ -21,6 +21,25 @@ flood: &FLOOD
     boundary_source: "member_hdf"
     clean_boundary_root: "../metadata"
     clean_boundary_file: "Hydrographs_Train_Clean.txt"
+    # Optional explicit multi-channel boundary config for coastal-style datasets.
+    # When boundary.channels is set, omit top-level boundary_source/clean_boundary_* in this section.
+    # boundary:
+    #   channels:
+    #     - name: stage
+    #       mode: clean_family
+    #       clean_boundary_root: "/scratch/jrj6wm/uncertainty_floodmodel_linux/synthetic/coastal/dynamic_v1_5k"
+    #       clean_boundary_file: "Stage_Hydrographs_Train_Clean.txt"
+    #     - name: precipitation
+    #       mode: clean_family
+    #       clean_boundary_root: "/scratch/jrj6wm/uncertainty_floodmodel_linux/synthetic/coastal/dynamic_v1_5k"
+    #       clean_boundary_file: "Precipitation_Train_Clean.txt"
+    # hdf_paths:
+    #   geometry_cell_centers: "Geometry/2D Flow Areas/<AREA_NAME>/Cells Center Coordinate"
+    #   elevation: "Geometry/2D Flow Areas/<AREA_NAME>/Cells Minimum Elevation"
+    #   area: "Geometry/2D Flow Areas/<AREA_NAME>/Cells Surface Area"
+    #   wd: "Results/Unsteady/Output/Output Blocks/Base Output/Unsteady Time Series/2D Flow Areas/<AREA_NAME>/Cell Hydraulic Depth"
+    #   vx: "Results/Unsteady/Output/Output Blocks/Base Output/Unsteady Time Series/2D Flow Areas/<AREA_NAME>/Cell Velocity - Velocity X"
+    #   vy: "Results/Unsteady/Output/Output Blocks/Base Output/Unsteady Time Series/2D Flow Areas/<AREA_NAME>/Cell Velocity - Velocity Y"
     resolution: 48
     n_history: 3
     batch_size: 32
@@ -54,6 +73,25 @@ flood: &FLOOD
     boundary_source: "member_hdf"
     clean_boundary_root: "../metadata"
     clean_boundary_file: "Hydrographs_Test_Clean.txt"
+    # Optional explicit multi-channel boundary config for coastal-style datasets.
+    # When boundary.channels is set, omit top-level boundary_source/clean_boundary_* in this section.
+    # boundary:
+    #   channels:
+    #     - name: stage
+    #       mode: clean_family
+    #       clean_boundary_root: "/scratch/jrj6wm/uncertainty_floodmodel_linux/synthetic/coastal/dynamic_v1_5k"
+    #       clean_boundary_file: "Stage_Hydrographs_Test_Clean.txt"
+    #     - name: precipitation
+    #       mode: clean_family
+    #       clean_boundary_root: "/scratch/jrj6wm/uncertainty_floodmodel_linux/synthetic/coastal/dynamic_v1_5k"
+    #       clean_boundary_file: "Precipitation_Test_Clean.txt"
+    # hdf_paths:
+    #   geometry_cell_centers: "Geometry/2D Flow Areas/<AREA_NAME>/Cells Center Coordinate"
+    #   elevation: "Geometry/2D Flow Areas/<AREA_NAME>/Cells Minimum Elevation"
+    #   area: "Geometry/2D Flow Areas/<AREA_NAME>/Cells Surface Area"
+    #   wd: "Results/Unsteady/Output/Output Blocks/Base Output/Unsteady Time Series/2D Flow Areas/<AREA_NAME>/Cell Hydraulic Depth"
+    #   vx: "Results/Unsteady/Output/Output Blocks/Base Output/Unsteady Time Series/2D Flow Areas/<AREA_NAME>/Cell Velocity - Velocity X"
+    #   vy: "Results/Unsteady/Output/Output Blocks/Base Output/Unsteady Time Series/2D Flow Areas/<AREA_NAME>/Cell Velocity - Velocity Y"
     test_txt: "test.txt"
     static_text_files:
       - "M40_CS.txt"
@@ -154,6 +192,10 @@ flood: &FLOOD
     out_dir: "./rollout_uq_WV_depth_only_diffusion"
     n_ensemble_samples: 25
     n_ensemble_samples_per_model: 25
+    # Grouped-hydrograph rollout initialization:
+    # - mean_history: initialize all forecast members from the mean reference history
+    # - member_history: initialize each forecast member from a specific reference-member history
+    init_mode: "mean_history"
 
   verify_training: false
   inverse_test: true

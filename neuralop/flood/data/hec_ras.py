@@ -29,6 +29,68 @@ HDF_PATHS = {
 }
 
 
+def _resolve_member_hdf_boundary_channels(boundary_channels, paths: dict) -> list[dict]:
+    if boundary_channels is None:
+        return [
+            {
+                "name": "inflow",
+                "hdf_path": paths["us_inflow"],
+                "column_index": -1,
+            }
+        ]
+    resolved = []
+    for channel in boundary_channels:
+        entry = dict(channel)
+        entry.setdefault("name", f"boundary_{len(resolved)}")
+        hdf_path = entry.get("hdf_path", None)
+        if hdf_path is None:
+            if len(boundary_channels) == 1 and "us_inflow" in paths:
+                hdf_path = paths["us_inflow"]
+                entry.setdefault("column_index", -1)
+            else:
+                raise ValueError(
+                    f"member_hdf boundary channel {entry['name']!r} requires hdf_path."
+                )
+        entry["hdf_path"] = str(hdf_path)
+        if (
+            entry.get("column_index", None) is None
+            and len(boundary_channels) == 1
+            and str(hdf_path) == str(paths.get("us_inflow", ""))
+        ):
+            entry["column_index"] = -1
+        resolved.append(entry)
+    return resolved
+
+
+def _read_boundary_channel_slice(handle, channel: dict, *, t0: int, t1: int) -> np.ndarray:
+    raw = np.asarray(handle[channel["hdf_path"]][t0:t1], dtype=np.float32)
+    if raw.ndim == 1:
+        raw = raw[:, np.newaxis]
+    elif raw.ndim != 2:
+        raise ValueError(
+            f"Boundary dataset {channel['hdf_path']} must be 1D or 2D, got {tuple(raw.shape)}."
+        )
+
+    column_index = channel.get("column_index", None)
+    if column_index is None:
+        if raw.shape[1] != 1:
+            raise ValueError(
+                f"Boundary dataset {channel['hdf_path']} produced shape {tuple(raw.shape)}. "
+                "Provide column_index or use a single-column dataset for each channel."
+            )
+        return raw
+
+    column_index = int(column_index)
+    if column_index < 0:
+        column_index += raw.shape[1]
+    if column_index < 0 or column_index >= raw.shape[1]:
+        raise IndexError(
+            f"Boundary dataset {channel['hdf_path']} has {raw.shape[1]} columns; "
+            f"column_index={channel['column_index']} is out of bounds."
+        )
+    return raw[:, column_index : column_index + 1]
+
+
 def build_cell_point_index(hdf_path: Path, paths: dict = None) -> np.ndarray:
     """
     Build index such that Cells Center Coordinate[cell_point_index] matches Cell Points.
@@ -56,6 +118,7 @@ def read_hec_ras_hdf_slice(
     t1: int,
     paths: dict = None,
     cell_index: np.ndarray = None,
+    boundary_channels: list[dict] | None = None,
 ) -> tuple:
     """
     Read geometry and time-series slice from a HEC-RAS 2D result HDF file.
@@ -66,7 +129,7 @@ def read_hec_ras_hdf_slice(
     -------
     geometry : np.ndarray (n_cell_points, 2) from Cell Points
     wd, vx, vy : np.ndarray (T, n_cell_points)
-    inflow : np.ndarray (T, 1 or 2)
+    inflow : np.ndarray (T, bc_dim)
     """
     if h5py is None:
         raise ImportError("h5py is required for HDF data. Install with: pip install h5py")
@@ -80,10 +143,18 @@ def read_hec_ras_hdf_slice(
             wd = wd[:, cell_index]
             vx = vx[:, cell_index]
             vy = vy[:, cell_index]
-        inflow_ds = f[paths["us_inflow"]]
-        inflow = np.asarray(inflow_ds[t0:t1], dtype=np.float32)
-        if inflow.ndim == 1:
-            inflow = inflow[:, np.newaxis]
+        resolved_boundary_channels = _resolve_member_hdf_boundary_channels(
+            boundary_channels, paths
+        )
+        inflow_list = [
+            _read_boundary_channel_slice(f, channel, t0=t0, t1=t1)
+            for channel in resolved_boundary_channels
+        ]
+        inflow = (
+            np.concatenate(inflow_list, axis=1)
+            if inflow_list
+            else np.zeros((max(int(t1) - int(t0), 0), 0), dtype=np.float32)
+        )
     return geom, wd, vx, vy, inflow
 
 

@@ -19,12 +19,21 @@ from neuralop.flood.data.hec_ras import (
     read_hec_ras_hdf_static,
 )
 from neuralop.flood.utils.runtime_core import (
-    _load_clean_boundary_table,
-    normalize_boundary_source,
+    describe_boundary_spec,
+    get_boundary_channel_count,
+    normalize_boundary_spec,
     parse_target_variables,
     resolve_family_id_for_boundary,
     write_train_txt_from_data_root,
 )
+
+
+def _load_clean_boundary_channels_runtime(boundary_spec):
+    # Import lazily to avoid the package-level runtime_core <-> flood.data cycle
+    # that only shows up in some maintained entrypoint import orders.
+    from neuralop.flood.utils.runtime_core import _load_clean_boundary_channels
+
+    return _load_clean_boundary_channels(boundary_spec)
 
 class FloodDatasetHDF(Dataset):
     """
@@ -54,6 +63,7 @@ class FloodDatasetHDF(Dataset):
         boundary_source="member_hdf",
         clean_boundary_root=None,
         clean_boundary_file=None,
+        boundary_spec=None,
     ):
         super().__init__()
         if h5py is None:
@@ -73,14 +83,24 @@ class FloodDatasetHDF(Dataset):
         self._channel_to_idx = {"wd": 0, "vx": 1, "vy": 2}
         self.target_indices = [self._channel_to_idx[v] for v in self.target_variables]
         self.write_train_txt = bool(write_train_txt)
-        self.boundary_source = normalize_boundary_source(boundary_source)
+        self.boundary_spec = normalize_boundary_spec(
+            boundary=boundary_spec,
+            boundary_source=boundary_source,
+            clean_boundary_root=clean_boundary_root,
+            clean_boundary_file=clean_boundary_file,
+            section_root=self.data_root,
+        )
+        self.boundary_source = (
+            "multi_channel"
+            if get_boundary_channel_count(self.boundary_spec) > 1
+            else self.boundary_spec[0]["mode"]
+        )
         self.clean_boundary_root = clean_boundary_root
         self.clean_boundary_file = clean_boundary_file
-        self._clean_boundary_bundle = None
-        if self.boundary_source == "clean_family":
-            self._clean_boundary_bundle = _load_clean_boundary_table(
-                clean_boundary_root, clean_boundary_file
-            )
+        self._clean_boundary_bundles = _load_clean_boundary_channels_runtime(self.boundary_spec)
+        self._member_hdf_boundary_spec = [
+            channel for channel in self.boundary_spec if channel["mode"] == "member_hdf"
+        ]
 
         if noise_std is None or (isinstance(noise_std, (list, tuple)) and len(noise_std) == 0):
             self.noise_type = "none"
@@ -124,6 +144,7 @@ class FloodDatasetHDF(Dataset):
             raise ValueError("No valid run IDs found.")
 
         self.reference_cell_count = None
+        self.full_cell_count = None
         self.xy_coords = None
         self.static_data = None
         self.cell_point_index = None  # index into full-cell arrays to get Cell Points subset
@@ -134,7 +155,7 @@ class FloodDatasetHDF(Dataset):
     def _hdf_file(self, run_id: str) -> Path:
         return self.data_root / f"{run_id}{self.hdf_suffix}"
 
-    def _resolve_boundary_series(
+    def _resolve_boundary_matrix(
         self,
         run_id: str,
         inflow: np.ndarray,
@@ -142,25 +163,39 @@ class FloodDatasetHDF(Dataset):
         slice_start: int = 0,
         slice_end: int | None = None,
     ) -> np.ndarray:
-        if self.boundary_source == "member_hdf":
-            if inflow.ndim == 1:
-                inflow = inflow[:, None]
-            flow_col = inflow[:, -1] if inflow.shape[1] >= 2 else inflow[:, 0]
-            return np.asarray(flow_col, dtype=np.float32)
-
-        boundary_by_family = self._clean_boundary_bundle["boundary_by_family"]
-        family_id = resolve_family_id_for_boundary(run_id, boundary_by_family)
-        clean_series = np.asarray(boundary_by_family[family_id], dtype=np.float32)
-        total_len = clean_series.shape[0]
+        if inflow.ndim == 1:
+            inflow = inflow[:, None]
         if slice_end is None:
-            slice_end = total_len
-        if slice_start < 0 or slice_end < slice_start or slice_end > total_len:
-            raise ValueError(
-                f"Clean boundary slice [{slice_start}:{slice_end}] is invalid for family {family_id!r}: "
-                f"available length={total_len} in "
-                f"{self._clean_boundary_bundle['path']}."
-            )
-        return clean_series[slice_start:slice_end]
+            slice_end = inflow.shape[0]
+
+        member_col = 0
+        columns = []
+        for channel in self.boundary_spec:
+            if channel["mode"] == "member_hdf":
+                if member_col >= inflow.shape[1]:
+                    raise ValueError(
+                        f"member_hdf boundary matrix for run {run_id!r} has {inflow.shape[1]} columns "
+                        f"but boundary spec requires at least {member_col + 1}: {describe_boundary_spec(self.boundary_spec)}."
+                    )
+                columns.append(np.asarray(inflow[:, member_col], dtype=np.float32))
+                member_col += 1
+                continue
+
+            bundle = self._clean_boundary_bundles[str(channel["name"])]
+            boundary_by_family = bundle["boundary_by_family"]
+            family_id = resolve_family_id_for_boundary(run_id, boundary_by_family)
+            clean_series = np.asarray(boundary_by_family[family_id], dtype=np.float32)
+            total_len = clean_series.shape[0]
+            if slice_start < 0 or slice_end < slice_start or slice_end > total_len:
+                raise ValueError(
+                    f"Clean boundary slice [{slice_start}:{slice_end}] is invalid for family {family_id!r} "
+                    f"channel {channel['name']!r}: available length={total_len} in {bundle['path']}."
+                )
+            columns.append(clean_series[slice_start:slice_end])
+
+        if not columns:
+            return np.zeros((slice_end - slice_start, 0), dtype=np.float32)
+        return np.stack(columns, axis=1).astype(np.float32, copy=False)
 
     def _load_static_and_build_indices(self):
         # Text-file static (CS, CU, FA)
@@ -173,7 +208,7 @@ class FloodDatasetHDF(Dataset):
             arr = np.loadtxt(str(fpath), delimiter="\t", dtype=np.float32)
             if arr.ndim == 1:
                 arr = arr[:, None]
-            static_list.append(arr)
+            static_list.append((str(fpath), arr))
 
         for run_id in tqdm(self.run_ids, desc="Building HDF sample indices"):
             hpath = self._hdf_file(run_id)
@@ -188,13 +223,34 @@ class FloodDatasetHDF(Dataset):
             if self.reference_cell_count is None:
                 self.cell_point_index = build_cell_point_index(hpath, self.hdf_paths)
                 self.reference_cell_count = len(self.cell_point_index)
-                geom, _, _, _, _ = read_hec_ras_hdf_slice(hpath, 0, 1, self.hdf_paths, cell_index=None)
+                geom, _, _, _, _ = read_hec_ras_hdf_slice(
+                    hpath,
+                    0,
+                    1,
+                    self.hdf_paths,
+                    cell_index=None,
+                    boundary_channels=[],
+                )
                 self.xy_coords = torch.tensor(geom, device="cpu")
-                elev, area = read_hec_ras_hdf_static(hpath, self.hdf_paths, self.cell_point_index)
+                elev_full, area_full = read_hec_ras_hdf_static(hpath, self.hdf_paths, cell_index=None)
+                self.full_cell_count = int(elev_full.shape[0])
+                elev = elev_full[self.cell_point_index]
+                area = area_full[self.cell_point_index]
                 # Static order: [elevation, area, CS, CU, FA] (aligned with HEC_RAS_Automation CE, CA + text)
                 static_parts = [elev.reshape(-1, 1), area.reshape(-1, 1)]
                 if static_list:
-                    static_parts.extend([_pad_or_truncate(a, self.reference_cell_count) for a in static_list])
+                    static_parts.extend(
+                        [
+                            _align_static_text_to_reference_cells(
+                                arr,
+                                reference_cell_count=self.reference_cell_count,
+                                cell_point_index=self.cell_point_index,
+                                full_cell_count=self.full_cell_count,
+                                source=source,
+                            )
+                            for source, arr in static_list
+                        ]
+                    )
                 combined = np.concatenate(static_parts, axis=1)
                 self.static_data = torch.tensor(combined, device="cpu")
             elif n_cells != self.reference_cell_count:
@@ -254,18 +310,23 @@ class FloodDatasetHDF(Dataset):
         t1 = target_t + self.ar_rollout_steps
         hpath = self._hdf_file(run_id)
         geom, wd, vx, vy, inflow = read_hec_ras_hdf_slice(
-            hpath, t0, t1, self.hdf_paths, cell_index=self.cell_point_index
+            hpath,
+            t0,
+            t1,
+            self.hdf_paths,
+            cell_index=self.cell_point_index,
+            boundary_channels=self._member_hdf_boundary_spec,
         )
         n_cells = geom.shape[0]
-        boundary_series = self._resolve_boundary_series(run_id, inflow, slice_start=t0, slice_end=t1)
+        boundary_matrix = self._resolve_boundary_matrix(run_id, inflow, slice_start=t0, slice_end=t1)
+        n_boundary_channels = boundary_matrix.shape[1]
         # History: first n_history steps
         hist_all = [wd[: self.n_history], vx[: self.n_history], vy[: self.n_history]]
         dynamic_hist = np.stack([hist_all[i] for i in self.target_indices], axis=-1)
         dynamic_hist = torch.tensor(dynamic_hist, device="cpu", dtype=torch.float32)
         dynamic_hist = self._apply_noise(dynamic_hist)
-        flow_col = boundary_series[: self.n_history][:, None]
-        flow_col = flow_col[:, np.newaxis, :]
-        inflow_bc = np.broadcast_to(flow_col, (self.n_history, n_cells, 1))
+        flow_hist = boundary_matrix[: self.n_history][:, np.newaxis, :]
+        inflow_bc = np.broadcast_to(flow_hist, (self.n_history, n_cells, n_boundary_channels))
         bc_hist = torch.tensor(inflow_bc, device="cpu", dtype=torch.float32)
         # Single-step target (first step; for backward compat and normalizer fit)
         tgt_all = [wd[self.n_history], vx[self.n_history], vy[self.n_history]]
@@ -284,8 +345,8 @@ class FloodDatasetHDF(Dataset):
                     dim=-1,
                 )
             )
-            flow_val = float(boundary_series[self.n_history + s])
-            bc_s = np.full((n_cells, 1), flow_val, dtype=np.float32)
+            flow_val = np.asarray(boundary_matrix[self.n_history + s], dtype=np.float32)
+            bc_s = np.broadcast_to(flow_val[np.newaxis, :], (n_cells, n_boundary_channels))
             boundary_sequence_list.append(torch.tensor(bc_s, device="cpu", dtype=torch.float32))
         target_sequence = torch.stack(target_sequence_list, dim=0)
         boundary_sequence = torch.stack(boundary_sequence_list, dim=0)
@@ -307,11 +368,29 @@ class FloodDatasetHDF(Dataset):
         return out
 
 
-def _pad_or_truncate(arr: np.ndarray, size: int) -> np.ndarray:
-    if arr.shape[0] >= size:
-        return arr[:size, :]
-    pad = np.zeros((size - arr.shape[0], arr.shape[1]), dtype=arr.dtype)
-    return np.concatenate([arr, pad], axis=0)
+def _align_static_text_to_reference_cells(
+    arr: np.ndarray,
+    *,
+    reference_cell_count: int,
+    cell_point_index: np.ndarray,
+    full_cell_count: int | None,
+    source: str,
+) -> np.ndarray:
+    if arr.ndim != 2:
+        raise ValueError(f"Static text array from {source} must be 2D, got shape {arr.shape}.")
+
+    n_rows = int(arr.shape[0])
+    if n_rows == int(reference_cell_count):
+        return arr
+
+    if full_cell_count is not None and n_rows == int(full_cell_count):
+        return np.asarray(arr[cell_point_index, :], dtype=arr.dtype)
+
+    raise ValueError(
+        f"Static text file {source} has {n_rows} rows, which does not match either "
+        f"reference_cell_count={reference_cell_count} or full_cell_count={full_cell_count}. "
+        "Provide text statics on the Cell Points grid or the full Cells Center grid."
+    )
 
 
 def _align_static_to_cells(static: torch.Tensor, n_cells: int) -> torch.Tensor:
@@ -348,6 +427,7 @@ class FloodRolloutTestDatasetHDF(Dataset):
         boundary_source="member_hdf",
         clean_boundary_root=None,
         clean_boundary_file=None,
+        boundary_spec=None,
     ):
         super().__init__()
         if h5py is None:
@@ -362,14 +442,24 @@ class FloodRolloutTestDatasetHDF(Dataset):
         self.raise_on_smaller = raise_on_smaller
         self.skip_before_timestep = skip_before_timestep
         self.hdf_paths = hdf_paths or HDF_PATHS
-        self.boundary_source = normalize_boundary_source(boundary_source)
+        self.boundary_spec = normalize_boundary_spec(
+            boundary=boundary_spec,
+            boundary_source=boundary_source,
+            clean_boundary_root=clean_boundary_root,
+            clean_boundary_file=clean_boundary_file,
+            section_root=self.data_root,
+        )
+        self.boundary_source = (
+            "multi_channel"
+            if get_boundary_channel_count(self.boundary_spec) > 1
+            else self.boundary_spec[0]["mode"]
+        )
         self.clean_boundary_root = clean_boundary_root
         self.clean_boundary_file = clean_boundary_file
-        self._clean_boundary_bundle = None
-        if self.boundary_source == "clean_family":
-            self._clean_boundary_bundle = _load_clean_boundary_table(
-                clean_boundary_root, clean_boundary_file
-            )
+        self._clean_boundary_bundles = _load_clean_boundary_channels_runtime(self.boundary_spec)
+        self._member_hdf_boundary_spec = [
+            channel for channel in self.boundary_spec if channel["mode"] == "member_hdf"
+        ]
 
         if run_ids is not None:
             self.run_ids = [str(r).strip() for r in run_ids if str(r).strip()]
@@ -391,13 +481,14 @@ class FloodRolloutTestDatasetHDF(Dataset):
         self.static_data = None
         self.cell_point_index = None
         self._reference_cell_count = None
+        self._full_cell_count = None
         self.structural_dry_mask = None
         self._load_static_and_validate_runs()
 
     def _hdf_file(self, run_id: str) -> Path:
         return self.data_root / f"{run_id}{self.hdf_suffix}"
 
-    def _resolve_boundary_series(
+    def _resolve_boundary_matrix(
         self,
         run_id: str,
         inflow: np.ndarray,
@@ -405,25 +496,39 @@ class FloodRolloutTestDatasetHDF(Dataset):
         slice_start: int = 0,
         slice_end: int | None = None,
     ) -> np.ndarray:
-        if self.boundary_source == "member_hdf":
-            if inflow.ndim == 1:
-                inflow = inflow[:, None]
-            flow_col = inflow[:, -1] if inflow.shape[1] >= 2 else inflow[:, 0]
-            return np.asarray(flow_col, dtype=np.float32)
-
-        boundary_by_family = self._clean_boundary_bundle["boundary_by_family"]
-        family_id = resolve_family_id_for_boundary(run_id, boundary_by_family)
-        clean_series = np.asarray(boundary_by_family[family_id], dtype=np.float32)
-        total_len = clean_series.shape[0]
+        if inflow.ndim == 1:
+            inflow = inflow[:, None]
         if slice_end is None:
-            slice_end = total_len
-        if slice_start < 0 or slice_end < slice_start or slice_end > total_len:
-            raise ValueError(
-                f"Clean boundary slice [{slice_start}:{slice_end}] is invalid for family {family_id!r}: "
-                f"available length={total_len} in "
-                f"{self._clean_boundary_bundle['path']}."
-            )
-        return clean_series[slice_start:slice_end]
+            slice_end = inflow.shape[0]
+
+        member_col = 0
+        columns = []
+        for channel in self.boundary_spec:
+            if channel["mode"] == "member_hdf":
+                if member_col >= inflow.shape[1]:
+                    raise ValueError(
+                        f"member_hdf boundary matrix for run {run_id!r} has {inflow.shape[1]} columns "
+                        f"but boundary spec requires at least {member_col + 1}: {describe_boundary_spec(self.boundary_spec)}."
+                    )
+                columns.append(np.asarray(inflow[:, member_col], dtype=np.float32))
+                member_col += 1
+                continue
+
+            bundle = self._clean_boundary_bundles[str(channel["name"])]
+            boundary_by_family = bundle["boundary_by_family"]
+            family_id = resolve_family_id_for_boundary(run_id, boundary_by_family)
+            clean_series = np.asarray(boundary_by_family[family_id], dtype=np.float32)
+            total_len = clean_series.shape[0]
+            if slice_start < 0 or slice_end < slice_start or slice_end > total_len:
+                raise ValueError(
+                    f"Clean boundary slice [{slice_start}:{slice_end}] is invalid for family {family_id!r} "
+                    f"channel {channel['name']!r}: available length={total_len} in {bundle['path']}."
+                )
+            columns.append(clean_series[slice_start:slice_end])
+
+        if not columns:
+            return np.zeros((slice_end - slice_start, 0), dtype=np.float32)
+        return np.stack(columns, axis=1).astype(np.float32, copy=False)
 
     def _load_static_and_validate_runs(self):
         static_list = []
@@ -435,7 +540,7 @@ class FloodRolloutTestDatasetHDF(Dataset):
             arr = np.loadtxt(str(fpath), delimiter="\t", dtype=np.float32)
             if arr.ndim == 1:
                 arr = arr[:, None]
-            static_list.append(arr)
+            static_list.append((str(fpath), arr))
         for run_id in tqdm(self.run_ids, desc="Validating HDF runs for rollout"):
             hpath = self._hdf_file(run_id)
             if not hpath.exists():
@@ -455,12 +560,33 @@ class FloodRolloutTestDatasetHDF(Dataset):
             if self._reference_cell_count is None:
                 self.cell_point_index = build_cell_point_index(hpath, self.hdf_paths)
                 self._reference_cell_count = len(self.cell_point_index)
-                geom, _, _, _, _ = read_hec_ras_hdf_slice(hpath, 0, 1, self.hdf_paths, cell_index=None)
+                geom, _, _, _, _ = read_hec_ras_hdf_slice(
+                    hpath,
+                    0,
+                    1,
+                    self.hdf_paths,
+                    cell_index=None,
+                    boundary_channels=[],
+                )
                 self.xy_coords = torch.tensor(geom, device="cpu")
-                elev, area = read_hec_ras_hdf_static(hpath, self.hdf_paths, self.cell_point_index)
+                elev_full, area_full = read_hec_ras_hdf_static(hpath, self.hdf_paths, cell_index=None)
+                self._full_cell_count = int(elev_full.shape[0])
+                elev = elev_full[self.cell_point_index]
+                area = area_full[self.cell_point_index]
                 static_parts = [elev.reshape(-1, 1), area.reshape(-1, 1)]
                 if static_list:
-                    static_parts.extend([_pad_or_truncate(a, self._reference_cell_count) for a in static_list])
+                    static_parts.extend(
+                        [
+                            _align_static_text_to_reference_cells(
+                                arr,
+                                reference_cell_count=self._reference_cell_count,
+                                cell_point_index=self.cell_point_index,
+                                full_cell_count=self._full_cell_count,
+                                source=source,
+                            )
+                            for source, arr in static_list
+                        ]
+                    )
                 combined = np.concatenate(static_parts, axis=1)
                 self.static_data = torch.tensor(combined, device="cpu")
             elif n_cells != self._reference_cell_count:
@@ -496,14 +622,19 @@ class FloodRolloutTestDatasetHDF(Dataset):
         hpath = self._hdf_file(run_id)
         n_cells, n_time = get_hec_ras_hdf_shape(hpath, self.hdf_paths)
         geom, wd, vx, vy, inflow = read_hec_ras_hdf_slice(
-            hpath, 0, n_time, self.hdf_paths, cell_index=self.cell_point_index
+            hpath,
+            0,
+            n_time,
+            self.hdf_paths,
+            cell_index=self.cell_point_index,
+            boundary_channels=self._member_hdf_boundary_spec,
         )
         dynamic = np.stack([wd, vx, vy], axis=-1)
         dynamic = torch.tensor(dynamic, device="cpu", dtype=torch.float32)
-        boundary_series = self._resolve_boundary_series(run_id, inflow, slice_start=0, slice_end=n_time)
-        flow_col = boundary_series[:, None]  # (n_time, 1)
-        flow_col = flow_col[:, np.newaxis, :]  # (n_time, 1, 1) for broadcast over cells
-        boundary = np.broadcast_to(flow_col, (n_time, n_cells, 1))
+        boundary_matrix = self._resolve_boundary_matrix(run_id, inflow, slice_start=0, slice_end=n_time)
+        n_boundary_channels = boundary_matrix.shape[1]
+        flow_col = boundary_matrix[:, np.newaxis, :]
+        boundary = np.broadcast_to(flow_col, (n_time, n_cells, n_boundary_channels))
         boundary = torch.tensor(boundary, device="cpu", dtype=torch.float32)
         out = {
             "run_id": run_id,

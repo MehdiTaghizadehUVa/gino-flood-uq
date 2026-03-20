@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import copy
 import logging
 import re
 import sys
@@ -49,6 +48,12 @@ UQ_VAR_DECOMP_PNG = "uq_variance_decomposition_wd.png"
 DEFAULT_EVAL_LOG = "eval_post_training.log"
 HYDROGRAPH_SIM_PATTERN = re.compile(r"^(.+)_sim(\d+)$")
 UQ_EXCEEDANCE_THRESHOLD = 0.05
+ROLLOUT_INIT_MEAN_HISTORY = "mean_history"
+ROLLOUT_INIT_MEMBER_HISTORY = "member_history"
+ROLLOUT_INIT_MODES = (
+    ROLLOUT_INIT_MEAN_HISTORY,
+    ROLLOUT_INIT_MEMBER_HISTORY,
+)
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 
 def _opt(config: Any, section: Optional[str], key: str, default: Any) -> Any:
@@ -102,6 +107,115 @@ def group_run_ids_by_hydrograph(run_ids: List[str]) -> Dict[str, List[str]]:
     for hydro_id in groups:
         groups[hydro_id] = sorted(groups[hydro_id])
     return groups
+
+
+def _config_to_builtin(obj: Any) -> Any:
+    """Convert configmypy/namespace-style config objects into plain builtins."""
+    if obj is None or isinstance(obj, (str, int, float, bool)):
+        return obj
+    if isinstance(obj, Path):
+        return obj.as_posix()
+    if isinstance(obj, dict):
+        return {str(k): _config_to_builtin(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple, set)):
+        return [_config_to_builtin(v) for v in obj]
+    if hasattr(obj, "items"):
+        try:
+            return {str(k): _config_to_builtin(v) for k, v in obj.items()}
+        except Exception:
+            pass
+    if hasattr(obj, "__dict__"):
+        return {
+            str(k): _config_to_builtin(v)
+            for k, v in vars(obj).items()
+            if not str(k).startswith("_")
+        }
+    try:
+        return {str(k): _config_to_builtin(obj[k]) for k in obj}
+    except Exception:
+        return obj
+
+
+def clone_model_config_for_get_model(config: Any) -> Dict[str, Any]:
+    """
+    Return an isolated plain-dict config snapshot for get_model().
+
+    Some config providers used in this repo are dict-like but do not implement
+    ``copy.deepcopy`` safely because ``getattr(..., "__deepcopy__")`` raises
+    ``KeyError`` instead of ``AttributeError``. Converting to builtins avoids
+    that runtime-specific behavior while still giving get_model() a mutable,
+    isolated config tree to consume.
+    """
+    builtins = _config_to_builtin(config)
+    if not isinstance(builtins, dict):
+        raise TypeError(
+            "Expected dict-like config for model construction, got "
+            f"{type(builtins).__name__}."
+        )
+    return builtins
+
+
+def normalize_rollout_init_mode(mode: Any) -> str:
+    """Normalize grouped-hydrograph rollout initialization mode."""
+    normalized = str(mode or ROLLOUT_INIT_MEAN_HISTORY).strip().lower()
+    if normalized not in ROLLOUT_INIT_MODES:
+        raise ValueError(
+            "rollout.init_mode must be one of "
+            f"{ROLLOUT_INIT_MODES}, got {mode!r}."
+        )
+    return normalized
+
+
+def _select_rollout_reference_member_indices(
+    *,
+    n_ref: int,
+    n_members: int,
+) -> List[int]:
+    """Choose reference members deterministically for member-history initialization."""
+    if n_ref < 1:
+        raise ValueError(f"Expected at least one reference trajectory, got n_ref={n_ref}.")
+    if n_members < 1:
+        raise ValueError(f"Expected at least one rollout member, got n_members={n_members}.")
+    if n_members == 1:
+        return [0]
+    if n_members <= n_ref:
+        indices = np.round(np.linspace(0, n_ref - 1, num=n_members)).astype(int)
+        return indices.clip(0, n_ref - 1).tolist()
+    full_cycles, remainder = divmod(n_members, n_ref)
+    return list(range(n_ref)) * full_cycles + list(range(remainder))
+
+
+def build_rollout_initial_histories(
+    dynamic_ref: torch.Tensor,
+    *,
+    skip_before_timestep: int,
+    start_pred_t: int,
+    n_members: int,
+    rollout_init_mode: str,
+) -> Tuple[List[torch.Tensor], List[int]]:
+    """Build initial autoregressive histories for grouped-hydrograph rollout evaluation."""
+    histories = dynamic_ref[:, skip_before_timestep:start_pred_t]
+    if histories.ndim != 4:
+        raise ValueError(
+            "Grouped rollout expects dynamic_ref with shape [n_ref, history, n_cells, n_channels], "
+            f"got shape {tuple(dynamic_ref.shape)}."
+        )
+    if histories.shape[1] <= 0:
+        raise ValueError(
+            "Grouped rollout history window is empty. "
+            f"skip_before_timestep={skip_before_timestep}, start_pred_t={start_pred_t}."
+        )
+
+    mode = normalize_rollout_init_mode(rollout_init_mode)
+    if mode == ROLLOUT_INIT_MEAN_HISTORY:
+        mean_history = histories.mean(dim=0)
+        return [mean_history.clone() for _ in range(n_members)], [-1] * n_members
+
+    member_indices = _select_rollout_reference_member_indices(
+        n_ref=int(histories.shape[0]),
+        n_members=int(n_members),
+    )
+    return [histories[idx].clone() for idx in member_indices], member_indices
 
 
 class _PhaseTimer:
@@ -265,7 +379,7 @@ def _build_model_for_run(
                 exc,
             )
 
-    model_cfg = copy.deepcopy(config)
+    model_cfg = clone_model_config_for_get_model(config)
     logger.info(
         "Model '%s': metadata not used; initializing from evaluation config snapshot.",
         label,

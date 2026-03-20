@@ -1,10 +1,15 @@
 from neuralop.flood.utils.runtime_core import (
+    assert_boundary_channel_compatibility,
     dataloader_worker_init,
+    describe_boundary_spec,
+    get_boundary_channel_count,
     get_dataset_boundary_kwargs,
+    get_dataset_hdf_paths,
     get_structural_dry_policy_kwargs,
     load_config_and_setup,
     make_dataloader_generator,
     make_split_generator,
+    normalize_boundary_spec,
     normalize_boundary_source,
     normalize_fgn_ar_state_update,
     normalize_fgn_latent_temporal_mode,
@@ -20,12 +25,17 @@ from neuralop.flood.utils.runtime_core import (
 )
 
 __all__ = [
+    "assert_boundary_channel_compatibility",
     "dataloader_worker_init",
+    "describe_boundary_spec",
+    "get_boundary_channel_count",
     "get_dataset_boundary_kwargs",
+    "get_dataset_hdf_paths",
     "get_structural_dry_policy_kwargs",
     "load_config_and_setup",
     "make_dataloader_generator",
     "make_split_generator",
+    "normalize_boundary_spec",
     "normalize_boundary_source",
     "normalize_fgn_ar_state_update",
     "normalize_fgn_latent_temporal_mode",

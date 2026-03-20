@@ -35,6 +35,7 @@ from neuralop.flood.eval.runtime import (
     _resolve_device,
     _validate_args,
     DEFAULT_EVAL_LOG,
+    normalize_rollout_init_mode,
 )
 from neuralop.flood.processing.wv import FloodGINODataProcessor
 from neuralop.flood.utils.runtime import (
@@ -221,6 +222,10 @@ def main() -> int:
         )
         return 0
 
+    rollout_init_mode = normalize_rollout_init_mode(
+        _opt(config, "rollout", "init_mode", "mean_history")
+    )
+    logger.info("Rollout initialization mode=%s", rollout_init_mode)
     rollout_n_ensemble = int(_opt(config, "rollout", "n_ensemble_samples", 1))
     gaussian_state_update_cfg = str(
         _opt(config, "rollout", "gaussian_state_update", "sample")
@@ -300,6 +305,7 @@ def main() -> int:
                 gaussian_min_logvar=_opt_float(config, "opt", "gaussian_min_logvar", -9.0),
                 gaussian_max_logvar=_opt_float(config, "opt", "gaussian_max_logvar", 4.0),
                 gaussian_state_update=gaussian_state_update,
+                rollout_init_mode=rollout_init_mode,
             )
         else:
             _rollout_prediction_generic(

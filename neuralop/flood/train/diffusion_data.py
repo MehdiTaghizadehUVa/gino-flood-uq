@@ -7,7 +7,6 @@ from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
 import torch
-import torch.distributed as dist
 from torch.utils.data import DataLoader, Subset, random_split
 from torch.utils.data.distributed import DistributedSampler
 
@@ -31,7 +30,9 @@ from neuralop.flood.train.diffusion_runtime import (
 from neuralop.flood.utils.diffusion_script_utils import safe_get
 from neuralop.flood.utils.runtime import (
     dataloader_worker_init,
+    describe_boundary_spec,
     get_dataset_boundary_kwargs,
+    get_dataset_hdf_paths,
     get_structural_dry_policy_kwargs,
     make_dataloader_generator,
     make_split_generator,
@@ -86,6 +87,7 @@ def _prepare_datasets(
         n_history=int(safe_get(data_cfg, "n_history", 3)),
         train_txt=str(safe_get(data_cfg, "train_txt", "train.txt")),
         static_text_files=static_text_files,
+        hdf_paths=get_dataset_hdf_paths(data_cfg),
         hdf_suffix=".hdf",
         noise_type=str(safe_get(data_cfg, "noise_type", "none")),
         noise_std=safe_get(data_cfg, "noise_std", None),
@@ -97,11 +99,8 @@ def _prepare_datasets(
     _rank0_info(
         logger,
         dist_ctx,
-        "Training dataset boundary_source=%s%s",
-        dataset_kwargs["boundary_source"],
-        f", clean_boundary_file={dataset_kwargs['clean_boundary_file']}"
-        if dataset_kwargs["boundary_source"] == "clean_family"
-        else "",
+        "Training dataset boundary=%s",
+        describe_boundary_spec(dataset_kwargs["boundary_spec"]),
     )
     write_train_txt = bool(safe_get(data_cfg, "write_train_txt", False))
     dataset_kwargs["write_train_txt"] = write_train_txt and dist_ctx.is_rank0

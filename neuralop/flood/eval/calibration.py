@@ -12,7 +12,13 @@ import torch
 from tqdm import tqdm
 
 from neuralop.flood.eval.metrics import _build_member_model_indices, _sample_from_packed_gaussian
-from neuralop.flood.eval.runtime import CHANNEL_INDEX, UQ_OVERALL_JSON
+from neuralop.flood.eval.runtime import (
+    CHANNEL_INDEX,
+    ROLLOUT_INIT_MEMBER_HISTORY,
+    UQ_OVERALL_JSON,
+    build_rollout_initial_histories,
+    normalize_rollout_init_mode,
+)
 from neuralop.flood.train.operator import (
     get_fgn_rollout_latent,
     sample_fgn_rollout_latent_bank,
@@ -73,6 +79,7 @@ def _fit_wd_leadtime_calibration_from_hydrographs(
     gaussian_min_logvar: float = -9.0,
     gaussian_max_logvar: float = 4.0,
     gaussian_state_update: str = "sample",
+    rollout_init_mode: str = "mean_history",
     fit_wet_threshold: float = 0.01,
     min_pred_std: float = 1e-4,
     c_clip_min: float = 0.25,
@@ -103,6 +110,7 @@ def _fit_wd_leadtime_calibration_from_hydrographs(
         fgn_latent_temporal_mode
     )
     fgn_ar_state_update = normalize_fgn_ar_state_update(fgn_ar_state_update)
+    rollout_init_mode = normalize_rollout_init_mode(rollout_init_mode)
     gaussian_state_update = str(gaussian_state_update).strip().lower()
     if gaussian_mode and gaussian_state_update not in {"sample", "mu"}:
         raise ValueError(
@@ -118,6 +126,8 @@ def _fit_wd_leadtime_calibration_from_hydrographs(
     sigma_ref_by_t: List[List[np.ndarray]] = [[] for _ in range(rollout_length)]
     domain_mask_by_t: List[List[np.ndarray]] = [[] for _ in range(rollout_length)]
 
+    logger.info("Calibration rollout initialization mode='%s'", rollout_init_mode)
+    member_history_mapping_logged = False
     for sample in tqdm(hydrograph_samples, desc="Calibration rollout (hydrograph)"):
         static_0 = sample["static"].to(device).unsqueeze(0)
         geom_0 = sample["geometry"].to(device).unsqueeze(0)
@@ -139,11 +149,39 @@ def _fit_wd_leadtime_calibration_from_hydrographs(
         else:
             structural_wettable_mask = None
 
-        init_history = dynamic_ref[:, skip_before_timestep:start_pred_t].mean(dim=0)
+        init_histories, init_ref_indices = build_rollout_initial_histories(
+            dynamic_ref,
+            skip_before_timestep=skip_before_timestep,
+            start_pred_t=start_pred_t,
+            n_members=n_ens if use_ensemble else 1,
+            rollout_init_mode=rollout_init_mode,
+        )
+        if (
+            rollout_init_mode == ROLLOUT_INIT_MEMBER_HISTORY
+            and not member_history_mapping_logged
+        ):
+            hydro_id = str(sample.get("hydrograph_id", "unknown"))
+            reference_run_ids = list(sample.get("reference_run_ids", []))
+            if reference_run_ids:
+                selected_refs = [
+                    reference_run_ids[idx] for idx in init_ref_indices[: min(len(init_ref_indices), n_ens if use_ensemble else 1)]
+                ]
+                logger.info(
+                    "Member-history calibration initialization for hydrograph %s uses reference members=%s",
+                    hydro_id,
+                    selected_refs,
+                )
+            else:
+                logger.info(
+                    "Member-history calibration initialization for hydrograph %s uses reference indices=%s",
+                    hydro_id,
+                    init_ref_indices[: min(len(init_ref_indices), n_ens if use_ensemble else 1)],
+                )
+            member_history_mapping_logged = True
         if use_ensemble:
-            current_dynamics = [init_history.clone() for _ in range(n_ens)]
+            current_dynamics = [hist.clone() for hist in init_histories]
         else:
-            current_dynamic = init_history.clone()
+            current_dynamic = init_histories[0].clone()
         current_boundary = full_boundary[skip_before_timestep:start_pred_t].clone()
         fgn_latent_bank = None
         if fgn_noise_dim is not None:

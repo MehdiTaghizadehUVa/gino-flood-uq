@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import logging
 import os
 import warnings
 from functools import partial
@@ -27,6 +26,7 @@ from neuralop.flood.data.wv import (
     FloodRolloutTestDatasetHDF,
     NormalizedDatasetOnTheFly,
     NormalizedRolloutTestDataset,
+    collect_all_fields,
     fit_normalizers_streaming,
 )
 from neuralop.flood.losses import (
@@ -42,8 +42,6 @@ from neuralop.flood.losses import (
 )
 from neuralop.flood.processing.wv import (
     FloodGINODataProcessor,
-    compute_hazard_proxy_pooled,
-    get_flood_crps_weights,
 )
 from neuralop.flood.train.debug import overfit_sanity_check, verify_training_gradient_flow
 from neuralop.flood.train.fgn import FGNTrainer
@@ -51,12 +49,15 @@ from neuralop.flood.train.gaussian import GaussianNLLTrainer
 from neuralop.flood.train.rollout import rollout_prediction
 from neuralop.flood.utils.runtime_core import (
     _cfg_get,
+    assert_boundary_channel_compatibility,
+    describe_boundary_spec,
     get_dataset_boundary_kwargs,
+    get_dataset_hdf_paths,
+    get_boundary_channel_count,
     get_structural_dry_policy_kwargs,
     _is_power_of_two,
     _safe_float,
     _safe_int,
-    _to_builtin,
     dataloader_worker_init,
     load_config_and_setup,
     make_dataloader_generator,
@@ -71,7 +72,7 @@ from neuralop.flood.utils.runtime_core import (
     write_train_txt_from_data_root,
 )
 from neuralop.losses.data_losses import LpLoss
-from neuralop.losses.probabilistic_losses import CRPSLoss, GaussianNLLLoss, fair_crps_univariate
+from neuralop.losses.probabilistic_losses import CRPSLoss, GaussianNLLLoss
 from neuralop.training import AdamW
 from neuralop.training.trainer import Trainer
 from neuralop.utils import get_wandb_api_key
@@ -232,18 +233,17 @@ def main():
         logger.info("Wrote train.txt with %s run IDs from %s", len(run_ids), config.data.root)
     # Static: 2 from HDF (elevation, area) + text files (CS, CU, FA) — aligned with HEC_RAS_Automation
     n_static = 2 + len(static_text_files)
-    data_channels = n_static + n_history * 1 + n_history * n_target_channels
+    data_boundary_kwargs = get_dataset_boundary_kwargs(config.data)
+    n_boundary_channels = get_boundary_channel_count(data_boundary_kwargs["boundary_spec"])
+    data_channels = n_static + n_history * n_boundary_channels + n_history * n_target_channels
     if hasattr(config, "gino"):
         setattr(config.gino, "data_channels", data_channels)
         setattr(config.gino, "out_channels", n_target_channels)
     ar_rollout_steps = max(1, _safe_int(_cfg_get(config.opt, "ar_rollout_steps", 1), 1))
-    data_boundary_kwargs = get_dataset_boundary_kwargs(config.data)
     logger.info(
-        "Training dataset boundary_source=%s%s",
-        data_boundary_kwargs["boundary_source"],
-        f", clean_boundary_file={data_boundary_kwargs['clean_boundary_file']}"
-        if data_boundary_kwargs["boundary_source"] == "clean_family"
-        else "",
+        "Training dataset boundary=%s (bc_dim=%d)",
+        describe_boundary_spec(data_boundary_kwargs["boundary_spec"]),
+        n_boundary_channels,
     )
     full_dataset = FloodDatasetHDF(
         data_root=config.data.root,
@@ -257,6 +257,7 @@ def main():
         skip_before_timestep=skip_before_timestep,
         noise_type=noise_type,
         noise_std=noise_std,
+        hdf_paths=get_dataset_hdf_paths(config.data),
         ar_rollout_steps=ar_rollout_steps,
         target_variables=target_variables,
         **data_boundary_kwargs,
@@ -854,12 +855,16 @@ def main():
 
     rollout_data_root = config.rollout_data.root
     rollout_boundary_kwargs = get_dataset_boundary_kwargs(config.rollout_data, split="test")
+    assert_boundary_channel_compatibility(
+        data_boundary_kwargs["boundary_spec"],
+        rollout_boundary_kwargs["boundary_spec"],
+        label_a="data",
+        label_b="rollout_data",
+    )
     logger.info(
-        "Rollout dataset boundary_source=%s%s",
-        rollout_boundary_kwargs["boundary_source"],
-        f", clean_boundary_file={rollout_boundary_kwargs['clean_boundary_file']}"
-        if rollout_boundary_kwargs["boundary_source"] == "clean_family"
-        else "",
+        "Rollout dataset boundary=%s (bc_dim=%d)",
+        describe_boundary_spec(rollout_boundary_kwargs["boundary_spec"]),
+        get_boundary_channel_count(rollout_boundary_kwargs["boundary_spec"]),
     )
     rollout_test_dataset = FloodRolloutTestDatasetHDF(
         rollout_data_root=rollout_data_root,
@@ -871,6 +876,7 @@ def main():
         hdf_suffix=".hdf",
         raise_on_smaller=True,
         skip_before_timestep=rollout_skip_before_timestep,
+        hdf_paths=get_dataset_hdf_paths(config.rollout_data),
         **rollout_boundary_kwargs,
     )
     if structural_dry_artifact is not None:

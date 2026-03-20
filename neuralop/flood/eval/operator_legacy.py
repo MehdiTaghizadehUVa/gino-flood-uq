@@ -15,7 +15,6 @@ Example:
 """
 
 import argparse
-import copy
 import json
 import logging
 import os
@@ -63,6 +62,7 @@ from neuralop.flood.cli.train_operator import (  # noqa: E402
     get_fgn_rollout_latent,
     update_fgn_dynamic_members,
 )
+from neuralop.flood.eval.runtime import clone_model_config_for_get_model  # noqa: E402
 from neuralop import get_model  # noqa: E402
 from neuralop.models.base_model import BaseModel  # noqa: E402
 from neuralop.losses.data_losses import LpLoss  # noqa: E402
@@ -2706,7 +2706,7 @@ def _build_model_for_run(
                 exc,
             )
 
-    model_cfg = copy.deepcopy(config)
+    model_cfg = clone_model_config_for_get_model(config)
     logger.info(
         "Model '%s': metadata not used; initializing from evaluation config snapshot.",
         label,
@@ -2883,6 +2883,11 @@ def _build_one_step_datasets(
         setattr(config.gino, "data_channels", data_channels)
         setattr(config.gino, "out_channels", n_target)
     data_boundary_kwargs = get_dataset_boundary_kwargs(config.data)
+    if data_boundary_kwargs["boundary_source"] == "multi_channel":
+        raise NotImplementedError(
+            "Legacy operator evaluation does not support boundary.channels or multi-channel boundaries. "
+            "Use the maintained evaluation pipeline instead."
+        )
     logger.info(
         "One-step dataset boundary_source=%s%s",
         data_boundary_kwargs["boundary_source"],
@@ -2955,6 +2960,11 @@ def _build_rollout_normalized_dataset(
 
     with _PhaseTimer(logger, "Building rollout test dataset"):
         rollout_boundary_kwargs = get_dataset_boundary_kwargs(config.rollout_data, split="test")
+        if rollout_boundary_kwargs["boundary_source"] == "multi_channel":
+            raise NotImplementedError(
+                "Legacy operator evaluation does not support boundary.channels or multi-channel boundaries. "
+                "Use the maintained evaluation pipeline instead."
+            )
         logger.info(
             "Rollout dataset boundary_source=%s%s",
             rollout_boundary_kwargs["boundary_source"],

@@ -1,8 +1,13 @@
-import numpy as np
-import torch
 from types import SimpleNamespace
 
+import numpy as np
+import torch
+
 from neuralop.flood.eval.metrics import _compute_csi
+from neuralop.flood.eval.runtime import (
+    build_rollout_initial_histories,
+    clone_model_config_for_get_model,
+)
 
 
 def test_compute_csi_matches_expected_value():
@@ -19,6 +24,28 @@ def test_maintained_eval_common_imports():
 
 def test_maintained_calibrated_eval_imports():
     from neuralop.flood.eval.calibrated import main  # noqa: F401
+
+
+def test_clone_model_config_handles_keyerror_getattr_dictlikes():
+    class WeirdConfig(dict):
+        def __getattr__(self, name):
+            raise KeyError(name)
+
+    cfg = WeirdConfig(
+        {
+            "arch": "gino",
+            "gino": {"data_channels": 3, "fno_hidden_channels": 64},
+            "distributed": WeirdConfig({"seed": 123}),
+        }
+    )
+    cloned = clone_model_config_for_get_model(cfg)
+    assert cloned == {
+        "arch": "gino",
+        "gino": {"data_channels": 3, "fno_hidden_channels": 64},
+        "distributed": {"seed": 123},
+    }
+    cloned["gino"]["data_channels"] = 99
+    assert cfg["gino"]["data_channels"] == 3
 
 
 def test_build_rollout_dataset_groups_hydrographs(monkeypatch):
@@ -83,8 +110,43 @@ def test_build_rollout_dataset_groups_hydrographs(monkeypatch):
         "M40_TE000001",
         "M40_TE000002",
     ]
+    assert hydrograph_samples[0]["reference_run_ids"] == [
+        "M40_TE000001_sim00",
+        "M40_TE000001_sim01",
+    ]
     assert all(sample["dynamic_ref"].shape[0] == 2 for sample in hydrograph_samples)
     assert all(tuple(sample["query_points"].shape) == (4, 4, 2) for sample in hydrograph_samples)
+
+
+def test_build_rollout_initial_histories_mean_history_repeats_mean():
+    dynamic_ref = torch.arange(3 * 2 * 2, dtype=torch.float32).reshape(3, 2, 2, 1)
+    histories, member_indices = build_rollout_initial_histories(
+        dynamic_ref,
+        skip_before_timestep=0,
+        start_pred_t=2,
+        n_members=4,
+        rollout_init_mode="mean_history",
+    )
+    expected = dynamic_ref.mean(dim=0)
+    assert member_indices == [-1, -1, -1, -1]
+    assert len(histories) == 4
+    assert all(torch.equal(hist, expected) for hist in histories)
+
+
+def test_build_rollout_initial_histories_member_history_uses_reference_members():
+    dynamic_ref = torch.arange(4 * 3 * 1 * 1, dtype=torch.float32).reshape(4, 3, 1, 1)
+    histories, member_indices = build_rollout_initial_histories(
+        dynamic_ref,
+        skip_before_timestep=0,
+        start_pred_t=3,
+        n_members=3,
+        rollout_init_mode="member_history",
+    )
+    assert member_indices == [0, 2, 3]
+    assert len(histories) == 3
+    assert torch.equal(histories[0], dynamic_ref[0])
+    assert torch.equal(histories[1], dynamic_ref[2])
+    assert torch.equal(histories[2], dynamic_ref[3])
 
 
 def test_operator_eval_passes_fgn_state_update_to_rollout(monkeypatch, tmp_path):
@@ -127,6 +189,7 @@ def test_operator_eval_passes_fgn_state_update_to_rollout(monkeypatch, tmp_path)
             run_after_training=True,
             out_dir=str(tmp_path / "out"),
             n_ensemble_samples=2,
+            init_mode="member_history",
         ),
     )
 
@@ -186,3 +249,4 @@ def test_operator_eval_passes_fgn_state_update_to_rollout(monkeypatch, tmp_path)
 
     assert app.main() == 0
     assert captured["fgn_ar_state_update"] == "member_feedback"
+    assert captured["rollout_init_mode"] == "member_history"
