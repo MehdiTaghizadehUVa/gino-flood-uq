@@ -116,11 +116,11 @@ class _ExactChannelAccumulator:
             raise RuntimeError("No samples were accumulated for exact normalizer fitting.")
         count = float(max(self.count, 1.0))
         mean = self.sum / count
-        var = np.clip((self.sq_sum / count) - np.square(mean), a_min=0.0, a_max=None)
-        std = np.sqrt(var)
         if count > 1.0:
-            # Match UnitGaussianNormalizer.incremental_update_mean_std semantics.
-            std = std * (count / (count - 1.0))
+            m2 = np.clip(self.sq_sum - count * np.square(mean), a_min=0.0, a_max=None)
+            std = np.sqrt(m2 / (count - 1.0))
+        else:
+            std = np.zeros_like(mean)
         mean_t = torch.as_tensor(mean, dtype=torch.float32).reshape(self.view_shape)
         std_t = torch.as_tensor(std, dtype=torch.float32).reshape(self.view_shape)
         return UnitGaussianNormalizer(mean=mean_t, std=std_t, dim=self.dim)

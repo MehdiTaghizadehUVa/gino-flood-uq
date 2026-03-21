@@ -59,3 +59,28 @@ def test_UnitGaussianNormalizer_incremental_update(eps=1e-6):
     assert_close(normalizer.mean, mean)
     assert_close(normalizer.std, std, rtol=eps, atol=eps)
 
+def test_UnitGaussianNormalizer_incremental_update_large_magnitude_geometry():
+    n_cells = 2000
+    chunk_batch = 50
+    n_chunks = 20
+    coords = torch.stack(
+        [
+            torch.linspace(300000.0, 301000.0, n_cells),
+            torch.linspace(4300000.0, 4300800.0, n_cells),
+        ],
+        dim=1,
+    ).float()
+    chunks = [coords.unsqueeze(0).repeat(chunk_batch, 1, 1) for _ in range(n_chunks)]
+
+    normalizer = UnitGaussianNormalizer(dim=[0, 1], eps=1e-6)
+    normalizer.fit(chunks[0])
+    for chunk in chunks[1:]:
+        normalizer.partial_fit(chunk, batch_size=chunk.shape[0])
+
+    all_data = torch.cat(chunks, dim=0)
+    expected_mean = torch.mean(all_data, dim=[0, 1], keepdim=True)
+    expected_std = torch.std(all_data, dim=[0, 1], keepdim=True)
+
+    assert_close(normalizer.mean, expected_mean, rtol=1e-6, atol=1e-4)
+    assert_close(normalizer.std, expected_std, rtol=1e-6, atol=1e-3)
+

@@ -79,6 +79,46 @@ class UnitGaussianNormalizer(Transform):
             dim = [dim]
         self.dim = dim
         self.n_elements = 0
+        self.squared_mean = None
+        self._running_mean64 = None
+        self._running_m2_64 = None
+
+    def _reduce_dims(self):
+        if self.dim is None:
+            return None
+        if isinstance(self.dim, int):
+            return (self.dim,)
+        return tuple(self.dim)
+
+    def _set_running_stats(self, mean64, m2_64, n_elements, *, out_dtype):
+        self._running_mean64 = mean64.detach().clone()
+        self._running_m2_64 = m2_64.detach().clone()
+        self.n_elements = int(n_elements)
+        self.mean = self._running_mean64.to(dtype=out_dtype)
+        if self.n_elements > 1:
+            var64 = torch.clamp(self._running_m2_64 / (self.n_elements - 1), min=0.0)
+            self.std = torch.sqrt(var64).to(dtype=out_dtype)
+        else:
+            self.std = torch.zeros_like(self.mean, dtype=out_dtype)
+        if self.n_elements > 0:
+            pop_var64 = self._running_m2_64 / self.n_elements
+            self.squared_mean = (pop_var64 + self._running_mean64**2).to(dtype=out_dtype)
+        else:
+            self.squared_mean = torch.zeros_like(self.mean, dtype=out_dtype)
+
+    def _compute_batch_stats(self, data_batch):
+        reduce_dims = self._reduce_dims()
+        batch64 = data_batch.to(dtype=torch.float64)
+        if reduce_dims is None:
+            batch_sum = batch64.sum()
+            batch_sq_sum = (batch64**2).sum()
+        else:
+            batch_sum = batch64.sum(dim=reduce_dims, keepdim=True)
+            batch_sq_sum = (batch64**2).sum(dim=reduce_dims, keepdim=True)
+        n_elements = count_tensor_params(data_batch, self.dim)
+        batch_mean64 = batch_sum / n_elements
+        batch_m2_64 = torch.clamp(batch_sq_sum - n_elements * (batch_mean64**2), min=0.0)
+        return batch_mean64, batch_m2_64, int(n_elements)
 
     def fit(self, data_batch):
         self.update_mean_std(data_batch)
@@ -102,10 +142,8 @@ class UnitGaussianNormalizer(Transform):
     def update_mean_std(self, data_batch):
         self.ndim = data_batch.ndim  # Note this includes batch-size
         if self.mask is None:
-            self.n_elements = count_tensor_params(data_batch, self.dim)
-            self.mean = torch.mean(data_batch, dim=self.dim, keepdim=True)
-            self.squared_mean = torch.mean(data_batch**2, dim=self.dim, keepdim=True)
-            self.std = torch.std(data_batch, dim=self.dim, keepdim=True)
+            batch_mean64, batch_m2_64, n_elements = self._compute_batch_stats(data_batch)
+            self._set_running_stats(batch_mean64, batch_m2_64, n_elements, out_dtype=data_batch.dtype)
         else:
             batch_size = data_batch.shape[0]
             dim = [i - 1 for i in self.dim if i]
@@ -125,8 +163,20 @@ class UnitGaussianNormalizer(Transform):
 
     def incremental_update_mean_std(self, data_batch):
         if self.mask is None:
-            n_elements = count_tensor_params(data_batch, self.dim)
-            dim = self.dim
+            batch_mean64, batch_m2_64, n_elements = self._compute_batch_stats(data_batch)
+            if self._running_mean64 is None or self._running_m2_64 is None or not self.n_elements:
+                self._set_running_stats(batch_mean64, batch_m2_64, n_elements, out_dtype=data_batch.dtype)
+                return
+            total = self.n_elements + n_elements
+            delta = batch_mean64 - self._running_mean64
+            merged_mean64 = self._running_mean64 + delta * (n_elements / total)
+            merged_m2_64 = (
+                self._running_m2_64
+                + batch_m2_64
+                + (delta**2) * (self.n_elements * n_elements / total)
+            )
+            self._set_running_stats(merged_mean64, merged_m2_64, total, out_dtype=data_batch.dtype)
+            return
         else:
             dim = [i - 1 for i in self.dim if i]
             n_elements = torch.count_nonzero(self.mask, dim=dim) * data_batch.shape[0]

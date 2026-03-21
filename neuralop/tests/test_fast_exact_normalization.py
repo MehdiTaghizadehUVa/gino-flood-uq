@@ -83,6 +83,37 @@ def _write_minimal_hdf(path: Path, *, inflow_offset: float, wd_offset: float, n_
         _write_dataset(handle, HDF_GROUPS["precipitation"], precipitation)
 
 
+def _write_large_magnitude_hdf(path: Path, *, inflow_offset: float, wd_offset: float, n_time: int = 7, n_cells: int = 16):
+    geometry = np.stack(
+        [
+            np.linspace(300000.0, 301000.0, n_cells, dtype=np.float32),
+            np.linspace(4300000.0, 4300800.0, n_cells, dtype=np.float32),
+        ],
+        axis=1,
+    )
+    elevation = np.linspace(1000.0, 1400.0, n_cells, dtype=np.float32)
+    area = np.linspace(50000.0, 90000.0, n_cells, dtype=np.float32)
+    time_axis = np.arange(n_time, dtype=np.float32)
+    wd = np.tile(time_axis[:, None], (1, n_cells)).astype(np.float32) + wd_offset
+    vx = wd + 0.1
+    vy = wd + 0.2
+    inflow = np.stack([time_axis, 10.0 + inflow_offset + time_axis], axis=1).astype(np.float32)
+    stage = (20.0 + inflow_offset + time_axis).astype(np.float32)
+    precipitation = (30.0 + inflow_offset + 2.0 * time_axis).astype(np.float32)
+
+    with h5py.File(path, "w") as handle:
+        _write_dataset(handle, HDF_GROUPS["geometry"], geometry)
+        _write_dataset(handle, HDF_GROUPS["geometry_cell_centers"], geometry)
+        _write_dataset(handle, HDF_GROUPS["elevation"], elevation)
+        _write_dataset(handle, HDF_GROUPS["area"], area)
+        _write_dataset(handle, HDF_GROUPS["wd"], wd)
+        _write_dataset(handle, HDF_GROUPS["vx"], vx)
+        _write_dataset(handle, HDF_GROUPS["vy"], vy)
+        _write_dataset(handle, HDF_GROUPS["us_inflow"], inflow)
+        _write_dataset(handle, HDF_GROUPS["stage"], stage)
+        _write_dataset(handle, HDF_GROUPS["precipitation"], precipitation)
+
+
 def _write_clean_boundary_table(path: Path, family_to_series: dict[str, np.ndarray]):
     families = list(family_to_series.keys())
     matrix = np.column_stack([np.asarray(family_to_series[f], dtype=np.float32) for f in families])
@@ -100,6 +131,29 @@ def _make_fixture(tmp_path: Path):
     run_ids = ["TR000001_sim00", "TR000001_sim01"]
     _write_minimal_hdf(data_root / f"{run_ids[0]}.hdf", inflow_offset=0.0, wd_offset=0.0)
     _write_minimal_hdf(data_root / f"{run_ids[1]}.hdf", inflow_offset=50.0, wd_offset=25.0)
+
+    stage_clean = np.array([100, 101, 102, 103, 104, 105, 106], dtype=np.float32)
+    precip_clean = np.array([200, 201, 202, 203, 204, 205, 206], dtype=np.float32)
+    _write_clean_boundary_table(
+        meta_root / "Stage_Hydrographs_Train_Clean.txt",
+        {"TR000001": stage_clean},
+    )
+    _write_clean_boundary_table(
+        meta_root / "Precipitation_Train_Clean.txt",
+        {"TR000001": precip_clean},
+    )
+    return data_root, meta_root, run_ids
+
+
+def _make_large_magnitude_fixture(tmp_path: Path):
+    data_root = tmp_path / "data_large"
+    meta_root = tmp_path / "metadata_large"
+    data_root.mkdir()
+    meta_root.mkdir()
+
+    run_ids = ["TR000001_sim00", "TR000001_sim01"]
+    _write_large_magnitude_hdf(data_root / f"{run_ids[0]}.hdf", inflow_offset=0.0, wd_offset=0.0)
+    _write_large_magnitude_hdf(data_root / f"{run_ids[1]}.hdf", inflow_offset=50.0, wd_offset=25.0)
 
     stage_clean = np.array([100, 101, 102, 103, 104, 105, 106], dtype=np.float32)
     precip_clean = np.array([200, 201, 202, 203, 204, 205, 206], dtype=np.float32)
@@ -189,6 +243,49 @@ def test_fast_exact_matches_streaming_for_clean_family_multichannel_subset(tmp_p
     exact = fit_normalizers(
         subset,
         chunk_size=1,
+        expect_target=True,
+        structural_dry_policy="legacy_full_domain",
+        method="fast_exact",
+    )
+
+    _assert_normalizers_close(streaming, exact)
+
+
+def test_fast_exact_matches_streaming_for_large_magnitude_geometry_and_static(tmp_path: Path):
+    data_root, meta_root, run_ids = _make_large_magnitude_fixture(tmp_path)
+    dataset = FloodDatasetHDF(
+        data_root=str(data_root),
+        n_history=2,
+        ar_rollout_steps=2,
+        run_ids=run_ids,
+        boundary_spec=[
+            {
+                "name": "stage",
+                "mode": "clean_family",
+                "clean_boundary_root": str(meta_root),
+                "clean_boundary_file": "Stage_Hydrographs_Train_Clean.txt",
+            },
+            {
+                "name": "precipitation",
+                "mode": "clean_family",
+                "clean_boundary_root": str(meta_root),
+                "clean_boundary_file": "Precipitation_Train_Clean.txt",
+            },
+        ],
+        target_variables=["wd"],
+    )
+    repeated_indices = [0, 1, 2, 3] * 128
+    subset = Subset(dataset, repeated_indices)
+
+    streaming = fit_normalizers_streaming(
+        subset,
+        chunk_size=32,
+        expect_target=True,
+        structural_dry_policy="legacy_full_domain",
+    )
+    exact = fit_normalizers(
+        subset,
+        chunk_size=32,
         expect_target=True,
         structural_dry_policy="legacy_full_domain",
         method="fast_exact",
