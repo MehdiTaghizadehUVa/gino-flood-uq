@@ -312,23 +312,37 @@ def main():
         if normalizer_path is not None
         else None
     )
-    can_load_cached_normalizers = (
-        normalizer_path is not None
-        and normalizer_path.exists()
-        and metadata_path is not None
+    force_load_cached_normalizers = bool(
+        _cfg_get(config.data, "force_load_normalizers", False)
+    )
+    metadata_matches = (
+        metadata_path is not None
         and metadata_path.exists()
         and normalizer_metadata_matches(
             expected_normalizer_metadata,
             load_normalizer_metadata(metadata_path),
         )
     )
+    can_load_cached_normalizers = (
+        normalizer_path is not None
+        and normalizer_path.exists()
+        and (force_load_cached_normalizers or metadata_matches)
+    )
     if can_load_cached_normalizers:
         normalizers = load_normalizers(normalizer_path, device=None)
-        logger.info(
-            "Loaded normalizers from %s (method=%s)",
-            normalizer_path,
-            normalizer_fit_method,
-        )
+        if force_load_cached_normalizers and not metadata_matches:
+            logger.warning(
+                "Loaded normalizers from %s with metadata validation bypassed "
+                "(force_load_normalizers=true, method=%s)",
+                normalizer_path,
+                normalizer_fit_method,
+            )
+        else:
+            logger.info(
+                "Loaded normalizers from %s (method=%s)",
+                normalizer_path,
+                normalizer_fit_method,
+            )
     else:
         norm_chunk_size = _cfg_get(config.data, "normalizer_chunk_size", 10000)
         normalizers, normalizer_fit_method = fit_normalizers(

@@ -176,6 +176,27 @@ def _assert_normalizers_close(lhs, rhs):
     assert rhs["dynamic"] is rhs["target"]
 
 
+
+
+
+def test_masked_primary_auto_resolves_to_streaming(tmp_path: Path):
+    data_root, _, run_ids = _make_fixture(tmp_path)
+    dataset = FloodDatasetHDF(
+        data_root=str(data_root),
+        n_history=2,
+        ar_rollout_steps=2,
+        run_ids=run_ids,
+        boundary_spec=[{"name": "inflow", "mode": "member_hdf", "hdf_path": HDF_GROUPS["us_inflow"]}],
+        target_variables=['wd'],
+    )
+
+    resolved = resolve_normalizer_fit_method(
+        dataset,
+        method='auto',
+        structural_dry_policy='masked_primary',
+    )
+    assert resolved == 'streaming'
+
 def test_fast_exact_matches_streaming_for_member_hdf_multichannel_raw_dataset(tmp_path: Path):
     data_root, _, run_ids = _make_fixture(tmp_path)
     dataset = FloodDatasetHDF(
@@ -415,3 +436,16 @@ def test_auto_falls_back_to_streaming_for_masked_primary():
             method="fast_exact",
             structural_dry_policy="masked_primary",
         )
+
+
+def test_resolve_normalizer_fit_method_masked_primary_uses_streaming():
+    class DummyDataset:
+        pass
+
+    resolved = resolve_normalizer_fit_method(
+        DummyDataset(),
+        method="auto",
+        structural_dry_policy="masked_primary",
+    )
+    assert resolved == "streaming"
+
