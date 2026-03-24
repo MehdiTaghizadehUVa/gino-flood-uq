@@ -1,5 +1,6 @@
 # weights and biases
 .wandb/ 
+wandb/
 wandb_api_key.txt
 
 # Byte-compiled / optimized / DLL files
