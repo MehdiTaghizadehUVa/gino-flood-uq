@@ -27,7 +27,7 @@ submit_job() {
   shift
   local output
   output="$($@)"
-  echo "${output}"
+  echo "${output}" >&2
   local job_id
   job_id="$(echo "${output}" | awk '/Submitted batch job/ {print $4}' | tail -n 1)"
   if [[ -z "${job_id}" ]]; then
