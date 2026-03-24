@@ -163,7 +163,7 @@ def _resolve_base_dataset_and_indices(dataset):
         if selected is None:
             selected = current_indices
         else:
-            selected = selected[current_indices]
+            selected = current_indices[selected]
         current = current.dataset
     if selected is None:
         selected = np.arange(len(current), dtype=np.int64)

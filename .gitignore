@@ -112,6 +112,9 @@ scripts/runtime/eval_outputs/**
 scripts/runtime/checkpoints/**
 !scripts/runtime/checkpoints/
 !scripts/runtime/checkpoints/.gitkeep
+scripts/runtime/coastal_fgn_grid_30ep_*/
+runtime/
+tmp_codex_sync_*/
 scripts/*.log
 scripts/*.log.*
 scripts/*.tmp

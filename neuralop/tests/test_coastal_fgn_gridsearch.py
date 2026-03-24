@@ -64,6 +64,8 @@ def test_render_config_keeps_multichannel_clean_family_and_sets_overrides(tmp_pa
         wandb_name="name",
         data_root="/tmp/coastal/train",
         clean_boundary_root="/tmp/coastal/clean",
+        batch_size=16,
+        n_samples_max=4096,
         n_epochs=30,
         seed=123,
         deterministic=False,
@@ -80,6 +82,8 @@ def test_render_config_keeps_multichannel_clean_family_and_sets_overrides(tmp_pa
     assert all(channel["clean_boundary_root"] == "/tmp/coastal/clean" for channel in channels)
     assert flood["data"]["static_text_files"] == ["Coastal_CS.txt"]
     assert flood["data"]["root"] == "/tmp/coastal/train"
+    assert flood["data"]["batch_size"] == 16
+    assert flood["data"]["n_samples_max"] == 4096
     assert flood["data"]["normalizer_root"] == str(normalizer_root)
     assert flood["data"]["normalizer_path"] == "normalizers_depth_only.pt"
     assert flood["checkpoint"]["save_dir"] == str(checkpoint_dir)
@@ -98,6 +102,8 @@ def test_render_config_keeps_multichannel_clean_family_and_sets_overrides(tmp_pa
     assert flood["verify_training"] is False
     assert flood["rollout"]["run_after_training"] is False
     assert rendered["run_tag"] == build_run_tag(spec_for_index(95))
+    assert rendered["batch_size"] == 16
+    assert rendered["n_samples_max"] == 4096
 
 
 def test_parse_training_log_extracts_best_and_final_metrics(tmp_path: Path):

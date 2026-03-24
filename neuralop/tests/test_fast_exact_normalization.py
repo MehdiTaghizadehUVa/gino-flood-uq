@@ -251,6 +251,49 @@ def test_fast_exact_matches_streaming_for_clean_family_multichannel_subset(tmp_p
     _assert_normalizers_close(streaming, exact)
 
 
+def test_fast_exact_matches_streaming_for_nested_subset_selection(tmp_path: Path):
+    data_root, meta_root, run_ids = _make_fixture(tmp_path)
+    dataset = FloodDatasetHDF(
+        data_root=str(data_root),
+        n_history=2,
+        ar_rollout_steps=2,
+        run_ids=run_ids,
+        boundary_spec=[
+            {
+                "name": "stage",
+                "mode": "clean_family",
+                "clean_boundary_root": str(meta_root),
+                "clean_boundary_file": "Stage_Hydrographs_Train_Clean.txt",
+            },
+            {
+                "name": "precipitation",
+                "mode": "clean_family",
+                "clean_boundary_root": str(meta_root),
+                "clean_boundary_file": "Precipitation_Train_Clean.txt",
+            },
+        ],
+        target_variables=["wd"],
+    )
+    capped = Subset(dataset, [0, 1, 3, 4, 6, 7])
+    nested = Subset(capped, [0, 2, 4])
+
+    streaming = fit_normalizers_streaming(
+        nested,
+        chunk_size=1,
+        expect_target=True,
+        structural_dry_policy="legacy_full_domain",
+    )
+    exact = fit_normalizers(
+        nested,
+        chunk_size=1,
+        expect_target=True,
+        structural_dry_policy="legacy_full_domain",
+        method="fast_exact",
+    )
+
+    _assert_normalizers_close(streaming, exact)
+
+
 def test_fast_exact_matches_streaming_for_large_magnitude_geometry_and_static(tmp_path: Path):
     data_root, meta_root, run_ids = _make_large_magnitude_fixture(tmp_path)
     dataset = FloodDatasetHDF(

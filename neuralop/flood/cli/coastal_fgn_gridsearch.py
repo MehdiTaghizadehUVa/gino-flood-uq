@@ -132,6 +132,8 @@ def render_config(
     wandb_name: str,
     data_root: str | None = None,
     clean_boundary_root: str | None = None,
+    batch_size: int | None = None,
+    n_samples_max: int | None = None,
     n_epochs: int = N_EPOCHS_DEFAULT,
     seed: int = SEED_DEFAULT,
     deterministic: bool = False,
@@ -148,6 +150,9 @@ def render_config(
 
     config.setdefault("data", {})["normalizer_root"] = str(normalizer_root)
     config["data"]["normalizer_path"] = "normalizers_depth_only.pt"
+    if batch_size is not None:
+        config["data"]["batch_size"] = int(batch_size)
+    config["data"]["n_samples_max"] = int(n_samples_max) if n_samples_max is not None else None
 
     config.setdefault("checkpoint", {})["save_dir"] = str(checkpoint_dir)
     config["checkpoint"]["resume_from_dir"] = None
@@ -178,6 +183,8 @@ def render_config(
             "normalizer_root": str(normalizer_root),
             "wandb_group": str(wandb_group),
             "wandb_name": str(wandb_name),
+            "batch_size": int(batch_size) if batch_size is not None else int(config["data"]["batch_size"]),
+            "n_samples_max": int(n_samples_max) if n_samples_max is not None else None,
             "n_epochs": int(n_epochs),
             "seed": int(seed),
             "deterministic": bool(deterministic),
@@ -192,6 +199,7 @@ def precompute_normalizers(
     normalizer_root: Path,
     data_root: str | None = None,
     clean_boundary_root: str | None = None,
+    n_samples_max: int | None = None,
     seed: int = SEED_DEFAULT,
     chunk_size: int | None = None,
     overwrite: bool = False,
@@ -224,6 +232,8 @@ def precompute_normalizers(
     )
     data_cfg = config.setdefault("data", {})
     opt_cfg = config.setdefault("opt", {})
+    if n_samples_max is not None:
+        data_cfg["n_samples_max"] = int(n_samples_max)
 
     normalizer_root = normalizer_root.resolve()
     normalizer_root.mkdir(parents=True, exist_ok=True)
@@ -465,6 +475,8 @@ def _parse_args() -> argparse.Namespace:
     render.add_argument("--wandb-name", type=str, required=True)
     render.add_argument("--data-root", type=str, default=None)
     render.add_argument("--clean-boundary-root", type=str, default=None)
+    render.add_argument("--batch-size", type=int, default=None)
+    render.add_argument("--n-samples-max", type=int, default=None)
     render.add_argument("--n-epochs", type=int, default=N_EPOCHS_DEFAULT)
     render.add_argument("--seed", type=int, default=SEED_DEFAULT)
     render.add_argument("--deterministic", choices=("true", "false"), default="false")
@@ -475,6 +487,7 @@ def _parse_args() -> argparse.Namespace:
     precompute.add_argument("--normalizer-root", type=Path, required=True)
     precompute.add_argument("--data-root", type=str, default=None)
     precompute.add_argument("--clean-boundary-root", type=str, default=None)
+    precompute.add_argument("--n-samples-max", type=int, default=None)
     precompute.add_argument("--seed", type=int, default=SEED_DEFAULT)
     precompute.add_argument("--chunk-size", type=int, default=None)
     precompute.add_argument("--overwrite", action="store_true")
@@ -535,6 +548,8 @@ def main() -> int:
             wandb_name=args.wandb_name,
             data_root=args.data_root,
             clean_boundary_root=args.clean_boundary_root,
+            batch_size=args.batch_size,
+            n_samples_max=args.n_samples_max,
             n_epochs=args.n_epochs,
             seed=args.seed,
             deterministic=(args.deterministic == "true"),
@@ -549,6 +564,7 @@ def main() -> int:
             normalizer_root=args.normalizer_root,
             data_root=args.data_root,
             clean_boundary_root=args.clean_boundary_root,
+            n_samples_max=args.n_samples_max,
             seed=args.seed,
             chunk_size=args.chunk_size,
             overwrite=bool(args.overwrite),
