@@ -192,10 +192,10 @@ class GNOBlock(nn.Module):
             else:
                 raise NotImplementedError(f"Unknown weighting function '{gno_weighting_fn}'")
 
-        # Caching placeholders: only cache the neighbor dictionary (and the original inputs for verification)
+        # Cache tensor snapshots as non-persistent buffers and keep the neighbor dict as a plain attribute.
         self.register_buffer('cached_y_original', None, persistent=False)
         self.register_buffer('cached_x_original', None, persistent=False)
-        self.register_buffer('cached_neighbors', None, persistent=False)
+        self.cached_neighbors = None
         self._is_cached = False
         self._is_verified = False
 
@@ -204,25 +204,29 @@ class GNOBlock(nn.Module):
         Precompute and cache neighbor indices for static y and x.
         We do NOT cache the positional embeddings so that they remain in the computation graph.
         """
-        if not (y.requires_grad or x.requires_grad):
-            with torch.no_grad():
-                neighbors_dict = self.neighbor_search(
-                    data=y,
-                    queries=x,
-                    radius=self.radius,
-                    compute_norm=False
-                )
-                neighbors_dict = {k: v.to(y.device) for k, v in neighbors_dict.items()}
-                self.cached_neighbors = neighbors_dict
-                self.cached_y_original = y.clone()
-                self.cached_x_original = x.clone()
-            self._is_cached = True
-            self._is_verified = True
-        else:
+        if y.requires_grad or x.requires_grad:
             # Do not cache if inputs require grad.
             self._is_cached = False
+            self._is_verified = False
+            return
+
+        with torch.no_grad():
+            neighbors_dict = self.neighbor_search(
+                data=y,
+                queries=x,
+                radius=self.radius,
+                compute_norm=False
+            )
+            neighbors_dict = {k: v.to(y.device) for k, v in neighbors_dict.items()}
+            self.cached_neighbors = neighbors_dict
+            self.cached_y_original = y.detach().clone()
+            self.cached_x_original = x.detach().clone()
+        self._is_cached = True
+        self._is_verified = False
 
     def _verify_cached_components(self, y: torch.Tensor, x: torch.Tensor):
+        if self.cached_neighbors is None or self.cached_y_original is None or self.cached_x_original is None:
+            raise RuntimeError("Cached components are missing. Re-run precompute_static_components.")
         if y.shape != self.cached_y_original.shape:
             raise ValueError("Input tensor y shape differs from cached shape.")
         if x.shape != self.cached_x_original.shape:
@@ -243,13 +247,14 @@ class GNOBlock(nn.Module):
         Always compute the positional embeddings fresh to ensure they are part of the computation graph.
         If caching is available, only the neighbor dictionary is reused.
         """
-        if y.requires_grad or x.requires_grad or (not self._is_cached):
-            if self.pos_embedding is not None:
-                y_embed = self.pos_embedding(y)
-                x_embed = self.pos_embedding(x)
-            else:
-                y_embed = y
-                x_embed = x
+        if self.pos_embedding is not None:
+            y_embed = self.pos_embedding(y)
+            x_embed = self.pos_embedding(x)
+        else:
+            y_embed = y
+            x_embed = x
+
+        if y.requires_grad or x.requires_grad:
             neighbors_dict = self.neighbor_search(
                 data=y,
                 queries=x,
@@ -260,14 +265,7 @@ class GNOBlock(nn.Module):
         else:
             if not self._is_cached:
                 self.precompute_static_components(y, x)
-                self._verify_cached_components(y, x)
-            # Always compute embeddings fresh so that gradients are tracked.
-            if self.pos_embedding is not None:
-                y_embed = self.pos_embedding(y)
-                x_embed = self.pos_embedding(x)
-            else:
-                y_embed = y
-                x_embed = x
+            self._verify_cached_components(y, x)
             neighbors_dict = self.cached_neighbors
 
         out_features = self.integral_transform(

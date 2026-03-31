@@ -154,7 +154,7 @@ class NeighborSearch(nn.Module):
         radius : float
             Radius of each ball: B(queries[j], radius).
         compute_norm : None or bool, default None
-            If not None (or True), compute squared L2 norms for each neighbor pair,
+            If True, compute squared L2 norms for each neighbor pair,
             stored under return_dict['norm'].
         debug : bool, default False
             If True, print out neighbor counts and plot the query nodes with zero neighbors.
@@ -182,7 +182,7 @@ class NeighborSearch(nn.Module):
             return_dict = self.search_fn(data, queries, radius)
 
         # Optionally compute squared norms for each neighbor pair
-        if compute_norm is not None:
+        if compute_norm:
             nbr_splits = return_dict['neighbors_row_splits']
             num_reps = nbr_splits[1:] - nbr_splits[:-1]
             rep_queries = torch.repeat_interleave(queries, num_reps, dim=0)
