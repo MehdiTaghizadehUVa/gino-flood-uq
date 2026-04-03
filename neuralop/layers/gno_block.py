@@ -224,6 +224,15 @@ class GNOBlock(nn.Module):
         self._is_cached = True
         self._is_verified = False
 
+    def _cached_components_match(self, y: torch.Tensor, x: torch.Tensor) -> bool:
+        if self.cached_neighbors is None or self.cached_y_original is None or self.cached_x_original is None:
+            return False
+        if y.shape != self.cached_y_original.shape or x.shape != self.cached_x_original.shape:
+            return False
+        if y.device != self.cached_y_original.device or x.device != self.cached_x_original.device:
+            return False
+        return torch.equal(y, self.cached_y_original) and torch.equal(x, self.cached_x_original)
+
     def _verify_cached_components(self, y: torch.Tensor, x: torch.Tensor):
         if self.cached_neighbors is None or self.cached_y_original is None or self.cached_x_original is None:
             raise RuntimeError("Cached components are missing. Re-run precompute_static_components.")
@@ -263,9 +272,11 @@ class GNOBlock(nn.Module):
             )
             neighbors_dict = {k: v.to(y.device) for k, v in neighbors_dict.items()}
         else:
-            if not self._is_cached:
+            if not self._is_cached or not self._cached_components_match(y, x):
                 self.precompute_static_components(y, x)
-            self._verify_cached_components(y, x)
+                self._is_verified = True
+            else:
+                self._verify_cached_components(y, x)
             neighbors_dict = self.cached_neighbors
 
         out_features = self.integral_transform(

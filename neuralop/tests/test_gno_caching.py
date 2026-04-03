@@ -76,7 +76,7 @@ def test_first_forward_lazily_precomputes_and_reuses_neighbors():
     assert len(spy.calls) == 1
 
 
-def test_cached_reuse_detects_stale_inputs():
+def test_cached_reuse_refreshes_on_stale_inputs_in_forward():
     block = _make_block()
     spy = NeighborSearchSpy()
     block.neighbor_search = spy
@@ -87,8 +87,25 @@ def test_cached_reuse_detects_stale_inputs():
     x_changed = x.clone()
     x_changed[0, 0] += 0.25
 
+    block(y, x_changed)
+
+    assert len(spy.calls) == 2
+    assert torch.equal(block.cached_x_original, x_changed)
+
+
+def test_strict_verifier_detects_stale_inputs():
+    block = _make_block()
+    spy = NeighborSearchSpy()
+    block.neighbor_search = spy
+    y = torch.tensor([[0.0, 0.0], [1.0, 0.0]], dtype=torch.float32)
+    x = torch.tensor([[0.0, 0.0], [0.5, 0.0]], dtype=torch.float32)
+
+    block.precompute_static_components(y, x)
+    x_changed = x.clone()
+    x_changed[0, 0] += 0.25
+
     with pytest.raises(ValueError, match="Input tensor x has changed since precomputation"):
-        block(y, x_changed)
+        block._verify_cached_components(y, x_changed)
 
     assert len(spy.calls) == 1
 
