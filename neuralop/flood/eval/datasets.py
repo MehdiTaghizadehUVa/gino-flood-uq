@@ -12,6 +12,7 @@ from torch.utils.data import DataLoader, Subset, random_split
 from neuralop.data.transforms.normalizers import load_normalizers
 from neuralop.flood.data.structural_dry import (
     load_structural_dry_artifact,
+    resolve_canonical_training_run_ids,
     validate_structural_dry_artifact,
 )
 from neuralop.flood.data.wv import (
@@ -93,6 +94,53 @@ def _set_dataset_structural_dry_mask(dataset: Any, dry_mask: torch.Tensor | None
     raise TypeError(f"Dataset of type {type(dataset)!r} does not support structural_dry_mask injection.")
 
 
+def _resolve_structural_dry_eval_run_ids(
+    config: Any,
+    artifact: Dict[str, Any],
+    *,
+    fallback_run_ids: List[str] | None = None,
+    logger: logging.Logger | None = None,
+) -> List[str] | None:
+    canonical_root = _opt(config, "structural_dry", "canonical_data_root", None)
+    canonical_train_txt = _opt(config, "structural_dry", "canonical_train_txt", None)
+
+    if canonical_train_txt is not None:
+        configured_train_path = Path(str(canonical_train_txt))
+        if configured_train_path.is_absolute():
+            canonical_root = str(configured_train_path.parent)
+            canonical_train_txt = configured_train_path.name
+
+    source_train_txt = artifact.get("source_train_txt", None)
+    if canonical_root is None:
+        source_root = artifact.get("source_root", None)
+        if source_root is not None:
+            canonical_root = str(source_root)
+    if canonical_train_txt is None and source_train_txt is not None:
+        source_train_path = Path(str(source_train_txt))
+        if source_train_path.is_absolute():
+            canonical_root = canonical_root or str(source_train_path.parent)
+            canonical_train_txt = source_train_path.name
+        else:
+            canonical_train_txt = str(source_train_txt)
+
+    if canonical_root is None:
+        return fallback_run_ids
+
+    resolved_run_ids = list(
+        resolve_canonical_training_run_ids(
+            data_root=str(canonical_root),
+            train_txt=str(canonical_train_txt or "train.txt"),
+        )
+    )
+    if logger is not None:
+        logger.info(
+            "Structural-dry validation using canonical package root=%s train_txt=%s",
+            canonical_root,
+            canonical_train_txt or "train.txt",
+        )
+    return resolved_run_ids
+
+
 def _load_structural_dry_artifact_for_eval(
     config: Any,
     *,
@@ -109,10 +157,16 @@ def _load_structural_dry_artifact_for_eval(
     if policy_kwargs["policy"] != "masked_primary":
         return policy_kwargs, None
     artifact = load_structural_dry_artifact(policy_kwargs["artifact_path"])
+    validation_run_ids = _resolve_structural_dry_eval_run_ids(
+        config,
+        artifact,
+        fallback_run_ids=expected_run_ids,
+        logger=logger,
+    )
     artifact = validate_structural_dry_artifact(
         artifact,
         expected_cell_count=expected_cell_count,
-        expected_run_ids=expected_run_ids,
+        expected_run_ids=validation_run_ids,
     )
     if logger is not None:
         logger.info(
