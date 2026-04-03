@@ -16,6 +16,7 @@ dependencies = [
     "opt-einsum",
     "h5py",
     "zarr",
+    "optuna",
 ]
 requires-python = ">=3.9"
 readme = "README.rst"

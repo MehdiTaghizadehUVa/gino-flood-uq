@@ -1,0 +1,78 @@
+study:
+  name: coastal_fgn_hpo
+  base_config: /home/jrj6wm/GINO_Model/neuraloperator_no_physics_git_main/config/flood/coastal/gino_pluvial_flood_config_coastal_depth_only_fgn_grid.yaml
+  data_root: /scratch/jrj6wm/uncertainty_floodmodel_linux/results/coastal/Coastal_Flood_coastal_v1_5k_train_prod_t2_w64_20260318_233556/train
+  clean_boundary_root: /scratch/jrj6wm/uncertainty_floodmodel_linux/synthetic/coastal/dynamic_v1_5k
+  objective:
+    metric: best_test_crps
+    direction: minimize
+    tie_breaker: best_epoch_test_l2
+  search_space:
+    learning_rate:
+      type: log_float
+      low: 5.0e-5
+      high: 4.0e-4
+    weight_decay:
+      type: log_float
+      low: 1.0e-4
+      high: 5.0e-4
+    gno_radius:
+      type: categorical
+      choices: [0.08, 0.10, 0.12]
+    fno_hidden_channels:
+      type: categorical
+      choices: [64, 96]
+    fgn_noise_dim:
+      type: categorical
+      choices: [16, 32]
+  fixed_training:
+    batch_size: 16
+    amp_autocast: false
+    deterministic: false
+    seed: 123
+  wandb:
+    log: true
+    sweep: false
+    project: Flood_GINO_NoPhysics
+    entity: uva_mehdi
+  precompute:
+    partition: gpu
+    account: uqgroup
+    cpus: 8
+    mem: 128G
+    gres: gpu:1
+    walltime: "02:00:00"
+  stages:
+    stage_a:
+      n_trials: 40
+      n_epochs: 2
+      n_samples_max: 4096
+      concurrency: 8
+      walltime: "02:00:00"
+      partition: gpu
+      account: uqgroup
+      cpus: 8
+      mem: 128G
+      gres: gpu:1
+    stage_b:
+      promote_top_k: 12
+      n_epochs: 8
+      n_samples_max: 32768
+      concurrency: 4
+      walltime: "08:00:00"
+      partition: gpu
+      account: uqgroup
+      cpus: 8
+      mem: 128G
+      gres: gpu:1
+    stage_c:
+      promote_top_k: 4
+      n_epochs: 30
+      n_samples_max: null
+      concurrency: 2
+      walltime: "36:00:00"
+      partition: gpu-a100-80
+      account: uqgroup
+      cpus: 8
+      mem: 128G
+      gres: gpu:1
