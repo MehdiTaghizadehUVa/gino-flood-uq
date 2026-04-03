@@ -53,6 +53,7 @@ mkdir -p "${CKPT_DIR}"
 WANDB_GROUP="${RUN_GROUP}"
 WANDB_NAME="${RUN_GROUP}_ens${ENSEMBLE_ID}_seed${SEED}_ws${WORLD_SIZE}"
 WANDB_LOG="${WANDB_LOG:-true}"
+VERIFY_TRAINING="${VERIFY_TRAINING:-true}"
 
 slurm_configure_host_ca
 export APPTAINERENV_PYTHONPATH="${PROJECT_DIR}${APPTAINERENV_PYTHONPATH:+:${APPTAINERENV_PYTHONPATH}}"
@@ -86,8 +87,8 @@ echo "Checkpoint dir:  ${CKPT_DIR}"
 echo "W&B logging:     ${WANDB_LOG}"
 echo "W&B group:       ${WANDB_GROUP}"
 echo "W&B name:        ${WANDB_NAME}"
+echo "Training verification: ${VERIFY_TRAINING}"
 echo "Requested AR curriculum: start_epoch=150, start_steps=2, step_every=25 epochs, max_steps=5"
-echo "Training verification disabled for this launcher to avoid the deterministic CUDA bicubic backward check aborting before training starts."
 
 CLI_ARGS=(
   --config_path "${TRAIN_CONFIG}"
@@ -107,7 +108,7 @@ CLI_ARGS=(
   --rollout_data.boundary_source clean_family
   --rollout_data.clean_boundary_root "${CLEAN_BOUNDARY_ROOT}"
   --rollout_data.clean_boundary_file "${CLEAN_BOUNDARY_FILE}"
-  --verify_training false
+  --verify_training "${VERIFY_TRAINING}"
 )
 
 apptainer exec ${APPTAINER_BIND_ARGS} "${CONTAINER_PATH}" \
