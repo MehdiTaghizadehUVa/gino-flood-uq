@@ -45,11 +45,26 @@ def count_tensor_params(tensor, dims=None):
     return n_params
 
 
-def wandb_login(api_key_file="../config/wandb_api_key.txt", key=None):
+def wandb_login(api_key_file="../config/wandb_api_key.txt", key=None, relogin=False):
+    import os
+
     if key is None:
         key = get_wandb_api_key(api_key_file)
 
-    wandb.login(key=key)
+    if key is None:
+        return None
+
+    key = key.strip()
+    if not key:
+        return None
+
+    # Prefer environment-based auth so both legacy 40-char keys and newer
+    # long-form keys work across mixed wandb client versions.
+    os.environ["WANDB_API_KEY"] = key
+    try:
+        wandb.login(relogin=relogin)
+    except TypeError:
+        wandb.login()
 
 
 def set_wandb_api_key(api_key_file="../config/wandb_api_key.txt"):

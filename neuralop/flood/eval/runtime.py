@@ -20,6 +20,7 @@ from neuralop.training.training_state import load_training_state
 CHECKPOINT_BEST = "best_model"
 CHECKPOINT_LAST = "model"
 CHECKPOINT_FILES = ("best_model_state_dict.pt", "model_state_dict.pt")
+DEFAULT_EVAL_CHECKPOINT = CHECKPOINT_LAST
 DEFAULT_STATIC_FILES = ["M40_CS.txt", "M40_CU.txt", "M40_FA.txt"]
 PUBLICATION_TIMESTEPS = [12, 24, 36, 48, 60, 72]
 TRAIN_FRAC = 0.9
@@ -87,6 +88,21 @@ def _opt_float(config: Any, section: Optional[str], key: str, default: float) ->
         return float(val)
     except (TypeError, ValueError):
         return float(default)
+
+
+def _normalize_eval_checkpoint_name(value: Any) -> str:
+    """Normalize checkpoint selection aliases for evaluation."""
+    raw = str(value or DEFAULT_EVAL_CHECKPOINT).strip().lower()
+    if raw in {"model", "last", "latest", CHECKPOINT_LAST.lower()}:
+        return CHECKPOINT_LAST
+    if raw in {"best", CHECKPOINT_BEST.lower()}:
+        return CHECKPOINT_BEST
+    return DEFAULT_EVAL_CHECKPOINT
+
+
+def preferred_eval_checkpoint_name(config: Any) -> str:
+    """Return the preferred checkpoint alias for evaluation."""
+    return _normalize_eval_checkpoint_name(_opt(config, "checkpoint", "eval_name", DEFAULT_EVAL_CHECKPOINT))
 
 
 def parse_hydrograph_run_id(run_id: str) -> Tuple[str, Optional[int]]:

@@ -10,24 +10,27 @@ from typing import Any, Dict, List, Optional, Tuple
 import torch
 
 from neuralop import get_model
-from neuralop.flood.eval.runtime import clone_model_config_for_get_model
+from neuralop.flood.eval.runtime import clone_model_config_for_get_model, preferred_eval_checkpoint_name
 from neuralop.models.base_model import BaseModel
 from neuralop.training.training_state import load_training_state
 from neuralop.flood.eval.runtime import CHECKPOINT_BEST, CHECKPOINT_FILES, CHECKPOINT_LAST
 
-def _resolve_checkpoint_in_dir(save_dir: Path) -> Tuple[Path, str]:
+def _resolve_checkpoint_in_dir(save_dir: Path, preferred_alias: str = CHECKPOINT_LAST) -> Tuple[Path, str]:
     """Return (dir, alias) for a single checkpoint directory."""
-    if (save_dir / "best_model_state_dict.pt").exists():
-        return save_dir, CHECKPOINT_BEST
-    if (save_dir / "model_state_dict.pt").exists():
-        return save_dir, CHECKPOINT_LAST
+    aliases = [preferred_alias]
+    aliases.extend(alias for alias in (CHECKPOINT_LAST, CHECKPOINT_BEST) if alias not in aliases)
+    for alias in aliases:
+        if alias == CHECKPOINT_BEST and (save_dir / "best_model_state_dict.pt").exists():
+            return save_dir, CHECKPOINT_BEST
+        if alias == CHECKPOINT_LAST and (save_dir / "model_state_dict.pt").exists():
+            return save_dir, CHECKPOINT_LAST
     found = [p.name for p in save_dir.iterdir()] if save_dir.exists() else []
     raise FileNotFoundError(
         f"No checkpoint in {save_dir}. Expected one of {CHECKPOINT_FILES}. Found: {found}"
     )
 
 
-def _discover_checkpoint_runs(checkpoint_path: Path) -> List[Tuple[Path, str, str]]:
+def _discover_checkpoint_runs(checkpoint_path: Path, preferred_alias: str = CHECKPOINT_LAST) -> List[Tuple[Path, str, str]]:
     """
     Discover checkpoint runs.
 
@@ -40,7 +43,7 @@ def _discover_checkpoint_runs(checkpoint_path: Path) -> List[Tuple[Path, str, st
 
     runs: List[Tuple[Path, str, str]] = []
     try:
-        run_dir, alias = _resolve_checkpoint_in_dir(checkpoint_path)
+        run_dir, alias = _resolve_checkpoint_in_dir(checkpoint_path, preferred_alias=preferred_alias)
         runs.append((run_dir, alias, checkpoint_path.name or "model0"))
         return runs
     except FileNotFoundError:
@@ -49,7 +52,7 @@ def _discover_checkpoint_runs(checkpoint_path: Path) -> List[Tuple[Path, str, st
     child_dirs = sorted([p for p in checkpoint_path.iterdir() if p.is_dir()])
     for child in child_dirs:
         try:
-            run_dir, alias = _resolve_checkpoint_in_dir(child)
+            run_dir, alias = _resolve_checkpoint_in_dir(child, preferred_alias=preferred_alias)
             runs.append((run_dir, alias, child.name))
         except FileNotFoundError:
             continue
@@ -152,6 +155,11 @@ def _build_model_for_run(
         label,
     )
     return get_model(model_cfg)
+
+
+def _preferred_checkpoint_alias(config: Any) -> str:
+    """Resolve the default checkpoint alias for evaluation."""
+    return preferred_eval_checkpoint_name(config)
 
 
 def _load_models_from_runs(

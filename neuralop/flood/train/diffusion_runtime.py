@@ -16,7 +16,7 @@ from configmypy import ArgparseConfig, ConfigPipeline, YamlConfig
 from torch.nn.parallel import DistributedDataParallel as DDP
 
 from neuralop.flood.utils.diffusion_script_utils import safe_get, to_builtin
-from neuralop.utils import get_wandb_api_key
+from neuralop.utils import wandb_login
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _SCRIPT_DIR = _REPO_ROOT / 'scripts'
@@ -278,9 +278,7 @@ def _maybe_init_wandb(config: Any, seed: int, logger, *, is_rank0: bool) -> Opti
     if not bool(safe_get(wb_cfg, "log", False)):
         return None
 
-    key = get_wandb_api_key()
-    if key:
-        wandb.login(key=key, relogin=False)
+    wandb_login(relogin=False)
 
     group_default, name_default = _build_wandb_names(config, seed)
     run = wandb.init(

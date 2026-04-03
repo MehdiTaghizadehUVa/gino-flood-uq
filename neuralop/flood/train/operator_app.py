@@ -81,7 +81,7 @@ from neuralop.losses.data_losses import LpLoss
 from neuralop.losses.probabilistic_losses import CRPSLoss, GaussianNLLLoss
 from neuralop.training import AdamW
 from neuralop.training.trainer import Trainer
-from neuralop.utils import get_wandb_api_key
+from neuralop.utils import wandb_login
 
 
 def _resolve_training_normalizer_path(config):
@@ -207,7 +207,7 @@ def main():
     # Initialize wandb if needed
     wandb_init_args = {}
     if config.wandb.log and is_logger:
-        wandb.login(key=get_wandb_api_key())
+        wandb_login(relogin=False)
         wandb_name = config.wandb.name if config.wandb.name else f"flood-run_{_cfg_get(config.data, 'resolution', 64)}"
         wandb_init_args = dict(
             config=config,
@@ -216,6 +216,9 @@ def main():
             project=config.wandb.project,
             entity=config.wandb.entity
         )
+        wandb_tags = _cfg_get(config.wandb, "tags", None)
+        if wandb_tags:
+            wandb_init_args["tags"] = list(wandb_tags)
         if config.wandb.sweep:
             for key in wandb.config.keys():
                 config.params[key] = wandb.config[key]

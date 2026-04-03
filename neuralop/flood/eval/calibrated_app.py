@@ -15,7 +15,7 @@ from neuralop.flood.eval.calibration import (
     _fit_wd_leadtime_calibration_from_hydrographs,
     _save_calibration_artifacts,
 )
-from neuralop.flood.eval.checkpoints import _discover_checkpoint_runs, _load_models_from_runs
+from neuralop.flood.eval.checkpoints import _discover_checkpoint_runs, _load_models_from_runs, _preferred_checkpoint_alias
 from neuralop.flood.eval.datasets import (
     _build_one_step_datasets,
     _build_rollout_normalized_dataset,
@@ -80,7 +80,7 @@ def main() -> int:
     checkpoint_path = Path(_opt(config, "checkpoint", "save_dir", "."))
     if not checkpoint_path.is_absolute():
         checkpoint_path = checkpoint_path.resolve()
-    checkpoint_runs = _discover_checkpoint_runs(checkpoint_path)
+    checkpoint_runs = _discover_checkpoint_runs(checkpoint_path, preferred_alias=_preferred_checkpoint_alias(config))
     primary_dir, primary_alias, _ = checkpoint_runs[0]
     eval_log = Path(args.eval_log_file)
     if not eval_log.is_absolute():

@@ -10,8 +10,17 @@
 #SBATCH -e runtime/logs/err/fgn_wv_ev-%j.err
 
 set -euo pipefail
-if [[ -n "${SLURM_SUBMIT_DIR:-}" && -f "${SLURM_SUBMIT_DIR}/slurm/lib/common.sh" ]]; then
+
+PROJECT_DIR_DEFAULT="/home/$USER/GINO_Model/neuraloperator_no_physics_git_main"
+PROJECT_DIR="${PROJECT_DIR:-${PROJECT_DIR_DEFAULT}}"
+if [[ -f "${PROJECT_DIR}/scripts/slurm/lib/common.sh" ]]; then
+  source "${PROJECT_DIR}/scripts/slurm/lib/common.sh"
+  SCRIPT_DIR="${PROJECT_DIR}/scripts"
+elif [[ -n "${SLURM_SUBMIT_DIR:-}" && -f "${SLURM_SUBMIT_DIR}/slurm/lib/common.sh" ]]; then
   SCRIPT_DIR="${SLURM_SUBMIT_DIR}"
+  source "${SCRIPT_DIR}/slurm/lib/common.sh"
+elif [[ -n "${SLURM_SUBMIT_DIR:-}" && -f "${SLURM_SUBMIT_DIR}/scripts/slurm/lib/common.sh" ]]; then
+  SCRIPT_DIR="${SLURM_SUBMIT_DIR}/scripts"
   source "${SCRIPT_DIR}/slurm/lib/common.sh"
 else
   CANONICAL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
@@ -22,7 +31,6 @@ slurm_load_apptainer
 cd "${SCRIPT_DIR}"
 mkdir -p runtime/logs/out runtime/logs/err runtime/eval_outputs
 
-PROJECT_DIR="${PROJECT_DIR:-/home/$USER/GINO_Model/neuraloperator_no_physics_git_main}"
 export APPTAINERENV_PYTHONPATH="${PROJECT_DIR}${APPTAINERENV_PYTHONPATH:+:${APPTAINERENV_PYTHONPATH}}"
 EVAL_SCRIPT="${EVAL_SCRIPT:-${PROJECT_DIR}/scripts/flood_wv_eval_operator.py}"
 EVAL_CONFIG="${EVAL_CONFIG:-${PROJECT_DIR}/config/flood/wv/gino_pluvial_flood_config_WV_depth_only.yaml}"

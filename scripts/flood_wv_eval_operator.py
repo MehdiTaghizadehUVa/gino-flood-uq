@@ -1,5 +1,6 @@
 #!/usr/bin/env python
-from neuralop.flood.cli.eval_operator import main
+"""Maintained WV flood operator evaluation wrapper."""
+from neuralop.flood.eval.common import main
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     raise SystemExit(main())

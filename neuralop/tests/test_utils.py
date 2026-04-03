@@ -85,7 +85,10 @@ def test_get_wandb_api_key():
 
 def test_ArgparseConfig(monkeypatch):
     if wandb_available:
-        def login(key):
+        def login(*args, **kwargs):
+            key = kwargs.get('key')
+            if key is None:
+                key = os.environ.get('WANDB_API_KEY')
             if key == 'my_secret_key':
                 return True
 
@@ -112,6 +115,21 @@ def test_ArgparseConfig(monkeypatch):
         os.environ["WANDB_API_KEY"] = 'wrong_key'
         with pytest.raises(ValueError):
             wandb_login()
+
+
+        long_key = 'wandb_v1_' + 'x' * 77
+        calls = []
+
+        def login_long(*args, **kwargs):
+            calls.append(kwargs.copy())
+            assert 'key' not in kwargs
+            assert os.environ.get('WANDB_API_KEY') == long_key
+            return True
+
+        monkeypatch.setattr(wandb, "login", login_long)
+        os.environ.pop("WANDB_API_KEY", None)
+        assert wandb_login(key=long_key) is None
+        assert calls and calls[-1].get('relogin', False) is False
 
 class DummyDataset(Dataset):
     # Simple linear regression problem, PyTorch style
