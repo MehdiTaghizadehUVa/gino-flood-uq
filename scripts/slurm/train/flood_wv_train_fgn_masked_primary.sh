@@ -47,6 +47,7 @@ if [[ "${MODE}" == "canary" ]]; then
   WANDB_LOG_DEFAULT="false"
 fi
 WANDB_LOG="${WANDB_LOG:-${WANDB_LOG_DEFAULT}}"
+WANDB_KEY_FILE="${WANDB_KEY_FILE:-${HOME}/.config/wandb_api_key.txt}"
 NORMALIZER_PATH="${NORMALIZER_PATH:-${ARTIFACT_DIR}/normalizers_depth_only_masked_primary.pt}"
 MASK_PATH="${MASK_PATH:-${ARTIFACT_DIR}/structural_dry_mask_exact_zero.pt}"
 SUMMARY_PATH="${ARTIFACT_DIR}/prepare_flood_training_artifacts_summary.json"
@@ -63,6 +64,14 @@ fi
 slurm_configure_host_ca
 slurm_assert_container_gpus "${CONTAINER_PATH}" 1
 mkdir -p "${CHECKPOINT_DIR}"
+
+if [[ "${WANDB_LOG}" == "true" && -z "${WANDB_API_KEY:-}" && -f "${WANDB_KEY_FILE}" ]]; then
+  WANDB_API_KEY="$(tr -d "\r\n" < "${WANDB_KEY_FILE}")"
+  export WANDB_API_KEY
+fi
+if [[ -n "${WANDB_API_KEY:-}" ]]; then
+  export APPTAINERENV_WANDB_API_KEY="${WANDB_API_KEY}"
+fi
 
 CLI_ARGS=(
   --config_path "${TRAIN_CONFIG}"
@@ -101,6 +110,14 @@ echo "Dry mask:         ${MASK_PATH}"
 echo "Prep summary:     ${SUMMARY_PATH}"
 echo "Seed:             ${SEED}"
 echo "W&B log:          ${WANDB_LOG}"
+if [[ "${WANDB_LOG}" == "true" ]]; then
+  echo "W&B key file:     ${WANDB_KEY_FILE}"
+  if [[ -n "${WANDB_API_KEY:-}" ]]; then
+    echo "W&B auth:         configured"
+  else
+    echo "W&B auth:         missing"
+  fi
+fi
 echo "W&B group:        ${WANDB_GROUP}"
 echo "W&B name:         ${WANDB_NAME}"
 echo "Git commit:       $(git -C "${PROJECT_DIR}" rev-parse HEAD)"

@@ -19,6 +19,10 @@ DATA_ROOT="${DATA_ROOT:-/scratch/$USER/Data_Generation_UQ_dataset/results/Dynami
 ROLLOUT_ROOT="${ROLLOUT_ROOT:-/scratch/$USER/Data_Generation_UQ_dataset/results/Dynamic_M40_v1/test}"
 SEED="${SEED:-123}"
 TRAIN_CONFIG="${TRAIN_CONFIG:-${PROJECT_DIR}/config/flood/wv/gino_pluvial_flood_config_WV_depth_only_masked_primary.yaml}"
+PREP_TIME="${PREP_TIME:-02:00:00}"
+CANARY_TIME="${CANARY_TIME:-02:00:00}"
+TRAIN_TIME="${TRAIN_TIME:-72:00:00}"
+EVAL_TIME="${EVAL_TIME:-24:00:00}"
 
 mkdir -p "${RUN_ROOT}" "${ARTIFACT_DIR}" "${CANARY_DIR}" "${TRAIN_DIR}" "${EVAL_DIR}"
 
@@ -48,25 +52,33 @@ echo "Data root:     ${DATA_ROOT}"
 echo "Rollout root:  ${ROLLOUT_ROOT}"
 echo "Seed:          ${SEED}"
 echo "Config:        ${TRAIN_CONFIG}"
+echo "Prep time:     ${PREP_TIME}"
+echo "Canary time:   ${CANARY_TIME}"
+echo "Train time:    ${TRAIN_TIME}"
+echo "Eval time:     ${EVAL_TIME}"
 
 PREP_JOB_ID="$(submit_job prep sbatch \
+  --time=${PREP_TIME} \
   --export=ALL,PROJECT_DIR=${PROJECT_DIR},TRAIN_CONFIG=${TRAIN_CONFIG},DATA_ROOT=${DATA_ROOT},ARTIFACT_DIR=${ARTIFACT_DIR},SEED=${SEED},RUN_GROUP=${RUN_GROUP} \
   "${TRAIN_SLURM_DIR}/flood_wv_prepare_fgn_masked_primary.sh")"
 
 CANARY_JOB_ID="$(submit_job canary sbatch \
   --dependency=afterok:${PREP_JOB_ID} \
+  --time=${CANARY_TIME} \
   --job-name=wv_fgn_masked_canary \
   --export=ALL,PROJECT_DIR=${PROJECT_DIR},TRAIN_CONFIG=${TRAIN_CONFIG},DATA_ROOT=${DATA_ROOT},ROLLOUT_ROOT=${ROLLOUT_ROOT},ARTIFACT_DIR=${ARTIFACT_DIR},CHECKPOINT_DIR=${CANARY_DIR},SEED=${SEED},RUN_GROUP=${RUN_GROUP},MODE=canary,WANDB_LOG=false \
   "${TRAIN_SLURM_DIR}/flood_wv_train_fgn_masked_primary.sh")"
 
 TRAIN_JOB_ID="$(submit_job train sbatch \
   --dependency=afterok:${CANARY_JOB_ID} \
+  --time=${TRAIN_TIME} \
   --job-name=wv_fgn_masked_full \
   --export=ALL,PROJECT_DIR=${PROJECT_DIR},TRAIN_CONFIG=${TRAIN_CONFIG},DATA_ROOT=${DATA_ROOT},ROLLOUT_ROOT=${ROLLOUT_ROOT},ARTIFACT_DIR=${ARTIFACT_DIR},CHECKPOINT_DIR=${TRAIN_DIR},SEED=${SEED},RUN_GROUP=${RUN_GROUP},MODE=full,WANDB_LOG=true \
   "${TRAIN_SLURM_DIR}/flood_wv_train_fgn_masked_primary.sh")"
 
 EVAL_JOB_ID="$(submit_job eval sbatch \
   --dependency=afterok:${TRAIN_JOB_ID} \
+  --time=${EVAL_TIME} \
   --job-name=wv_fgn_masked_eval \
   --export=ALL,PROJECT_DIR=${PROJECT_DIR},EVAL_CONFIG=${TRAIN_CONFIG},TRAIN_ROOT=${DATA_ROOT},TEST_ROOT=${ROLLOUT_ROOT},ARTIFACT_DIR=${ARTIFACT_DIR},CHECKPOINT_ROOT=${TRAIN_DIR},OUT_DIR=${EVAL_DIR} \
   "${EVAL_SLURM_DIR}/flood_wv_eval_operator_masked_primary.sh")"
