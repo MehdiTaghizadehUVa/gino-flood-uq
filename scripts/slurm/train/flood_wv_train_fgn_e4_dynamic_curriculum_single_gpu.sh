@@ -52,6 +52,7 @@ CKPT_DIR="${CKPT_ROOT}/${RUN_TAG}"
 mkdir -p "${CKPT_DIR}"
 WANDB_GROUP="${RUN_GROUP}"
 WANDB_NAME="${RUN_GROUP}_ens${ENSEMBLE_ID}_seed${SEED}_ws${WORLD_SIZE}"
+WANDB_LOG="${WANDB_LOG:-true}"
 
 slurm_configure_host_ca
 export APPTAINERENV_PYTHONPATH="${PROJECT_DIR}${APPTAINERENV_PYTHONPATH:+:${APPTAINERENV_PYTHONPATH}}"
@@ -62,7 +63,8 @@ if [[ -n "${WANDB_API_KEY:-}" ]]; then
 else
   WANDB_KEY_FILE="${WANDB_KEY_FILE:-$HOME/.config/wandb_api_key.txt}"
   if [[ -f "${WANDB_KEY_FILE}" ]]; then
-    export APPTAINERENV_WANDB_API_KEY="$(head -n 1 "${WANDB_KEY_FILE}" | tr -d \"\r\")"
+    IFS= read -r APPTAINERENV_WANDB_API_KEY < "${WANDB_KEY_FILE}"
+    export APPTAINERENV_WANDB_API_KEY
   fi
 fi
 
@@ -81,6 +83,7 @@ echo "Base seed:       ${BASE_SEED}"
 echo "Seed:            ${SEED}"
 echo "World size:      ${WORLD_SIZE}"
 echo "Checkpoint dir:  ${CKPT_DIR}"
+echo "W&B logging:     ${WANDB_LOG}"
 echo "W&B group:       ${WANDB_GROUP}"
 echo "W&B name:        ${WANDB_NAME}"
 echo "Requested AR curriculum: start_epoch=150, start_steps=2, step_every=25 epochs, max_steps=5"
@@ -94,7 +97,7 @@ CLI_ARGS=(
   --data.train_txt "${TRAIN_TXT_NAME}"
   --distributed.use_distributed false
   --distributed.seed "${SEED}"
-  --wandb.log true
+  --wandb.log "${WANDB_LOG}"
   --wandb.group "${WANDB_GROUP}"
   --wandb.name "${WANDB_NAME}"
   --checkpoint.save_dir "${CKPT_DIR}"
