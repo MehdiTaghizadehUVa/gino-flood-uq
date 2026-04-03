@@ -301,3 +301,34 @@ def broadcast_wettable_mask(
     mask = mask.expand_as(ref)
     out_dtype = ref.dtype if dtype is None else dtype
     return mask.to(dtype=out_dtype)
+
+def apply_structural_dry_zero_mask(
+    values: torch.Tensor | None,
+    *,
+    structural_dry_mask: torch.Tensor | None,
+) -> torch.Tensor | None:
+    """Zero structural-dry cells in physical-space tensors."""
+    if values is None or structural_dry_mask is None:
+        return values
+    dry_mask = broadcast_wettable_mask(structural_dry_mask, values, dtype=torch.bool)
+    return values.masked_fill(dry_mask, 0.0)
+
+
+def clamp_structural_dry_normalized_values(
+    values: torch.Tensor | None,
+    *,
+    structural_dry_mask: torch.Tensor | None,
+    normalizer,
+) -> torch.Tensor | None:
+    """Clamp structural-dry cells to zero in physical space, then renormalize."""
+    if values is None or structural_dry_mask is None:
+        return values
+    if normalizer is None:
+        raise ValueError('normalizer is required to clamp normalized structural-dry values.')
+    physical = normalizer.inverse_transform(values)
+    physical = apply_structural_dry_zero_mask(
+        physical,
+        structural_dry_mask=structural_dry_mask,
+    )
+    return normalizer.transform(physical)
+

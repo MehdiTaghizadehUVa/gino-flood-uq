@@ -13,6 +13,10 @@ import torch.distributed as dist
 from tqdm import tqdm
 
 from neuralop.flood.losses import FloodMaskedRelLpLoss
+from neuralop.flood.data.structural_dry import (
+    apply_structural_dry_zero_mask,
+    clamp_structural_dry_normalized_values,
+)
 from neuralop.flood.eval.metrics import (
     _build_member_model_indices,
     _compute_csi,
@@ -495,10 +499,19 @@ def _rollout_prediction_per_hydrograph(
                         )
                         pred_stack = pred.unsqueeze(0)
 
+            structural_dry_mask = sample.get("structural_dry_mask")
             inv_pred_ens = target_norm.inverse_transform(pred_stack.squeeze(1))
+            inv_pred_ens = apply_structural_dry_zero_mask(
+                inv_pred_ens,
+                structural_dry_mask=structural_dry_mask,
+            )
             inv_gt_ref = dynamic_norm.inverse_transform(gt_rollout_ref[:, t])
             if gaussian_mode and mu_stack is not None and logvar_stack is not None:
                 mu_phys_stack = target_norm.inverse_transform(mu_stack.squeeze(1))
+                mu_phys_stack = apply_structural_dry_zero_mask(
+                    mu_phys_stack,
+                    structural_dry_mask=structural_dry_mask,
+                )
                 std_stat = target_norm.std
                 while std_stat.ndim > logvar_stack.squeeze(1).ndim and std_stat.shape[0] == 1:
                     std_stat = std_stat.squeeze(0)
@@ -696,6 +709,11 @@ def _rollout_prediction_per_hydrograph(
 
             if use_ensemble:
                 update_stack = state_stack if (gaussian_mode and state_stack is not None) else pred_stack
+                update_stack = clamp_structural_dry_normalized_values(
+                    update_stack,
+                    structural_dry_mask=structural_dry_mask,
+                    normalizer=target_norm,
+                )
                 if fgn_noise_dim is not None and not gaussian_mode:
                     current_dynamics = update_fgn_dynamic_members(
                         dynamic_members=[dyn_hist.unsqueeze(0) for dyn_hist in current_dynamics],
@@ -713,6 +731,11 @@ def _rollout_prediction_per_hydrograph(
                         )
             else:
                 update_stack = state_stack if (gaussian_mode and state_stack is not None) else pred_stack
+                update_stack = clamp_structural_dry_normalized_values(
+                    update_stack,
+                    structural_dry_mask=structural_dry_mask,
+                    normalizer=target_norm,
+                )
                 current_dynamic = torch.cat(
                     [current_dynamic[1:], update_stack[0, 0].unsqueeze(0)],
                     dim=0,
@@ -1355,11 +1378,24 @@ def _rollout_prediction_generic(
                         )
                         pred_stack = pred.unsqueeze(0)
 
+            structural_dry_mask = sample.get("structural_dry_mask")
             inv_pred = target_norm.inverse_transform(pred)
+            inv_pred = apply_structural_dry_zero_mask(
+                inv_pred,
+                structural_dry_mask=structural_dry_mask,
+            )
             inv_gt = dynamic_norm.inverse_transform(gt_rollout[t].unsqueeze(0))
             inv_pred_ens = target_norm.inverse_transform(pred_stack.squeeze(1))
+            inv_pred_ens = apply_structural_dry_zero_mask(
+                inv_pred_ens,
+                structural_dry_mask=structural_dry_mask,
+            )
             if gaussian_mode and mu_stack is not None and logvar_stack is not None:
                 mu_phys_stack = target_norm.inverse_transform(mu_stack.squeeze(1))
+                mu_phys_stack = apply_structural_dry_zero_mask(
+                    mu_phys_stack,
+                    structural_dry_mask=structural_dry_mask,
+                )
                 std_stat = target_norm.std
                 while std_stat.ndim > logvar_stack.squeeze(1).ndim and std_stat.shape[0] == 1:
                     std_stat = std_stat.squeeze(0)
@@ -1442,6 +1478,11 @@ def _rollout_prediction_generic(
 
             if use_ensemble:
                 update_stack = state_stack if (gaussian_mode and state_stack is not None) else pred_stack
+                update_stack = clamp_structural_dry_normalized_values(
+                    update_stack,
+                    structural_dry_mask=structural_dry_mask,
+                    normalizer=target_norm,
+                )
                 if fgn_noise_dim is not None and not gaussian_mode:
                     current_dynamics = update_fgn_dynamic_members(
                         dynamic_members=[dyn_hist.unsqueeze(0) for dyn_hist in current_dynamics],
@@ -1458,15 +1499,15 @@ def _rollout_prediction_generic(
                             dim=0,
                         )
             else:
-                if gaussian_mode:
-                    update_stack = state_stack if state_stack is not None else pred_stack
-                    current_dynamic = torch.cat(
-                        [current_dynamic[1:], update_stack[0, 0].unsqueeze(0)], dim=0
-                    )
-                else:
-                    current_dynamic = torch.cat(
-                        [current_dynamic[1:], pred.squeeze(0).unsqueeze(0)], dim=0
-                    )
+                update_stack = state_stack if (gaussian_mode and state_stack is not None) else pred_stack
+                update_stack = clamp_structural_dry_normalized_values(
+                    update_stack,
+                    structural_dry_mask=structural_dry_mask,
+                    normalizer=target_norm,
+                )
+                current_dynamic = torch.cat(
+                    [current_dynamic[1:], update_stack[0, 0].unsqueeze(0)], dim=0
+                )
             current_boundary = torch.cat(
                 [current_boundary[1:], gt_boundary_rollout[t].unsqueeze(0)], dim=0
             )

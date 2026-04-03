@@ -10,6 +10,10 @@ import numpy as np
 import torch
 from tqdm import tqdm
 
+from neuralop.flood.data.structural_dry import (
+    apply_structural_dry_zero_mask,
+    clamp_structural_dry_normalized_values,
+)
 from neuralop.flood.processing.wv_impl import _sample_from_packed_gaussian
 from neuralop.flood.train.fgn import get_fgn_rollout_latent, sample_fgn_rollout_latent_bank
 from neuralop.flood.utils.runtime_core import normalize_fgn_latent_temporal_mode
@@ -284,9 +288,18 @@ def rollout_prediction(
                         )
                         pred_stack = pred.unsqueeze(0)
 
+            structural_dry_mask = sample.get("structural_dry_mask")
             inv_pred = target_norm.inverse_transform(pred)
+            inv_pred = apply_structural_dry_zero_mask(
+                inv_pred,
+                structural_dry_mask=structural_dry_mask,
+            )
             inv_gt = dynamic_norm.inverse_transform(gt_rollout[t].unsqueeze(0))
             inv_pred_ens = target_norm.inverse_transform(pred_stack.squeeze(1))
+            inv_pred_ens = apply_structural_dry_zero_mask(
+                inv_pred_ens,
+                structural_dry_mask=structural_dry_mask,
+            )
 
             # Extract all channels and convert to numpy
             wd_pred, vx_pred, vy_pred = [ch.cpu().numpy() for ch in inv_pred[0].T]
@@ -331,23 +344,31 @@ def rollout_prediction(
             run_dry_pred_std_mean_wd.append(_dry_pred_std_mean(wd_spread, dry_mask_np))
 
             # Update state for next step
+            update_stack = pred_stack
+            if use_gaussian and n_ens == 1:
+                update_stack = sampled_single.unsqueeze(0).unsqueeze(0)
+            update_stack = clamp_structural_dry_normalized_values(
+                update_stack,
+                structural_dry_mask=structural_dry_mask,
+                normalizer=target_norm,
+            )
             if use_gaussian:
                 if n_ens > 1:
                     for ens_idx in range(n_ens):
                         current_dynamics[ens_idx] = torch.cat(
-                            [current_dynamics[ens_idx][1:], pred_stack[ens_idx, 0].unsqueeze(0)], dim=0
+                            [current_dynamics[ens_idx][1:], update_stack[ens_idx, 0].unsqueeze(0)], dim=0
                         )
                 else:
                     current_dynamic = torch.cat(
-                        [current_dynamic[1:], sampled_single.squeeze(0).unsqueeze(0)], dim=0
+                        [current_dynamic[1:], update_stack[0, 0].unsqueeze(0)], dim=0
                     )
             elif use_fgn_ensemble:
                 for ens_idx in range(n_ens):
                     current_dynamics[ens_idx] = torch.cat(
-                        [current_dynamics[ens_idx][1:], pred_stack[ens_idx, 0].unsqueeze(0)], dim=0
+                        [current_dynamics[ens_idx][1:], update_stack[ens_idx, 0].unsqueeze(0)], dim=0
                     )
             else:
-                current_dynamic = torch.cat([current_dynamic[1:], pred.squeeze(0).unsqueeze(0)], dim=0)
+                current_dynamic = torch.cat([current_dynamic[1:], update_stack[0, 0].unsqueeze(0)], dim=0)
             current_boundary = torch.cat([current_boundary[1:], gt_boundary_rollout[t].unsqueeze(0)], dim=0)
 
         # Convert lists to numpy arrays

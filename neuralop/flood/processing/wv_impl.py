@@ -5,6 +5,7 @@ from __future__ import annotations
 import torch
 
 from neuralop.data.transforms.data_processors import DataProcessor
+from neuralop.flood.data.structural_dry import apply_structural_dry_zero_mask
 from neuralop.losses.probabilistic_losses import split_gaussian_packed
 
 class FloodGINODataProcessor(DataProcessor):
@@ -97,11 +98,16 @@ class FloodGINODataProcessor(DataProcessor):
 
     def postprocess(self, out: torch.Tensor, sample: dict):
         if (not self.training) and self.inverse_test and (self.target_norm is not None):
+            structural_dry_mask = sample.get("structural_dry_mask")
             if self.output_distribution == "gaussian":
                 y_ref = sample.get("y")
                 n_channels = y_ref.shape[-1] if y_ref is not None else (out.shape[-1] // 2)
                 mu, logvar = split_gaussian_packed(out, n_channels=n_channels)
                 mu = self.target_norm.inverse_transform(mu)
+                mu = apply_structural_dry_zero_mask(
+                    mu,
+                    structural_dry_mask=structural_dry_mask,
+                )
 
                 std_stat = self._match_stat_ndim(self.target_norm.std, logvar.ndim)
                 if std_stat.device != logvar.device:
@@ -111,6 +117,10 @@ class FloodGINODataProcessor(DataProcessor):
                 out = torch.cat([mu, logvar], dim=-1)
             else:
                 out = self.target_norm.inverse_transform(out)
+                out = apply_structural_dry_zero_mask(
+                    out,
+                    structural_dry_mask=structural_dry_mask,
+                )
             if sample["y"] is not None:
                 sample["y"] = self.target_norm.inverse_transform(sample["y"])
         return out, sample

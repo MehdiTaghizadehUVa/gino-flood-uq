@@ -760,7 +760,10 @@ class FGNTrainer(Trainer):
             if self.data_processor is not None:
                 # Important: avoid repeatedly inverse-transforming the same y across ensemble
                 # members when inverse_test=True. Use an isolated sample dict per pass.
-                sample_for_post = {"y": sample["y"]}
+                sample_for_post = {
+                    "y": sample["y"],
+                    "structural_dry_mask": sample.get("structural_dry_mask"),
+                }
                 out, sample_post = self.data_processor.postprocess(out, sample_for_post)
                 y_eval = sample_post["y"]
             outs.append(out)

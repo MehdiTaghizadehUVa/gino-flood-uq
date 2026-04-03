@@ -262,7 +262,13 @@ def main():
                     if data_processor is not None:
                         # Keep y handling identical to trainer eval path: avoid repeatedly
                         # inverse-transforming the same y tensor across ensemble members.
-                        out, sample_post = data_processor.postprocess(out, {"y": sample["y"]})
+                        out, sample_post = data_processor.postprocess(
+                            out,
+                            {
+                                "y": sample["y"],
+                                "structural_dry_mask": sample.get("structural_dry_mask"),
+                            },
+                        )
                         y_eval = sample_post["y"]
                     preds.append(out)
                 pred_samples = torch.stack(preds, dim=0)
