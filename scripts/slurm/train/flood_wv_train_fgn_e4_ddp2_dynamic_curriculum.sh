@@ -11,7 +11,13 @@
 #SBATCH -e runtime/logs/err/wv_fgn_dyn_e4-%A_%a.err
 
 set -euo pipefail
-if [[ -n "${SLURM_SUBMIT_DIR:-}" && -f "${SLURM_SUBMIT_DIR}/slurm/lib/common.sh" ]]; then
+
+PROJECT_DIR_DEFAULT="/home/$USER/GINO_Model/neuraloperator_no_physics_git_main"
+PROJECT_DIR="${PROJECT_DIR:-${PROJECT_DIR_DEFAULT}}"
+if [[ -f "${PROJECT_DIR}/scripts/slurm/lib/common.sh" ]]; then
+  source "${PROJECT_DIR}/scripts/slurm/lib/common.sh"
+  SCRIPT_DIR="${PROJECT_DIR}/scripts"
+elif [[ -n "${SLURM_SUBMIT_DIR:-}" && -f "${SLURM_SUBMIT_DIR}/slurm/lib/common.sh" ]]; then
   SCRIPT_DIR="${SLURM_SUBMIT_DIR}"
   source "${SCRIPT_DIR}/slurm/lib/common.sh"
 else
@@ -23,7 +29,6 @@ slurm_load_apptainer
 cd "${SCRIPT_DIR}"
 mkdir -p runtime/logs/out runtime/logs/err runtime/checkpoints
 
-PROJECT_DIR="${PROJECT_DIR:-/home/$USER/GINO_Model/neuraloperator_no_physics_git_main}"
 TRAIN_SCRIPT="${PROJECT_DIR}/scripts/flood_wv_train_operator.py"
 TRAIN_CONFIG="${TRAIN_CONFIG:?TRAIN_CONFIG must point to the rendered 250-epoch WV config}"
 CONTAINER_PATH="/share/resources/containers/apptainer/archive/pytorch-2.0.1.sif"

@@ -75,6 +75,8 @@ flood: &FLOOD
     policy: "masked_primary"
     mask_path: null
     mask_definition: "exact_zero"
+    canonical_data_root: null
+    canonical_train_txt: null
     report_full_domain_secondary: true
     report_dry_background_secondary: true
 
