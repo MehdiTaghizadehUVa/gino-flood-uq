@@ -703,6 +703,7 @@ def main():
         crps_l2_weight = _cfg_get(config.opt, "crps_l2_weight", 0.5)
         ar_finetune_start_epoch = max(0, _safe_int(_cfg_get(config.opt, "ar_finetune_start_epoch", 0), 0))
         ar_curriculum_epochs_per_step = max(0, _safe_int(_cfg_get(config.opt, "ar_curriculum_epochs_per_step", 0), 0))
+        ar_curriculum_start_steps = max(1, _safe_int(_cfg_get(config.opt, "ar_curriculum_start_steps", 1), 1))
         use_flood_crps_spatial_weights = _cfg_get(config.opt, "flood_crps_spatial_weights", False)
         flood_crps_wet_threshold = _cfg_get(config.opt, "wet_threshold", 0.01)
         flood_crps_wet_smooth_scale = _cfg_get(config.opt, "wet_smooth_scale", 0.02)
@@ -736,6 +737,7 @@ def main():
             ar_finetune_start_epoch=ar_finetune_start_epoch,
             ar_rollout_steps=ar_rollout_steps,
             ar_curriculum_epochs_per_step=ar_curriculum_epochs_per_step,
+            ar_curriculum_start_steps=ar_curriculum_start_steps,
             use_flood_crps_spatial_weights=use_flood_crps_spatial_weights,
             flood_crps_wet_threshold=flood_crps_wet_threshold,
             flood_crps_wet_smooth_scale=flood_crps_wet_smooth_scale,

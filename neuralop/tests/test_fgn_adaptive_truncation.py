@@ -47,11 +47,18 @@ def _make_sample(batch_size=1, n_cells=4, n_history=2, rollout_steps=2):
     }
 
 
-def _training_loss(pred_samples, y):
+def _training_loss(pred_samples, y, **kwargs):
     return (pred_samples.mean(dim=0) - y).pow(2).mean()
 
 
-def _make_trainer(*, gradient_mode: str) -> FGNTrainer:
+def _make_trainer(
+    *,
+    gradient_mode: str,
+    ar_finetune_start_epoch: int = 0,
+    ar_rollout_steps: int = 2,
+    ar_curriculum_epochs_per_step: int = 0,
+    ar_curriculum_start_steps: int = 1,
+) -> FGNTrainer:
     model = TinyFGNModel()
     trainer = FGNTrainer(
         model=model,
@@ -63,8 +70,10 @@ def _make_trainer(*, gradient_mode: str) -> FGNTrainer:
         data_processor=None,
         fgn_noise_dim=4,
         crps_n_samples=2,
-        ar_finetune_start_epoch=0,
-        ar_rollout_steps=2,
+        ar_finetune_start_epoch=ar_finetune_start_epoch,
+        ar_rollout_steps=ar_rollout_steps,
+        ar_curriculum_epochs_per_step=ar_curriculum_epochs_per_step,
+        ar_curriculum_start_steps=ar_curriculum_start_steps,
         ar_gradient_mode=gradient_mode,
         ar_truncation_steps=1,
         fgn_latent_temporal_mode="persistent",
@@ -189,3 +198,36 @@ def test_fgn_adaptive_retry_rolls_back_failed_truncated_sample_count_before_micr
     assert seen["baseline_n_samples"] == 0
     assert trainer.n_samples == trainer._estimate_sample_increment(sample)
     assert metrics["oom_fallback"] == pytest.approx(1.0)
+
+
+def test_fgn_ar_curriculum_can_start_from_two_steps_at_activation_epoch():
+    trainer = _make_trainer(
+        gradient_mode="full",
+        ar_finetune_start_epoch=150,
+        ar_rollout_steps=5,
+        ar_curriculum_epochs_per_step=25,
+        ar_curriculum_start_steps=2,
+    )
+    sample = _make_sample(batch_size=3, rollout_steps=6)
+
+    trainer.epoch = 149
+    assert trainer._estimate_sample_increment(sample) == 3
+
+    trainer.epoch = 150
+    assert trainer._estimate_sample_increment(sample) == 6
+
+    trainer.epoch = 174
+    assert trainer._estimate_sample_increment(sample) == 6
+
+    trainer.epoch = 175
+    assert trainer._estimate_sample_increment(sample) == 9
+
+    trainer.epoch = 200
+    assert trainer._estimate_sample_increment(sample) == 12
+
+    trainer.epoch = 225
+    assert trainer._estimate_sample_increment(sample) == 15
+
+    trainer.epoch = 260
+    assert trainer._estimate_sample_increment(sample) == 15
+

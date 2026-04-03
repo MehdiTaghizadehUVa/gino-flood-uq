@@ -100,8 +100,9 @@ class FGNTrainer(Trainer):
     Supports autoregressive (AR) fine-tuning: when epoch >= ar_finetune_start_epoch and
     ar_rollout_steps > 1, runs an AR rollout, computes loss at each step, averages over
     steps, and backpropagates through the rollout (FGN-style). Optional curriculum: set
-    ar_curriculum_epochs_per_step > 0 to ramp rollout length (1 step for E epochs, then
-    2 steps for E epochs, ... up to ar_rollout_steps).
+    ar_curriculum_epochs_per_step > 0 to ramp rollout length starting from
+    ar_curriculum_start_steps (for example 2 steps for E epochs, then 3 steps for E
+    epochs, ... up to ar_rollout_steps).
     """
 
     def __init__(
@@ -113,6 +114,7 @@ class FGNTrainer(Trainer):
         ar_finetune_start_epoch=0,
         ar_rollout_steps=1,
         ar_curriculum_epochs_per_step=0,
+        ar_curriculum_start_steps=1,
         use_flood_crps_spatial_weights=False,
         flood_crps_wet_threshold=0.01,
         flood_crps_wet_smooth_scale=0.02,
@@ -137,6 +139,7 @@ class FGNTrainer(Trainer):
         self.ar_finetune_start_epoch = max(0, int(ar_finetune_start_epoch))
         self.ar_rollout_steps = max(1, int(ar_rollout_steps))
         self.ar_curriculum_epochs_per_step = max(0, int(ar_curriculum_epochs_per_step))
+        self.ar_curriculum_start_steps = max(1, int(ar_curriculum_start_steps))
         self.use_flood_crps_spatial_weights = bool(use_flood_crps_spatial_weights)
         self.flood_crps_wet_threshold = float(flood_crps_wet_threshold)
         self.flood_crps_wet_smooth_scale = float(flood_crps_wet_smooth_scale)
@@ -266,6 +269,18 @@ class FGNTrainer(Trainer):
         else:
             scaled_loss.backward()
 
+    def _effective_ar_steps(self, max_available_steps: int) -> int:
+        if max_available_steps <= 0:
+            return 0
+        if self.ar_curriculum_epochs_per_step > 0:
+            ar_epoch_index = max(0, self.epoch - self.ar_finetune_start_epoch)
+            curriculum_step_index = ar_epoch_index // self.ar_curriculum_epochs_per_step
+            start_steps = min(self.ar_curriculum_start_steps, self.ar_rollout_steps)
+            effective_ar_steps = min(start_steps + curriculum_step_index, self.ar_rollout_steps)
+        else:
+            effective_ar_steps = self.ar_rollout_steps
+        return min(int(effective_ar_steps), int(max_available_steps))
+
     def _estimate_sample_increment(self, sample):
         batch_size = None
         if isinstance(sample, dict):
@@ -288,13 +303,7 @@ class FGNTrainer(Trainer):
         if target_sequence.dim() == 5:
             target_sequence = target_sequence.squeeze(1)
         max_available_steps = int(target_sequence.shape[1])
-        if self.ar_curriculum_epochs_per_step > 0:
-            ar_epoch_index = self.epoch - self.ar_finetune_start_epoch
-            curriculum_step_index = ar_epoch_index // self.ar_curriculum_epochs_per_step
-            effective_ar_steps = min(curriculum_step_index + 1, self.ar_rollout_steps)
-        else:
-            effective_ar_steps = self.ar_rollout_steps
-        n_ar_steps = min(int(effective_ar_steps), max_available_steps)
+        n_ar_steps = self._effective_ar_steps(max_available_steps)
         return batch_size * n_ar_steps
 
     @staticmethod
@@ -506,14 +515,8 @@ class FGNTrainer(Trainer):
             target_sequence = target_sequence.squeeze(1)
         if boundary_sequence.dim() == 5:
             boundary_sequence = boundary_sequence.squeeze(1)
-        max_available_steps = target_sequence.shape[1]
-        if self.ar_curriculum_epochs_per_step > 0:
-            ar_epoch_index = self.epoch - self.ar_finetune_start_epoch
-            curriculum_step_index = ar_epoch_index // self.ar_curriculum_epochs_per_step
-            effective_ar_steps = min(curriculum_step_index + 1, self.ar_rollout_steps)
-        else:
-            effective_ar_steps = self.ar_rollout_steps
-        n_ar_steps = min(effective_ar_steps, max_available_steps)
+        max_available_steps = int(target_sequence.shape[1])
+        n_ar_steps = self._effective_ar_steps(max_available_steps)
         self.n_samples += sample["y"].shape[0] * n_ar_steps
 
         gradient_mode = self.ar_gradient_mode
