@@ -485,6 +485,7 @@ def _rollout_prediction_per_hydrograph(
                             x=x,
                             ada_in=z,
                         )
+                        pred_stack = pred.unsqueeze(0)
                     else:
                         pred = model(
                             input_geom=geom_0,
@@ -1344,6 +1345,7 @@ def _rollout_prediction_generic(
                             x=x,
                             ada_in=z,
                         )
+                        pred_stack = pred.unsqueeze(0)
                     else:
                         pred = model(
                             input_geom=geom_0,

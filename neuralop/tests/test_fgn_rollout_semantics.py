@@ -186,6 +186,45 @@ def test_eval_generic_fgn_persistent_rollout_smoke(tmp_path: Path):
     assert torch.equal(model.ada_calls[1], model.ada_calls[3])
 
 
+def test_eval_hydrograph_fgn_single_member_rollout_smoke(tmp_path: Path):
+    torch.manual_seed(0)
+    n_cells = 12
+    n_steps = 5
+    model = DummyFGNModel().eval()
+    norm = IdentityNormalizer()
+    geometry = _make_geometry(n_cells)
+    hydro_sample = {
+        "hydrograph_id": "H0",
+        "geometry": geometry,
+        "static": torch.randn(n_cells, 2),
+        "boundary": torch.randn(n_steps, n_cells, 1),
+        "dynamic_ref": torch.randn(2, n_steps, n_cells, 1),
+        "query_points": _make_query_points(),
+        "n_ref_sims": 2,
+    }
+    out_dir = str(tmp_path / "rollout_hydro_single")
+    _rollout_prediction_per_hydrograph(
+        models=[model],
+        hydrograph_samples=[hydro_sample],
+        rollout_length=2,
+        history_steps=2,
+        dynamic_norm=norm,
+        target_norm=norm,
+        device=torch.device("cpu"),
+        skip_before_timestep=0,
+        dt=60.0,
+        out_dir=out_dir,
+        target_variables=["wd"],
+        logger=logging.getLogger("test_eval_fgn_hydro_single"),
+        fgn_noise_dim=8,
+        n_ensemble_samples=1,
+        fgn_latent_temporal_mode="persistent",
+        gaussian_mode=False,
+    )
+    assert (tmp_path / "rollout_hydro_single" / "rollout_metrics_per_hydrograph.npz").exists()
+    assert len(model.ada_calls) == 2
+
+
 def test_eval_hydrograph_fgn_persistent_rollout_smoke(tmp_path: Path):
     torch.manual_seed(0)
     n_cells = 12
