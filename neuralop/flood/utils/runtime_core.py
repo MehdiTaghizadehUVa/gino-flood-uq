@@ -4,14 +4,17 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import random
 import sys
+import tempfile
 import time
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 import numpy as np
 import torch
+import yaml
 from configmypy import ArgparseConfig, ConfigPipeline, YamlConfig
 
 from neuralop.flood.data.hec_ras import HDF_PATHS
@@ -775,6 +778,32 @@ def setup_logging(
 ###############################################################################
 # 1) CONFIG & SETUP
 ###############################################################################
+def _prepare_config_path_for_pipeline(config_path: Path, *, config_name: str):
+    """Return a config path compatible with ConfigPipeline's named-root loader.
+
+    Maintained runtime paths traditionally load config documents under a top-level
+    key such as ``flood``. Some generated runtime configs are flat YAML documents.
+    To keep those generated configs usable, wrap flat payloads into a transient
+    named-root document before handing them to ``YamlConfig``.
+    """
+    with config_path.open("r", encoding="utf-8") as handle:
+        payload = yaml.safe_load(handle)
+    if not isinstance(payload, dict) or config_name in payload:
+        return config_path, None
+
+    suffix = config_path.suffix if config_path.suffix else ".yaml"
+    fd, tmp_name = tempfile.mkstemp(
+        prefix=f".{config_path.stem}.{config_name}.",
+        suffix=suffix,
+        dir=str(config_path.parent),
+        text=True,
+    )
+    tmp_path = Path(tmp_name)
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        yaml.safe_dump({config_name: payload}, handle, sort_keys=False)
+    return tmp_path, tmp_path
+
+
 def load_config_and_setup():
     """
     Reads gino_pluvial_flood_config_WV.yaml (or --config_path <path>) and sets up device.
@@ -796,11 +825,20 @@ def load_config_and_setup():
             break
     if not config_path.exists():
         raise FileNotFoundError(f"Config not found: {config_path}")
-    pipe = ConfigPipeline([
-        YamlConfig(str(config_path), config_name=config_name, config_folder=str(_REPO_ROOT / "config")),
-        ArgparseConfig(infer_types=True, config_name=None, config_file=None),
-    ])
-    config = pipe.read_conf()
+
+    prepared_config_path, transient_config_path = _prepare_config_path_for_pipeline(
+        config_path,
+        config_name=config_name,
+    )
+    try:
+        pipe = ConfigPipeline([
+            YamlConfig(str(prepared_config_path), config_name=config_name, config_folder=str(_REPO_ROOT / "config")),
+            ArgparseConfig(infer_types=True, config_name=None, config_file=None),
+        ])
+        config = pipe.read_conf()
+    finally:
+        if transient_config_path is not None:
+            transient_config_path.unlink(missing_ok=True)
 
     # Setup device (and distributed environment if needed)
     device, is_logger = setup(config)
