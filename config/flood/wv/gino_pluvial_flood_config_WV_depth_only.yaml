@@ -49,6 +49,7 @@ flood: &FLOOD
     n_history: 3
     batch_size: 128
     n_samples_max: null
+    split_seed: null
     query_res: [48, 48]
     train_txt: "train.txt"
     write_train_txt: true
@@ -61,6 +62,7 @@ flood: &FLOOD
     # Keep this pointed at training data even when data.root is overridden to test.
     normalizer_root: "C:/Users/jrj6wm/Desktop/Data_Generation_UQ/Results/M40"
     normalizer_path: "normalizers_depth_only.pt"
+    force_load_normalizers: false
     static_text_files:
       - "M40_CS.txt"
       - "M40_CU.txt"

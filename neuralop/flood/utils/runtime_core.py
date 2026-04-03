@@ -49,6 +49,17 @@ def make_split_generator(seed: int):
     return g
 
 
+def resolve_split_seed(data_cfg, fallback_seed: int) -> int:
+    """Resolve the dataset split seed independently from the model seed.
+
+    Ensemble training benefits from decoupling model-seed randomness from the
+    train/test partition. When ``data.split_seed`` is set, all members can share
+    the same split-scoped artifacts, including normalizers, without leakage from
+    the held-out split.
+    """
+    return int(_cfg_get(data_cfg, "split_seed", fallback_seed))
+
+
 def parse_target_variables(target_variables):
     """
     Parse configured target variable names.

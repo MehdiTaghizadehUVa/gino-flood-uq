@@ -71,6 +71,7 @@ from neuralop.flood.utils.runtime_core import (
     normalize_fgn_ar_state_update,
     normalize_fgn_latent_temporal_mode,
     parse_target_variables,
+    resolve_split_seed,
     save_effective_config_snapshot,
     set_seed,
     setup_logging,
@@ -199,6 +200,8 @@ def main():
         world_size,
         deterministic,
     )
+    split_seed = resolve_split_seed(config.data, int(seed))
+    logger.info("Dataset split seed set to %s", split_seed)
 
     # Possibly adjust FNO modes
     if hasattr(config.data, "resolution") and (config.data.resolution < config.gino.fno_n_modes[0]):
@@ -292,7 +295,7 @@ def main():
     train_sz = max(1, int(0.9 * total_len))
     test_sz = total_len - train_sz
     train_data_raw, test_data_raw_temp = random_split(
-        full_dataset, [train_sz, test_sz], generator=make_split_generator(seed)
+        full_dataset, [train_sz, test_sz], generator=make_split_generator(split_seed)
     )
 
     logger.info("Dataset: total=%s, train=%s, test (one-step)=%s", total_len, train_sz, test_sz)
