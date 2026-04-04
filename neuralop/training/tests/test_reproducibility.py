@@ -85,6 +85,35 @@ def test_load_training_state_accepts_torch_device_map_location(tmp_path):
         assert torch.equal(expected, actual)
 
 
+def test_load_training_state_uses_manifest_model_for_resume_name(tmp_path):
+    save_dir = tmp_path / "manifest_resume"
+
+    first_model = DummyModel(50)
+    for param in first_model.parameters():
+        param.data.fill_(1.0)
+    optimizer = torch.optim.Adam(first_model.parameters(), lr=1e-3)
+    save_training_state(save_dir=save_dir, save_name="model", model=first_model, optimizer=optimizer, epoch=0)
+
+    latest_model = DummyModel(50)
+    for param in latest_model.parameters():
+        param.data.fill_(2.0)
+    latest_optimizer = torch.optim.Adam(latest_model.parameters(), lr=1e-3)
+    save_training_state(save_dir=save_dir, save_name="best_model", model=latest_model, optimizer=latest_optimizer, epoch=5)
+
+    restored_model = DummyModel(50)
+    restored_optimizer = torch.optim.Adam(restored_model.parameters(), lr=1e-3)
+    _, _, _, _, epoch = load_training_state(
+        save_dir=save_dir,
+        save_name="model",
+        model=restored_model,
+        optimizer=restored_optimizer,
+    )
+
+    for param in restored_model.parameters():
+        assert torch.allclose(param, torch.full_like(param, 2.0))
+    assert epoch == 5
+
+
 def test_trainer_resume_restores_stochastic_training_progression(tmp_path):
     reference_loader, reference_model, reference_optimizer, reference_scheduler = _make_training_stack(7)
     reference_trainer = Trainer(model=reference_model, n_epochs=4)

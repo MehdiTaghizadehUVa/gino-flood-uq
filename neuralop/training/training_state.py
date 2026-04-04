@@ -75,22 +75,30 @@ def load_training_state(save_dir: Union[str, Path],
 
     # optionally load epoch 
     epoch = None
+    manifest = None
     manifest_pth = save_dir / "manifest.pt"
     if manifest_pth.exists():
         manifest = torch.load(manifest_pth, weights_only=False)
         epoch = manifest.get('epoch')
     
+    save_filename = f"{save_name}_state_dict.pt"
+    if save_name == "model" and manifest is not None:
+        manifest_model = manifest.get("model")
+        if manifest_model:
+            manifest_model_pth = save_dir / str(manifest_model)
+            if manifest_model_pth.exists():
+                save_filename = str(manifest_model)
+
+    save_pth = save_dir / save_filename
     if dist.is_initialized() and torch.cuda.is_available():
         # To minimize CUDA memory overhead during checkpoint loading,
         # load the model to CPU first, then load to GPU instead of mapping from
         # CUDA:0 to CUDA:DEVICE_ID
         device_id = get_local_rank()
-        save_pth = save_dir / f"{save_name}_state_dict.pt"
         model.load_state_dict(torch.load(save_pth.absolute().as_posix(), map_location="cpu"))
         model = model.to(device=f"cuda:{device_id}")
         torch.cuda.empty_cache()
     else:
-        save_pth = save_dir / f"{save_name}_state_dict.pt"
         model.load_state_dict(torch.load(save_pth.absolute().as_posix(), map_location=map_location))
 
     # load optimizer if state exists
