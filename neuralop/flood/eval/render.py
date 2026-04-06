@@ -46,16 +46,68 @@ def _geometry_xy(geometry):
     return arr[:, 0], arr[:, 1]
 
 
+ROBUST_SPATIAL_COLOR_QUANTILE = 0.995
+WD_SPATIAL_VMAX_CAP_METERS = 3.0
+
+
+def _finite_spatial_values(*arrays: np.ndarray) -> np.ndarray:
+    vals = []
+    for arr in arrays:
+        if arr is None:
+            continue
+        arr_np = np.asarray(arr, dtype=np.float64)
+        finite = arr_np[np.isfinite(arr_np)]
+        if finite.size > 0:
+            vals.append(finite)
+    if not vals:
+        return np.empty((0,), dtype=np.float64)
+    return np.concatenate(vals, axis=0)
+
+
+def _robust_nonnegative_vmax(
+    *arrays: np.ndarray,
+    quantile: float = ROBUST_SPATIAL_COLOR_QUANTILE,
+) -> float:
+    vals = _finite_spatial_values(*arrays)
+    if vals.size == 0:
+        return MIN_EPS
+    vals = vals[vals >= 0.0]
+    if vals.size == 0:
+        return MIN_EPS
+    hard_max = float(np.nanmax(vals))
+    vmax = float(np.quantile(vals, quantile))
+    if not np.isfinite(vmax) or vmax <= 0.0:
+        vmax = hard_max
+    return max(min(vmax, hard_max), MIN_EPS)
+
+
+def _robust_symmetric_abs_vmax(
+    *arrays: np.ndarray,
+    quantile: float = ROBUST_SPATIAL_COLOR_QUANTILE,
+) -> float:
+    vals = np.abs(_finite_spatial_values(*arrays))
+    if vals.size == 0:
+        return MIN_EPS
+    hard_max = float(np.nanmax(vals))
+    vmax = float(np.quantile(vals, quantile))
+    if not np.isfinite(vmax) or vmax <= 0.0:
+        vmax = hard_max
+    return max(min(vmax, hard_max), MIN_EPS)
+
+
+def _wd_spatial_vmax(*arrays: np.ndarray) -> float:
+    vmax = _robust_nonnegative_vmax(*arrays)
+    return max(min(vmax, WD_SPATIAL_VMAX_CAP_METERS), MIN_EPS)
+
+
 def _channel_vmin_vmax_cmap(
     ch: str, gt: np.ndarray, pred: np.ndarray
 ) -> Tuple[float, float, str]:
     """Return (vmin, vmax, cmap) for a channel (wd vs velocity-style)."""
     if ch == "wd":
-        vmax = max(float(np.nanmax(gt)), float(np.nanmax(pred)), MIN_EPS)
+        vmax = _wd_spatial_vmax(gt, pred)
         return 0.0, vmax, "viridis"
-    vmax = max(
-        float(np.nanmax(np.abs(gt))), float(np.nanmax(np.abs(pred))), MIN_EPS
-    )
+    vmax = _robust_symmetric_abs_vmax(gt, pred)
     return -vmax, vmax, "coolwarm"
 
 def _save_generic_rollout_visuals(
@@ -89,7 +141,7 @@ def _save_generic_rollout_visuals(
             pred_t = pred_by_channel[ch][t]
             err_t = np.abs(pred_t - gt_t)
             vmin, vmax, cmap = _channel_vmin_vmax_cmap(ch, gt_t, pred_t)
-            emax = max(float(np.nanmax(err_t)), MIN_EPS)
+            emax = _robust_nonnegative_vmax(err_t)
             panels = [
                 (f"{ch.upper()} Ground Truth", gt_t, cmap, vmin, vmax, ch),
                 (f"{ch.upper()} Prediction", pred_t, cmap, vmin, vmax, ch),
@@ -734,11 +786,11 @@ def _save_hydrograph_uq_figures_and_animation(
             gt_mean = gt_mean_by_channel[ch][t]
             gt_std = gt_std_by_channel[ch][t]
             vmin_m, vmax_m, cmap_mean = _channel_vmin_vmax_cmap(ch, gt_mean, pred_mean)
-            spread_max = max(_nanmax_floor(gt_std), _nanmax_floor(pred_std), MIN_EPS)
+            spread_max = _robust_nonnegative_vmax(gt_std, pred_std)
             bias = pred_mean - gt_mean
             abs_err = np.abs(bias)
-            bmax = max(_nanmax_floor(np.abs(bias)), MIN_EPS)
-            emax = max(_nanmax_floor(abs_err), MIN_EPS)
+            bmax = _robust_symmetric_abs_vmax(bias)
+            emax = _robust_nonnegative_vmax(abs_err)
 
             fig, axs = plt.subplots(
                 3, 2, figsize=(12.4, 14.5), dpi=320, constrained_layout=True
@@ -785,10 +837,11 @@ def _save_hydrograph_uq_figures_and_animation(
         gt_prob_mean = np.mean(gt_prob_wd, axis=0)
         diff_abs = np.abs(pred_prob_mean - gt_prob_mean)
         fig, axs = plt.subplots(1, 3, figsize=(16.5, 5.2), dpi=320, constrained_layout=True)
+        prob_err_max = _robust_nonnegative_vmax(diff_abs)
         items = [
             (f"GT mean P(wd>{UQ_EXCEEDANCE_THRESHOLD:.2f})", gt_prob_mean, "viridis", 0.0, 1.0),
             (f"Forecast mean P(wd>{UQ_EXCEEDANCE_THRESHOLD:.2f})", pred_prob_mean, "viridis", 0.0, 1.0),
-            ("|Probability error|", diff_abs, "magma", 0.0, _nanmax_floor(diff_abs)),
+            ("|Probability error|", diff_abs, "magma", 0.0, prob_err_max),
         ]
         for ax, (title, arr, cmap, vmin, vmax) in zip(axs, items):
             sc = _plot_spatial_field(
@@ -814,7 +867,7 @@ def _save_hydrograph_uq_figures_and_animation(
 
     if crps_map_wd is not None:
         crps_mean = np.mean(crps_map_wd, axis=0)
-        vmax = _nanmax_floor(crps_mean)
+        vmax = _robust_nonnegative_vmax(crps_mean)
         fig, ax = plt.subplots(1, 1, figsize=(6.8, 5.8), dpi=320, constrained_layout=True)
         sc = _plot_spatial_field(
             ax=ax,
@@ -845,9 +898,9 @@ def _save_hydrograph_uq_figures_and_animation(
         wd_gt_std = gt_std_by_channel["wd"]
         wd_abs_err = np.abs(wd_pred_mean - wd_gt_mean)
         wd_ratio = np.clip(wd_pred_std / np.maximum(wd_gt_std, MIN_EPS), 0.0, 5.0)
-        vmax = max(_nanmax_floor(wd_pred_mean), _nanmax_floor(wd_gt_mean), MIN_EPS)
-        spread_max = max(_nanmax_floor(wd_pred_std), _nanmax_floor(wd_gt_std), MIN_EPS)
-        err_max = _nanmax_floor(wd_abs_err)
+        vmax = _wd_spatial_vmax(wd_pred_mean, wd_gt_mean)
+        spread_max = _robust_nonnegative_vmax(wd_pred_std, wd_gt_std)
+        err_max = _robust_nonnegative_vmax(wd_abs_err)
         ratio_vals = wd_ratio[np.isfinite(wd_ratio)]
         if ratio_vals.size > 0:
             q_low = float(np.quantile(ratio_vals, 0.02))
