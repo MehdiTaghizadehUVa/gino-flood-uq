@@ -80,7 +80,7 @@ def test_render_config_keeps_multichannel_clean_family_and_sets_overrides(tmp_pa
     assert [channel["name"] for channel in channels] == ["stage", "precipitation"]
     assert all(channel["mode"] == "clean_family" for channel in channels)
     assert all(channel["clean_boundary_root"] == "/tmp/coastal/clean" for channel in channels)
-    assert flood["data"]["static_text_files"] == ["Coastal_CS.txt"]
+    assert flood["data"]["static_text_files"] == ["Coastal_Slope.txt", "Coastal_Aspect.txt", "Coastal_FlowDirection.txt", "Coastal_Curvature.txt", "Coastal_FlowAccumulation.txt"]
     assert flood["data"]["root"] == "/tmp/coastal/train"
     assert flood["data"]["batch_size"] == 16
     assert flood["data"]["n_samples_max"] == 4096

@@ -47,7 +47,11 @@ flood: &FLOOD
     prefetch_factor: 1
     normalizer_chunk_size: 10000
     static_text_files:
-      - "Coastal_CS.txt"
+      - "Coastal_Slope.txt"
+      - "Coastal_Aspect.txt"
+      - "Coastal_FlowDirection.txt"
+      - "Coastal_Curvature.txt"
+      - "Coastal_FlowAccumulation.txt"
     noise_type: "none"
     target_variables: ["wd"]
     noise_std: [0.01]
@@ -76,7 +80,11 @@ flood: &FLOOD
       vy: "Results/Unsteady/Output/Output Blocks/Base Output/Unsteady Time Series/2D Flow Areas/Portsmouth/Cell Velocity - Velocity Y"
     test_txt: "train.txt"
     static_text_files:
-      - "Coastal_CS.txt"
+      - "Coastal_Slope.txt"
+      - "Coastal_Aspect.txt"
+      - "Coastal_FlowDirection.txt"
+      - "Coastal_Curvature.txt"
+      - "Coastal_FlowAccumulation.txt"
 
   structural_dry:
     policy: "legacy_full_domain"
