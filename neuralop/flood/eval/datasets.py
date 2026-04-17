@@ -263,7 +263,14 @@ def _build_rollout_normalized_dataset(
     split_name: str = "test",
     config_section: str = "rollout_data",
 ) -> Tuple[Any, Optional[List[Dict[str, Any]]]]:
-    """Build rollout dataset and optional grouped hydrograph samples."""
+    """Build rollout dataset and optional grouped hydrograph samples.
+
+    Grouped hydrograph evaluation can involve thousands of member runs. The
+    previous implementation collected every run, stacked the full package into
+    large tensors, then regrouped it. That doubled peak host memory and can OOM
+    before rollout starts. For grouped runs, normalize and yield one hydrograph
+    at a time instead.
+    """
     cfg = getattr(config, config_section)
     rollout_length = config.data.rollout_length
     history_steps = config.data.n_history
@@ -305,7 +312,8 @@ def _build_rollout_normalized_dataset(
 
     groups = group_run_ids_by_hydrograph(rds.valid_run_ids)
     sims_per_hydro = [len(v) for v in groups.values()] if groups else []
-    if sims_per_hydro and max(sims_per_hydro) > 1:
+    grouped_mode = bool(sims_per_hydro and max(sims_per_hydro) > 1)
+    if grouped_mode:
         logger.info(
             "Rollout runs: %d total | Hydrographs: %d (sims per hydrograph min=%d max=%d)",
             len(rds.valid_run_ids),
@@ -316,79 +324,84 @@ def _build_rollout_normalized_dataset(
     else:
         logger.info("Rollout runs: %d", len(rds))
 
-    with _PhaseTimer(logger, "Collecting rollout fields"):
-        geom_list, static_list, boundary_list, dyn_list, _ = collect_all_fields(
-            rds, expect_target=False
-        )
     ref_device = _move_normalizers_to_device(normalizers)
-    geometry_big = torch.stack(geom_list, dim=0) if geom_list else None
-    static_big = torch.stack(static_list, dim=0) if static_list else None
-    boundary_big = torch.stack(boundary_list, dim=0) if boundary_list else None
-    dynamic_big = torch.stack(dyn_list, dim=0) if dyn_list else None
-    if dynamic_big is not None:
-        dynamic_big = dynamic_big[..., target_indices]
-    if geometry_big is not None and "geometry" in normalizers:
-        geometry_big = normalizers["geometry"].transform(geometry_big.to(ref_device))
-    if static_big is not None and "static" in normalizers:
-        static_big = normalizers["static"].transform(static_big.to(ref_device))
-    if boundary_big is not None and "boundary" in normalizers:
-        boundary_big = normalizers["boundary"].transform(boundary_big.to(ref_device))
-    if dynamic_big is not None and "dynamic" in normalizers:
-        dynamic_big = normalizers["dynamic"].transform(dynamic_big.to(ref_device))
-    logger.info(
-        "Rollout cache tensors normalized on device=%s (per-sample rollout code moves tensors to the requested compute device).",
-        ref_device,
-    )
-    samples = [
-        {
-            "run_id": rds.valid_run_ids[i],
-            "geometry": geometry_big[i],
-            "static": static_big[i],
-            "boundary": boundary_big[i],
-            "dynamic": dynamic_big[i],
-            **(
-                {"structural_dry_mask": structural_dry_artifact["dry_mask"]}
-                if structural_dry_artifact is not None
-                else {}
-            ),
+
+    def _normalize_field(key: str, value: torch.Tensor) -> torch.Tensor:
+        if key not in normalizers or normalizers[key] is None:
+            return value.cpu()
+        # Normalizers were fit with a leading sample dimension. Keep that
+        # dimension during transform, then drop it to preserve rollout shapes.
+        return normalizers[key].transform(value.unsqueeze(0).to(ref_device)).squeeze(0).cpu()
+
+    def _normalize_raw_sample(raw: Dict[str, Any]) -> Dict[str, Any]:
+        dynamic = raw["dynamic"][..., target_indices]
+        out = {
+            "run_id": raw["run_id"],
+            "geometry": _normalize_field("geometry", raw["geometry"]),
+            "static": _normalize_field("static", raw["static"]),
+            "boundary": _normalize_field("boundary", raw["boundary"]),
+            "dynamic": _normalize_field("dynamic", dynamic),
         }
-        for i in range(len(rds))
-    ]
+        if structural_dry_artifact is not None:
+            out["structural_dry_mask"] = structural_dry_artifact["dry_mask"]
+        return out
+
+    if grouped_mode:
+        run_id_to_idx = {rid: i for i, rid in enumerate(rds.valid_run_ids)}
+        group_items = []
+        for hydro_id, run_ids_group in groups.items():
+            indices = [run_id_to_idx[rid] for rid in run_ids_group if rid in run_id_to_idx]
+            if len(indices) >= 2:
+                group_items.append((hydro_id, indices))
+
+        class _LazyHydrographSamples:
+            def __len__(self) -> int:
+                return len(group_items)
+
+            def __bool__(self) -> bool:
+                return bool(group_items)
+
+            def __iter__(self):
+                for hydro_id, indices in group_items:
+                    normalized_group = [_normalize_raw_sample(rds[i]) for i in indices]
+                    geometry = normalized_group[0]["geometry"]
+                    query_points = _build_query_points_from_geometry(
+                        geometry, config.data.query_res
+                    )
+                    sample = {
+                        "hydrograph_id": hydro_id,
+                        "reference_run_ids": [g["run_id"] for g in normalized_group],
+                        "geometry": geometry,
+                        "static": normalized_group[0]["static"],
+                        "boundary": normalized_group[0]["boundary"],
+                        "dynamic_ref": torch.stack([g["dynamic"] for g in normalized_group], dim=0),
+                        "query_points": query_points,
+                        "n_ref_sims": len(normalized_group),
+                    }
+                    if structural_dry_artifact is not None:
+                        sample["structural_dry_mask"] = structural_dry_artifact["dry_mask"]
+                    yield sample
+
+        hydrograph_samples = _LazyHydrographSamples()
+        logger.info(
+            "Built lazy grouped hydrograph iterator for %d hydrographs; rollout fields will be loaded one hydrograph at a time.",
+            len(hydrograph_samples),
+        )
+        rollout_dataset = NormalizedRolloutTestDataset(
+            normalized_samples=[],
+            query_res=config.data.query_res,
+        )
+        return rollout_dataset, hydrograph_samples
+
+    with _PhaseTimer(logger, "Normalizing rollout fields"):
+        samples = [_normalize_raw_sample(rds[i]) for i in range(len(rds))]
+    logger.info(
+        "Rollout tensors normalized on device=%s and stored on CPU for %d runs.",
+        ref_device,
+        len(samples),
+    )
     rollout_dataset = NormalizedRolloutTestDataset(
         normalized_samples=samples,
         query_res=config.data.query_res,
     )
-    hydrograph_samples: Optional[List[Dict[str, Any]]] = None
-    if sims_per_hydro and max(sims_per_hydro) > 1:
-        run_id_to_idx = {rid: i for i, rid in enumerate(rds.valid_run_ids)}
-        query_points = _build_query_points_from_geometry(
-            geometry_big[0], config.data.query_res
-        )
-        hydrograph_samples = []
-        for hydro_id, run_ids_group in groups.items():
-            indices = [run_id_to_idx[rid] for rid in run_ids_group if rid in run_id_to_idx]
-            if len(indices) < 2:
-                continue
-            hydrograph_samples.append(
-                {
-                    "hydrograph_id": hydro_id,
-                    "reference_run_ids": [rds.valid_run_ids[i] for i in indices],
-                    "geometry": geometry_big[indices[0]],
-                    "static": static_big[indices[0]],
-                    "boundary": boundary_big[indices[0]],
-                    "dynamic_ref": torch.stack([dynamic_big[i] for i in indices], dim=0),
-                    "query_points": query_points,
-                    "n_ref_sims": len(indices),
-                    **(
-                        {"structural_dry_mask": structural_dry_artifact["dry_mask"]}
-                        if structural_dry_artifact is not None
-                        else {}
-                    ),
-                }
-            )
-        logger.info(
-            "Built %d grouped hydrograph samples for UQ evaluation.",
-            len(hydrograph_samples),
-        )
-
-    return rollout_dataset, hydrograph_samples
+    return rollout_dataset, None

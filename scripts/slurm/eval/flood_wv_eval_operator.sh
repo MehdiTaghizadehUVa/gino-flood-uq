@@ -104,9 +104,11 @@ EVAL_ARGS=(
   --data.train_txt "${TRAIN_STUB_NAME}"
   --data.write_train_txt false
   --data.normalizer_path "${TRAIN_NORMALIZER}"
+  --data.boundary_source clean_family
   --data.clean_boundary_root "${TEST_CLEAN_BOUNDARY_ROOT}"
   --data.clean_boundary_file "${TEST_CLEAN_BOUNDARY_FILE}"
   --rollout_data.root "${TEST_ROOT}"
+  --rollout_data.boundary_source clean_family
   --rollout_data.clean_boundary_root "${TEST_CLEAN_BOUNDARY_ROOT}"
   --rollout_data.clean_boundary_file "${TEST_CLEAN_BOUNDARY_FILE}"
   --rollout_data.test_txt "${TEST_TXT_NAME}"
