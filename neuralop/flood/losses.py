@@ -38,6 +38,20 @@ def _wettable_weights(
     return broadcast_wettable_mask(wettable, ref, dtype=dtype or ref.dtype)
 
 
+def _combine_spatial_weights(wettable_weights: torch.Tensor, caller_weights: torch.Tensor | None) -> torch.Tensor:
+    if caller_weights is None:
+        return wettable_weights
+    if caller_weights.shape != wettable_weights.shape:
+        raise ValueError(
+            "spatial_weights shape must match wettable mask weights: "
+            f"{tuple(caller_weights.shape)} != {tuple(wettable_weights.shape)}."
+        )
+    return wettable_weights * caller_weights.to(
+        device=wettable_weights.device,
+        dtype=wettable_weights.dtype,
+    )
+
+
 def masked_rmse(
     pred: torch.Tensor,
     target: torch.Tensor,
@@ -110,6 +124,7 @@ def dry_pred_std_mean(
 
 @dataclass
 class FloodDryBackgroundRMSE:
+    channel_idx: int | None = None
     reduction: str = "mean"
     expects_samples: bool = False
     expects_packed: bool = False
@@ -119,6 +134,9 @@ class FloodDryBackgroundRMSE:
         if dry_mask is None:
             return torch.tensor(0.0, device=y_pred.device, dtype=y_pred.dtype)
         pred = y_pred[..., : y.shape[-1]]
+        if self.channel_idx is not None:
+            pred = pred[..., self.channel_idx : self.channel_idx + 1]
+            y = y[..., self.channel_idx : self.channel_idx + 1]
         dry_weights = broadcast_wettable_mask(
             torch.as_tensor(dry_mask, dtype=torch.bool, device=y_pred.device),
             y,
@@ -130,6 +148,7 @@ class FloodDryBackgroundRMSE:
 
 @dataclass
 class FloodDryBackgroundMAE:
+    channel_idx: int | None = None
     reduction: str = "mean"
     expects_samples: bool = False
     expects_packed: bool = False
@@ -139,6 +158,9 @@ class FloodDryBackgroundMAE:
         if dry_mask is None:
             return torch.tensor(0.0, device=y_pred.device, dtype=y_pred.dtype)
         pred = y_pred[..., : y.shape[-1]]
+        if self.channel_idx is not None:
+            pred = pred[..., self.channel_idx : self.channel_idx + 1]
+            y = y[..., self.channel_idx : self.channel_idx + 1]
         dry_weights = broadcast_wettable_mask(
             torch.as_tensor(dry_mask, dtype=torch.bool, device=y_pred.device),
             y,
@@ -151,6 +173,7 @@ class FloodDryBackgroundMAE:
 @dataclass
 class FloodDryBackgroundFalseWetRate:
     threshold: float
+    channel_idx: int = 0
     reduction: str = "mean"
     expects_samples: bool = False
     expects_packed: bool = False
@@ -160,7 +183,7 @@ class FloodDryBackgroundFalseWetRate:
         dry_mask = _extract_structural_dry_mask(**kwargs)
         if dry_mask is None:
             return torch.tensor(0.0, device=y_pred.device, dtype=y_pred.dtype)
-        pred = y_pred[..., :1]
+        pred = y_pred[..., self.channel_idx : self.channel_idx + 1]
         return dry_falsewet_rate(
             pred,
             structural_dry_mask=dry_mask,
@@ -173,6 +196,7 @@ class FloodGaussianDryPredStdMean:
     n_channels: int
     min_logvar: float
     max_logvar: float
+    channel_idx: int | None = None
     reduction: str = "mean"
     expects_samples: bool = False
     expects_packed: bool = True
@@ -188,11 +212,14 @@ class FloodGaussianDryPredStdMean:
             min_logvar=self.min_logvar,
             max_logvar=self.max_logvar,
         )
+        if self.channel_idx is not None:
+            pred_std = pred_std[..., self.channel_idx : self.channel_idx + 1]
         return dry_pred_std_mean(pred_std, structural_dry_mask=dry_mask)
 
 
 @dataclass
 class FloodEnsembleDryPredStdMean:
+    channel_idx: int | None = None
     reduction: str = "mean"
     expects_samples: bool = True
     expects_packed: bool = False
@@ -203,6 +230,8 @@ class FloodEnsembleDryPredStdMean:
         if dry_mask is None:
             return torch.tensor(0.0, device=pred_samples.device, dtype=pred_samples.dtype)
         pred_std = pred_samples.std(dim=0)
+        if self.channel_idx is not None:
+            pred_std = pred_std[..., self.channel_idx : self.channel_idx + 1]
         return dry_pred_std_mean(pred_std, structural_dry_mask=dry_mask)
 
 
@@ -278,9 +307,11 @@ class FloodMaskedCRPSLoss:
     def __call__(self, pred_samples: torch.Tensor, y: torch.Tensor, **kwargs) -> torch.Tensor:
         if self.policy != "masked_primary":
             return self.base_loss(pred_samples, y, **kwargs)
+        caller_weights = kwargs.pop("spatial_weights", None)
         weights = _wettable_weights(y, **kwargs)
         if weights is None:
-            return self.base_loss(pred_samples, y, **kwargs)
+            return self.base_loss(pred_samples, y, spatial_weights=caller_weights, **kwargs)
+        weights = _combine_spatial_weights(weights, caller_weights)
         return self.base_loss(pred_samples, y, spatial_weights=weights, **kwargs)
 
 
@@ -299,9 +330,11 @@ class FloodMaskedGaussianNLLLoss:
     def __call__(self, y_pred: torch.Tensor, y: torch.Tensor, **kwargs) -> torch.Tensor:
         if self.policy != "masked_primary":
             return self.base_loss(y_pred, y, **kwargs)
+        caller_weights = kwargs.pop("spatial_weights", None)
         weights = _wettable_weights(y, **kwargs)
         if weights is None:
-            return self.base_loss(y_pred, y, **kwargs)
+            return self.base_loss(y_pred, y, spatial_weights=caller_weights, **kwargs)
+        weights = _combine_spatial_weights(weights, caller_weights)
         return self.base_loss(y_pred, y, spatial_weights=weights, **kwargs)
 
 

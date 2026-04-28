@@ -354,6 +354,52 @@ def _build_rollout_normalized_dataset(
             if len(indices) >= 2:
                 group_items.append((hydro_id, indices))
 
+        def _build_hydrograph_sample(hydro_id: str, normalized_group: List[Dict[str, Any]]):
+            geometry = normalized_group[0]["geometry"]
+            query_points = _build_query_points_from_geometry(geometry, config.data.query_res)
+            sample = {
+                "hydrograph_id": hydro_id,
+                "reference_run_ids": [g["run_id"] for g in normalized_group],
+                "geometry": geometry,
+                "static": normalized_group[0]["static"],
+                "boundary": normalized_group[0]["boundary"],
+                "dynamic_ref": torch.stack([g["dynamic"] for g in normalized_group], dim=0),
+                "query_points": query_points,
+                "n_ref_sims": len(normalized_group),
+            }
+            if structural_dry_artifact is not None:
+                sample["structural_dry_mask"] = structural_dry_artifact["dry_mask"]
+            return sample
+
+        if not hasattr(rds, "__getitem__"):
+            geometry_list, static_list, boundary_list, dynamic_list, _ = collect_all_fields(
+                rds, expect_target=False
+            )
+            normalized_samples = []
+            for i, run_id in enumerate(rds.valid_run_ids):
+                normalized_samples.append(
+                    _normalize_raw_sample(
+                        {
+                            "run_id": run_id,
+                            "geometry": geometry_list[i],
+                            "static": static_list[i],
+                            "boundary": boundary_list[i],
+                            "dynamic": dynamic_list[i],
+                        }
+                    )
+                )
+            hydrograph_samples = [
+                _build_hydrograph_sample(
+                    hydro_id, [normalized_samples[i] for i in indices]
+                )
+                for hydro_id, indices in group_items
+            ]
+            rollout_dataset = NormalizedRolloutTestDataset(
+                normalized_samples=normalized_samples,
+                query_res=config.data.query_res,
+            )
+            return rollout_dataset, hydrograph_samples
+
         class _LazyHydrographSamples:
             def __len__(self) -> int:
                 return len(group_items)
@@ -362,35 +408,24 @@ def _build_rollout_normalized_dataset(
                 return bool(group_items)
 
             def __iter__(self):
-                for hydro_id, indices in group_items:
-                    normalized_group = [_normalize_raw_sample(rds[i]) for i in indices]
-                    geometry = normalized_group[0]["geometry"]
-                    query_points = _build_query_points_from_geometry(
-                        geometry, config.data.query_res
-                    )
-                    sample = {
-                        "hydrograph_id": hydro_id,
-                        "reference_run_ids": [g["run_id"] for g in normalized_group],
-                        "geometry": geometry,
-                        "static": normalized_group[0]["static"],
-                        "boundary": normalized_group[0]["boundary"],
-                        "dynamic_ref": torch.stack([g["dynamic"] for g in normalized_group], dim=0),
-                        "query_points": query_points,
-                        "n_ref_sims": len(normalized_group),
-                    }
-                    if structural_dry_artifact is not None:
-                        sample["structural_dry_mask"] = structural_dry_artifact["dry_mask"]
-                    yield sample
+                for idx in range(len(group_items)):
+                    yield self[idx]
+
+            def __getitem__(self, idx: int):
+                hydro_id, indices = group_items[idx]
+                normalized_group = [_normalize_raw_sample(rds[i]) for i in indices]
+                return _build_hydrograph_sample(hydro_id, normalized_group)
+
+        class _GroupedRolloutDatasetLengthProxy:
+            def __len__(self) -> int:
+                return len(rds)
 
         hydrograph_samples = _LazyHydrographSamples()
         logger.info(
             "Built lazy grouped hydrograph iterator for %d hydrographs; rollout fields will be loaded one hydrograph at a time.",
             len(hydrograph_samples),
         )
-        rollout_dataset = NormalizedRolloutTestDataset(
-            normalized_samples=[],
-            query_res=config.data.query_res,
-        )
+        rollout_dataset = _GroupedRolloutDatasetLengthProxy()
         return rollout_dataset, hydrograph_samples
 
     with _PhaseTimer(logger, "Normalizing rollout fields"):

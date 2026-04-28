@@ -32,6 +32,9 @@ except ImportError:
     tqdm = None
 
 
+_TRAIN_SCHEDULER_MONITORS = {"avg_loss", "train_err"}
+
+
 class Trainer:
     """
     A general Trainer class to train neural-operators on given datasets
@@ -56,6 +59,9 @@ class Trainer:
         deterministic_eval: bool=False,
         eval_seed: int | None=None,
         train_seed: int | None=None,
+        early_stopping_enabled: bool=False,
+        early_stopping_patience: int=20,
+        early_stopping_min_delta: float=1e-4,
     ):
         """
         Parameters
@@ -101,6 +107,9 @@ class Trainer:
         self.deterministic_eval = bool(deterministic_eval)
         self.eval_seed = None if eval_seed is None else int(eval_seed)
         self.train_seed = int(torch.initial_seed()) if train_seed is None else int(train_seed)
+        self.early_stopping_enabled = bool(early_stopping_enabled)
+        self.early_stopping_patience = max(1, int(early_stopping_patience))
+        self.early_stopping_min_delta = float(early_stopping_min_delta)
         # handle autocast device
         if isinstance(self.device, torch.device):
             self.autocast_device_type = self.device.type
@@ -205,15 +214,35 @@ class Trainer:
         if self.data_processor is not None:
             self.data_processor = self.data_processor.to(self.device)
         
+        eval_metric_names = []
+        for name in test_loaders.keys():
+            for metric in eval_losses.keys():
+                eval_metric_names.append(f"{name}_{metric}")
+
         # ensure save_best is a metric we collect
         if self.save_best is not None:
-            metrics = []
-            for name in test_loaders.keys():
-                for metric in eval_losses.keys():
-                    metrics.append(f"{name}_{metric}")
-            assert self.save_best in metrics,\
+            assert self.save_best in eval_metric_names,\
                 f"Error: expected a metric of the form <loader_name>_<metric>, got {save_best}"
-            best_metric_value = float('inf')
+        best_metric_value = float('inf')
+
+        scheduler_uses_eval_metric = (
+            isinstance(self.scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau)
+            and self.scheduler_monitor not in _TRAIN_SCHEDULER_MONITORS
+        )
+        if scheduler_uses_eval_metric and self.scheduler_monitor not in eval_metric_names:
+            raise ValueError(
+                f"scheduler_monitor={self.scheduler_monitor!r} was not produced by validation. "
+                f"Use one of {sorted(_TRAIN_SCHEDULER_MONITORS)} or one of {eval_metric_names}."
+            )
+        early_stopping_uses_eval_metric = (
+            self.early_stopping_enabled
+            and self.scheduler_monitor not in _TRAIN_SCHEDULER_MONITORS
+        )
+        if early_stopping_uses_eval_metric and self.scheduler_monitor not in eval_metric_names:
+            raise ValueError(
+                f"early stopping monitor={self.scheduler_monitor!r} was not produced by validation. "
+                f"Use one of {sorted(_TRAIN_SCHEDULER_MONITORS)} or one of {eval_metric_names}."
+            )
 
         if self.verbose:
             msg = (
@@ -228,6 +257,9 @@ class Trainer:
                 sys.stdout.flush()
         
         epoch_metrics = dict()
+        early_stopping_best = float('inf')
+        early_stopping_bad_epochs = 0
+        should_stop = False
         for epoch in range(self.start_epoch, self.n_epochs):
             train_err, avg_loss, avg_lasso_loss, epoch_train_time =\
                   self.train_one_epoch(epoch, train_loader, training_loss)
@@ -251,10 +283,37 @@ class Trainer:
                         best_metric_value = eval_metrics[self.save_best]
                         self.checkpoint(save_dir, save_name="best_model")
 
-            # Save last checkpoint on schedule.
+                if scheduler_uses_eval_metric:
+                    self.scheduler.step(float(eval_metrics[self.scheduler_monitor]))
+
+            if self.early_stopping_enabled and self.scheduler_monitor in epoch_metrics:
+                monitor_value = float(epoch_metrics[self.scheduler_monitor])
+                if monitor_value < early_stopping_best - self.early_stopping_min_delta:
+                    early_stopping_best = monitor_value
+                    early_stopping_bad_epochs = 0
+                else:
+                    early_stopping_bad_epochs += 1
+                    if early_stopping_bad_epochs >= self.early_stopping_patience:
+                        should_stop = True
+                        msg = (
+                            f"Early stopping at epoch {epoch}: {self.scheduler_monitor}="
+                            f"{monitor_value:.6e}, best={early_stopping_best:.6e}, "
+                            f"bad_epochs={early_stopping_bad_epochs}/"
+                            f"{self.early_stopping_patience}."
+                        )
+                        if self.logger:
+                            self.logger.info(msg)
+                        elif self.verbose:
+                            print(msg)
+                            sys.stdout.flush()
+
+            # Save last checkpoint on schedule, including the epoch that triggers early stopping.
             if self.save_every is not None:
                 if epoch % self.save_every == 0:
                     self.checkpoint(save_dir, save_name="model")
+
+            if should_stop:
+                break
 
         return epoch_metrics
 
@@ -284,6 +343,8 @@ class Trainer:
             self.data_processor.train()
         t1 = default_timer()
         train_err = 0.0
+        train_err_weight = 0.0
+        avg_loss_weight = 0.0
 
         # track number of training examples in batch
         self.n_samples = 0
@@ -370,11 +431,22 @@ class Trainer:
                         self.optimizer.step()
                     self.optimizer.zero_grad(set_to_none=True)
 
-                # train_err: use relative L2 when provided, else training loss
+                # train_err: use relative L2 when provided, else training loss.
+                # AR trainers can provide explicit totals/weights so rollout-step metrics remain true means.
                 err_val = metrics.get("rel_l2", loss)
-                train_err += err_val.item() if hasattr(err_val, "item") else err_val
                 with torch.no_grad():
-                    avg_loss += loss.item()
+                    if "_log_rel_l2_total" in metrics:
+                        rel_total = metrics["_log_rel_l2_total"]
+                        train_err += rel_total.item() if hasattr(rel_total, "item") else rel_total
+                        train_err_weight += float(metrics.get("_log_rel_l2_weight", 1.0))
+                    else:
+                        train_err += err_val.item() if hasattr(err_val, "item") else err_val
+                    if "_log_loss_total" in metrics:
+                        loss_total = metrics["_log_loss_total"]
+                        avg_loss += loss_total.item() if hasattr(loss_total, "item") else loss_total
+                        avg_loss_weight += float(metrics.get("_log_loss_weight", 1.0))
+                    else:
+                        avg_loss += loss.item()
                     if self.regularizer:
                         avg_lasso_loss += self.regularizer.loss
 
@@ -404,17 +476,23 @@ class Trainer:
         epoch_train_time = default_timer() - t1
 
         # train_err = mean per sample (same scale as eval); err_val must be sum over batch (loss or metrics["rel_l2"])
-        if self.n_samples > 0:
+        if train_err_weight > 0:
+            train_err /= train_err_weight
+        elif self.n_samples > 0:
             train_err /= self.n_samples
-        avg_loss /= self.n_samples
+        if avg_loss_weight > 0:
+            avg_loss /= avg_loss_weight
+        elif self.n_samples > 0:
+            avg_loss /= self.n_samples
         if self.regularizer:
             avg_lasso_loss /= self.n_samples
         else:
             avg_lasso_loss = None
 
         if isinstance(self.scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
-            monitored = avg_loss if self.scheduler_monitor == "avg_loss" else train_err
-            self.scheduler.step(monitored)
+            if self.scheduler_monitor in _TRAIN_SCHEDULER_MONITORS:
+                monitored = avg_loss if self.scheduler_monitor == "avg_loss" else train_err
+                self.scheduler.step(monitored)
         else:
             self.scheduler.step()
         
