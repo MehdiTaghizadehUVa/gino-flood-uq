@@ -25,6 +25,10 @@ from neuralop.flood.eval.metrics import (
     _is_gaussian_mode,
     _pit_rank_counts_from_reference,
 )
+from neuralop.flood.eval.mc_dropout import (
+    enable_mc_dropout_only,
+    mc_dropout_seed_context,
+)
 from neuralop.flood.eval.render import (
     _save_nonspatial_uq_diagnostics,
     _save_generic_rollout_visuals,
@@ -134,6 +138,31 @@ def _dry_pred_std_mean(pred_std: np.ndarray, dry_mask: np.ndarray | None) -> flo
         return 0.0
     return float(np.mean(pred_sel))
 
+
+def _forward_operator_model(
+    model: Any,
+    *,
+    input_geom: torch.Tensor,
+    latent_queries: torch.Tensor,
+    output_queries: torch.Tensor,
+    x: torch.Tensor,
+    ada_in: Optional[torch.Tensor] = None,
+    mc_dropout_enabled: bool = False,
+    mc_dropout_seed: Optional[int] = None,
+    mc_seed_parts: tuple[Any, ...] = (),
+) -> torch.Tensor:
+    kwargs = {
+        "input_geom": input_geom,
+        "latent_queries": latent_queries,
+        "output_queries": output_queries,
+        "x": x,
+    }
+    if ada_in is not None:
+        kwargs["ada_in"] = ada_in
+    with mc_dropout_seed_context(mc_dropout_enabled, mc_dropout_seed, *mc_seed_parts):
+        return model(**kwargs)
+
+
 def _rollout_prediction_per_hydrograph(
     models: List[Any],
     hydrograph_samples: List[Dict[str, Any]],
@@ -156,6 +185,8 @@ def _rollout_prediction_per_hydrograph(
     gaussian_max_logvar: float = 4.0,
     gaussian_state_update: str = "sample",
     rollout_init_mode: str = "mean_history",
+    mc_dropout_enabled: bool = False,
+    mc_dropout_seed: Optional[int] = None,
 ) -> None:
     """
     Evaluate per hydrograph using all reference simulations as ground-truth uncertainty.
@@ -165,6 +196,8 @@ def _rollout_prediction_per_hydrograph(
     """
     if not models:
         raise ValueError("No models provided for rollout evaluation.")
+    if mc_dropout_enabled and (gaussian_mode or fgn_noise_dim is not None):
+        raise ValueError("MC-dropout rollout is incompatible with Gaussian or FGN rollout modes.")
     for model in models:
         model.eval()
     dynamic_norm.to(device)
@@ -183,6 +216,20 @@ def _rollout_prediction_per_hydrograph(
     use_ensemble = n_ens > 1 or n_models > 1
     member_model_indices = _build_member_model_indices(n_models, n_ens)
     model_counts = [member_model_indices.count(i) for i in range(n_models)]
+    if mc_dropout_enabled:
+        dropout_counts = [enable_mc_dropout_only(model) for model in models]
+        if any(count <= 0 for count in dropout_counts):
+            raise ValueError(
+                "MC dropout requested for rollout, but one or more models contain no "
+                "torch.nn.Dropout modules. Check gino.fno_channel_mlp_dropout."
+            )
+        logger.info(
+            "MC-dropout rollout enabled: members=%d seed=%s dropout_modules_per_model=%s "
+            "temporal_mode=stepwise",
+            n_ens,
+            mc_dropout_seed,
+            dropout_counts,
+        )
     fgn_latent_temporal_mode = normalize_fgn_latent_temporal_mode(
         fgn_latent_temporal_mode
     )
@@ -399,11 +446,15 @@ def _rollout_prediction_per_hydrograph(
                         bc_flat = current_boundary.permute(1, 0, 2).reshape(1, current_boundary.shape[1], -1)
                         x = torch.cat([static_0, bc_flat, dyn_flat], dim=2)
                         if gaussian_mode:
-                            out = model(
+                            out = _forward_operator_model(
+                                model,
                                 input_geom=geom_0,
                                 latent_queries=query_0,
                                 output_queries=geom_0,
                                 x=x,
+                                mc_dropout_enabled=mc_dropout_enabled,
+                                mc_dropout_seed=mc_dropout_seed,
+                                mc_seed_parts=("rollout_hydro", hydro_id, "ensemble", t, ens_idx, model_idx, "gaussian"),
                             )
                             sampled, mu, logvar = _sample_from_packed_gaussian(
                                 out,
@@ -425,21 +476,29 @@ def _rollout_prediction_per_hydrograph(
                                 dtype=x.dtype,
                             )
                             pred_members.append(
-                                model(
+                                _forward_operator_model(
+                                    model,
                                     input_geom=geom_0,
                                     latent_queries=query_0,
                                     output_queries=geom_0,
                                     x=x,
                                     ada_in=z,
+                                    mc_dropout_enabled=mc_dropout_enabled,
+                                    mc_dropout_seed=mc_dropout_seed,
+                                    mc_seed_parts=("rollout_hydro", hydro_id, "ensemble", t, ens_idx, model_idx, "fgn"),
                                 )
                             )
                         else:
                             pred_members.append(
-                                model(
+                                _forward_operator_model(
+                                    model,
                                     input_geom=geom_0,
                                     latent_queries=query_0,
                                     output_queries=geom_0,
                                     x=x,
+                                    mc_dropout_enabled=mc_dropout_enabled,
+                                    mc_dropout_seed=mc_dropout_seed,
+                                    mc_seed_parts=("rollout_hydro", hydro_id, "ensemble", t, ens_idx, model_idx),
                                 )
                             )
                     pred_stack = torch.stack(pred_members, dim=0)  # [n_ens, 1, n_cells, n_target]
@@ -457,11 +516,15 @@ def _rollout_prediction_per_hydrograph(
                     )
                     x = torch.cat([static_0, bc_flat, dyn_flat], dim=2)
                     if gaussian_mode:
-                        out = model(
+                        out = _forward_operator_model(
+                            model,
                             input_geom=geom_0,
                             latent_queries=query_0,
                             output_queries=geom_0,
                             x=x,
+                            mc_dropout_enabled=mc_dropout_enabled,
+                            mc_dropout_seed=mc_dropout_seed,
+                            mc_seed_parts=("rollout_hydro", hydro_id, "single", t, 0, 0, "gaussian"),
                         )
                         sampled, mu, logvar = _sample_from_packed_gaussian(
                             out,
@@ -482,20 +545,28 @@ def _rollout_prediction_per_hydrograph(
                             device=device,
                             dtype=x.dtype,
                         )
-                        pred = model(
+                        pred = _forward_operator_model(
+                            model,
                             input_geom=geom_0,
                             latent_queries=query_0,
                             output_queries=geom_0,
                             x=x,
                             ada_in=z,
+                            mc_dropout_enabled=mc_dropout_enabled,
+                            mc_dropout_seed=mc_dropout_seed,
+                            mc_seed_parts=("rollout_hydro", hydro_id, "single", t, 0, 0, "fgn"),
                         )
                         pred_stack = pred.unsqueeze(0)
                     else:
-                        pred = model(
+                        pred = _forward_operator_model(
+                            model,
                             input_geom=geom_0,
                             latent_queries=query_0,
                             output_queries=geom_0,
                             x=x,
+                            mc_dropout_enabled=mc_dropout_enabled,
+                            mc_dropout_seed=mc_dropout_seed,
+                            mc_seed_parts=("rollout_hydro", hydro_id, "single", t, 0, 0),
                         )
                         pred_stack = pred.unsqueeze(0)
 
@@ -1126,6 +1197,8 @@ def _rollout_prediction_generic(
     gaussian_min_logvar: float = -9.0,
     gaussian_max_logvar: float = 4.0,
     gaussian_state_update: str = "sample",
+    mc_dropout_enabled: bool = False,
+    mc_dropout_seed: Optional[int] = None,
 ) -> None:
     """
     Generic rollout mode (single reference trajectory per run).
@@ -1134,6 +1207,8 @@ def _rollout_prediction_generic(
     """
     if not models:
         raise ValueError("No models provided for rollout evaluation.")
+    if mc_dropout_enabled and (gaussian_mode or fgn_noise_dim is not None):
+        raise ValueError("MC-dropout rollout is incompatible with Gaussian or FGN rollout modes.")
     for model in models:
         model.eval()
     dynamic_norm.to(device)
@@ -1152,6 +1227,20 @@ def _rollout_prediction_generic(
     use_ensemble = n_ens > 1 or n_models > 1
     member_model_indices = _build_member_model_indices(n_models, n_ens)
     model_counts = [member_model_indices.count(i) for i in range(n_models)]
+    if mc_dropout_enabled:
+        dropout_counts = [enable_mc_dropout_only(model) for model in models]
+        if any(count <= 0 for count in dropout_counts):
+            raise ValueError(
+                "MC dropout requested for rollout, but one or more models contain no "
+                "torch.nn.Dropout modules. Check gino.fno_channel_mlp_dropout."
+            )
+        logger.info(
+            "MC-dropout rollout enabled: members=%d seed=%s dropout_modules_per_model=%s "
+            "temporal_mode=stepwise",
+            n_ens,
+            mc_dropout_seed,
+            dropout_counts,
+        )
     fgn_latent_temporal_mode = normalize_fgn_latent_temporal_mode(
         fgn_latent_temporal_mode
     )
@@ -1273,11 +1362,15 @@ def _rollout_prediction_generic(
                         bc_flat = current_boundary.permute(1, 0, 2).reshape(1, current_boundary.shape[1], -1)
                         x = torch.cat([static_0, bc_flat, dyn_flat], dim=2)
                         if gaussian_mode:
-                            out = model(
+                            out = _forward_operator_model(
+                                model,
                                 input_geom=geom_0,
                                 latent_queries=query_0,
                                 output_queries=geom_0,
                                 x=x,
+                                mc_dropout_enabled=mc_dropout_enabled,
+                                mc_dropout_seed=mc_dropout_seed,
+                                mc_seed_parts=("rollout_generic", run_id, "ensemble", t, ens_idx, model_idx, "gaussian"),
                             )
                             sampled, mu, logvar = _sample_from_packed_gaussian(
                                 out,
@@ -1299,21 +1392,29 @@ def _rollout_prediction_generic(
                                 dtype=x.dtype,
                             )
                             pred_members.append(
-                                model(
+                                _forward_operator_model(
+                                    model,
                                     input_geom=geom_0,
                                     latent_queries=query_0,
                                     output_queries=geom_0,
                                     x=x,
                                     ada_in=z,
+                                    mc_dropout_enabled=mc_dropout_enabled,
+                                    mc_dropout_seed=mc_dropout_seed,
+                                    mc_seed_parts=("rollout_generic", run_id, "ensemble", t, ens_idx, model_idx, "fgn"),
                                 )
                             )
                         else:
                             pred_members.append(
-                                model(
+                                _forward_operator_model(
+                                    model,
                                     input_geom=geom_0,
                                     latent_queries=query_0,
                                     output_queries=geom_0,
                                     x=x,
+                                    mc_dropout_enabled=mc_dropout_enabled,
+                                    mc_dropout_seed=mc_dropout_seed,
+                                    mc_seed_parts=("rollout_generic", run_id, "ensemble", t, ens_idx, model_idx),
                                 )
                             )
                     pred_stack = torch.stack(pred_members, dim=0)
@@ -1334,11 +1435,15 @@ def _rollout_prediction_generic(
                     )
                     x = torch.cat([static_0, bc_flat, dyn_flat], dim=2)
                     if gaussian_mode:
-                        out = model(
+                        out = _forward_operator_model(
+                            model,
                             input_geom=geom_0,
                             latent_queries=query_0,
                             output_queries=geom_0,
                             x=x,
+                            mc_dropout_enabled=mc_dropout_enabled,
+                            mc_dropout_seed=mc_dropout_seed,
+                            mc_seed_parts=("rollout_generic", run_id, "single", t, 0, 0, "gaussian"),
                         )
                         sampled_single, pred, logvar_single = _sample_from_packed_gaussian(
                             out,
@@ -1361,20 +1466,28 @@ def _rollout_prediction_generic(
                             device=device,
                             dtype=x.dtype,
                         )
-                        pred = model(
+                        pred = _forward_operator_model(
+                            model,
                             input_geom=geom_0,
                             latent_queries=query_0,
                             output_queries=geom_0,
                             x=x,
                             ada_in=z,
+                            mc_dropout_enabled=mc_dropout_enabled,
+                            mc_dropout_seed=mc_dropout_seed,
+                            mc_seed_parts=("rollout_generic", run_id, "single", t, 0, 0, "fgn"),
                         )
                         pred_stack = pred.unsqueeze(0)
                     else:
-                        pred = model(
+                        pred = _forward_operator_model(
+                            model,
                             input_geom=geom_0,
                             latent_queries=query_0,
                             output_queries=geom_0,
                             x=x,
+                            mc_dropout_enabled=mc_dropout_enabled,
+                            mc_dropout_seed=mc_dropout_seed,
+                            mc_seed_parts=("rollout_generic", run_id, "single", t, 0, 0),
                         )
                         pred_stack = pred.unsqueeze(0)
 

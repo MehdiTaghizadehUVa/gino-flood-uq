@@ -1,6 +1,6 @@
 study:
   name: coastal_fgn_hpo
-  base_config: /home/jrj6wm/GINO_Model/neuraloperator_no_physics_git_main/config/flood/coastal/gino_pluvial_flood_config_coastal_depth_only_fgn_grid.yaml
+  base_config: config/flood/coastal/gino_pluvial_flood_config_coastal_depth_only_fgn_grid.yaml
   data_root: /scratch/jrj6wm/uncertainty_floodmodel_linux/results/coastal/Coastal_Flood_coastal_v1_5k_train_prod_t2_w64_20260318_233556/train
   clean_boundary_root: /scratch/jrj6wm/uncertainty_floodmodel_linux/synthetic/coastal/dynamic_v1_5k
   objective:

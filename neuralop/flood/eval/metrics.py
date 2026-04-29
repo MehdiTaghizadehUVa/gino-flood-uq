@@ -18,6 +18,7 @@ from neuralop.flood.losses import (
     FloodMaskedRelLpLoss,
 )
 from neuralop.flood.eval.runtime import MIN_EPS, _opt, _opt_float
+from neuralop.flood.utils.runtime import parse_target_variables
 from neuralop.losses.data_losses import LpLoss
 from neuralop.losses.probabilistic_losses import CRPSLoss, GaussianNLLLoss, split_gaussian_packed
 
@@ -39,9 +40,55 @@ def _sample_from_packed_gaussian(
     return sample, mu, logvar
 
 
-def _build_eval_losses(config: Any, use_fgn: bool) -> Dict[str, Any]:
+def _resolve_target_variables(config: Any, target_variables: Optional[List[str]]) -> List[str]:
+    if target_variables is not None:
+        return parse_target_variables(target_variables)
+    return parse_target_variables(_opt(config, "data", "target_variables", ["wd", "vx", "vy"]))
+
+
+def _add_dry_background_wd_metrics(
+    out: Dict[str, Any],
+    *,
+    wd_idx: int | None,
+    gaussian_n_channels: int | None = None,
+    gaussian_min_logvar: float = -9.0,
+    gaussian_max_logvar: float = 4.0,
+    ensemble_std: bool = False,
+) -> None:
+    if wd_idx is None:
+        return
+    out["rmse_dry_background_wd"] = FloodDryBackgroundRMSE(channel_idx=wd_idx)
+    out["mae_dry_background_wd"] = FloodDryBackgroundMAE(channel_idx=wd_idx)
+    out["falsewet_rate_001_dry_background_wd"] = FloodDryBackgroundFalseWetRate(
+        0.01,
+        channel_idx=wd_idx,
+    )
+    out["falsewet_rate_005_dry_background_wd"] = FloodDryBackgroundFalseWetRate(
+        0.05,
+        channel_idx=wd_idx,
+    )
+    if gaussian_n_channels is not None:
+        out["pred_std_mean_dry_background_wd"] = FloodGaussianDryPredStdMean(
+            n_channels=gaussian_n_channels,
+            min_logvar=gaussian_min_logvar,
+            max_logvar=gaussian_max_logvar,
+            channel_idx=wd_idx,
+        )
+    elif ensemble_std:
+        out["pred_std_mean_dry_background_wd"] = FloodEnsembleDryPredStdMean(
+            channel_idx=wd_idx,
+        )
+
+
+def _build_eval_losses(
+    config: Any,
+    use_fgn: bool,
+    target_variables: Optional[List[str]] = None,
+) -> Dict[str, Any]:
     """Build loss dict for one-step evaluation (L2 and optionally CRPS)."""
     l2_loss = LpLoss(d=2, p=2)
+    resolved_targets = _resolve_target_variables(config, target_variables)
+    wd_idx = resolved_targets.index("wd") if "wd" in resolved_targets else None
     structural_policy = str(
         _opt(config, "structural_dry", "policy", "legacy_full_domain")
     ).strip().lower()
@@ -73,14 +120,12 @@ def _build_eval_losses(config: Any, use_fgn: bool) -> Dict[str, Any]:
                 max_logvar=_opt_float(config, "opt", "gaussian_max_logvar", 4.0),
                 logvar_reg_weight=0.0,
             )
-            out["rmse_dry_background_wd"] = FloodDryBackgroundRMSE()
-            out["mae_dry_background_wd"] = FloodDryBackgroundMAE()
-            out["falsewet_rate_001_dry_background_wd"] = FloodDryBackgroundFalseWetRate(0.01)
-            out["falsewet_rate_005_dry_background_wd"] = FloodDryBackgroundFalseWetRate(0.05)
-            out["pred_std_mean_dry_background_wd"] = FloodGaussianDryPredStdMean(
-                n_channels=1,
-                min_logvar=_opt_float(config, "opt", "gaussian_min_logvar", -9.0),
-                max_logvar=_opt_float(config, "opt", "gaussian_max_logvar", 4.0),
+            _add_dry_background_wd_metrics(
+                out,
+                wd_idx=wd_idx,
+                gaussian_n_channels=len(resolved_targets),
+                gaussian_min_logvar=_opt_float(config, "opt", "gaussian_min_logvar", -9.0),
+                gaussian_max_logvar=_opt_float(config, "opt", "gaussian_max_logvar", 4.0),
             )
         return out
     if use_fgn and _opt(config, "opt", "training_loss", "l2") == "crps":
@@ -105,20 +150,13 @@ def _build_eval_losses(config: Any, use_fgn: bool) -> Dict[str, Any]:
                     reduction="mean",
                 ),
             )
-            out["rmse_dry_background_wd"] = FloodDryBackgroundRMSE()
-            out["mae_dry_background_wd"] = FloodDryBackgroundMAE()
-            out["falsewet_rate_001_dry_background_wd"] = FloodDryBackgroundFalseWetRate(0.01)
-            out["falsewet_rate_005_dry_background_wd"] = FloodDryBackgroundFalseWetRate(0.05)
-            out["pred_std_mean_dry_background_wd"] = FloodEnsembleDryPredStdMean()
+            _add_dry_background_wd_metrics(out, wd_idx=wd_idx, ensemble_std=True)
         return out
     test_loss_name = _opt(config, "opt", "testing_loss", "l2")
     out = {test_loss_name: primary_l2}
     if structural_policy == "masked_primary":
         out["l2_full_domain"] = l2_loss
-        out["rmse_dry_background_wd"] = FloodDryBackgroundRMSE()
-        out["mae_dry_background_wd"] = FloodDryBackgroundMAE()
-        out["falsewet_rate_001_dry_background_wd"] = FloodDryBackgroundFalseWetRate(0.01)
-        out["falsewet_rate_005_dry_background_wd"] = FloodDryBackgroundFalseWetRate(0.05)
+        _add_dry_background_wd_metrics(out, wd_idx=wd_idx)
     return out
 
 

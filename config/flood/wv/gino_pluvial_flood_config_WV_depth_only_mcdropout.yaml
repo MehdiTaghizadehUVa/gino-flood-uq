@@ -1,0 +1,180 @@
+# WV/dynamic depth-only deterministic GINO template with MC-dropout uncertainty.
+flood: &FLOOD
+  arch: gino
+  sample_max: 10000
+
+  distributed:
+    use_distributed: False
+    launch_mode: single
+    wireup_info: mpi
+    wireup_store: tcp
+    model_parallel_size: 1
+    seed: 123
+    device: cuda:0
+
+  deterministic: true
+
+  data:
+    root: "/scratch/jrj6wm/Data_Generation_UQ_dataset/results/Dynamic_M40_v1/train"
+    boundary_source: clean_family
+    clean_boundary_root: "/scratch/jrj6wm/Data_Generation_UQ_dataset/results/Dynamic_M40_v1/metadata"
+    clean_boundary_file: "Hydrographs_Train_Clean.txt"
+    resolution: 48
+    n_history: 3
+    batch_size: 128
+    n_samples_max: null
+    query_res: [48, 48]
+    train_txt: "train.txt"
+    write_train_txt: false
+    num_workers: 4
+    pin_memory: true
+    persistent_workers: false
+    prefetch_factor: 1
+    normalizer_chunk_size: 10000
+    normalizer_fit_method: "streaming"
+    normalizer_root: "/scratch/jrj6wm/GINO_Model/neuraloperator_runs/wv_mcdropout/artifacts"
+    normalizer_path: "normalizers_depth_only_mcdropout.pt"
+    force_load_normalizers: false
+    static_text_files:
+      - "M40_CS.txt"
+      - "M40_CU.txt"
+      - "M40_FA.txt"
+    noise_type: "none"
+    target_variables: ["wd"]
+    noise_std: [0.01]
+    rollout_length: 78
+    skip_before_timestep: 12
+    dt: 1200
+
+  rollout_data:
+    root: "/scratch/jrj6wm/Data_Generation_UQ_dataset/results/Dynamic_M40_v1/test"
+    boundary_source: clean_family
+    clean_boundary_root: "/scratch/jrj6wm/Data_Generation_UQ_dataset/results/Dynamic_M40_v1/metadata"
+    clean_boundary_file: "Hydrographs_Test_Clean.txt"
+    test_txt: "test.txt"
+    static_text_files:
+      - "M40_CS.txt"
+      - "M40_CU.txt"
+      - "M40_FA.txt"
+
+  structural_dry:
+    policy: "masked_primary"
+    mask_path: "/scratch/jrj6wm/GINO_Model/neuraloperator_runs/wv_mcdropout/artifacts/structural_dry_mask_exact_zero.pt"
+    mask_definition: "exact_zero"
+    canonical_data_root: "/scratch/jrj6wm/Data_Generation_UQ_dataset/results/Dynamic_M40_v1/train"
+    canonical_train_txt: "train.txt"
+    report_full_domain_secondary: true
+    report_dry_background_secondary: true
+
+  gino:
+    data_channels: 15
+    out_channels: 1
+    latent_feature_channels: 0
+    projection_channels: 256
+    gno_coord_dim: 2
+    gno_radius: 0.1
+    in_gno_transform_type: linear
+    out_gno_transform_type: linear
+    gno_pos_embed_type: None
+    gno_embed_channels: 32
+    gno_embed_max_positions: 10000
+    in_gno_channel_mlp_hidden_layers: [80, 80, 80]
+    out_gno_channel_mlp_hidden_layers: [512, 256]
+    fno_n_modes: [16, 16]
+    fno_hidden_channels: 128
+    fno_lifting_channel_ratio: 2
+    fno_n_layers: 4
+    fno_use_channel_mlp: True
+    fno_norm: instance_norm
+    fno_ada_in_features: 16
+    fno_ada_in_dim: 32
+    output_distribution: deterministic
+    use_fgn_noise: false
+    fgn_noise_dim: 32
+    fno_factorization: tucker
+    fno_rank: 0.4
+    fno_joint_factorization: false
+    fno_fixed_rank_modes: false
+    fno_implementation: factorized
+    fno_domain_padding: 0.1
+    fno_channel_mlp_expansion: 1.0
+    fno_channel_mlp_dropout: 0.10
+    fno_resolution_scaling_factor: 1
+    autoregressive: True
+    gno_in_weighting_fn: edam
+    gno_in_wt_fn_scale: 1.0
+    gno_out_weighting_fn: edam
+    gno_out_wt_fn_scale: 1.0
+    alpha: 1.0
+    beta: 1.0
+
+  uq:
+    method: mc_dropout
+    mc_samples: 32
+    mc_dropout:
+      dropout_probability: 0.10
+      activate_modules: dropout_only
+      seed: 123
+
+  checkpoint:
+    save_dir: "/scratch/jrj6wm/GINO_Model/neuraloperator_runs/wv_mcdropout/checkpoints/default"
+    resume_from_dir: null
+    save_every: 1
+    save_best_metric: "test_l2"
+    eval_name: best_model
+    allow_unsafe_legacy_load: true
+
+  rollout:
+    run_after_training: false
+    out_dir: "/scratch/jrj6wm/GINO_Model/neuraloperator_runs/wv_mcdropout/eval_outputs/default"
+    n_ensemble_samples: 32
+    n_ensemble_samples_per_model: null
+    init_mode: "mean_history"
+
+  verify_training: false
+  inverse_test: true
+
+  print_every: 100
+  max_val_batches: 64
+  log_level: INFO
+  log_file: "/scratch/jrj6wm/GINO_Model/neuraloperator_runs/wv_mcdropout/logs/train_mcdropout.log"
+  use_progress_bar: true
+
+  opt:
+    n_epochs: 250
+    learning_rate: 5e-4
+    ar_finetune_start_epoch: 75
+    ar_rollout_steps: 5
+    ar_curriculum_epochs_per_step: 25
+    training_loss: l2
+    testing_loss: l2
+    weight_decay: 5e-4
+    amp_autocast: False
+    grad_accum_steps: 1
+    use_activation_checkpointing: false
+    clip_grad_norm: 1.0
+    scheduler: ReduceLROnPlateau
+    scheduler_monitor: test_l2
+    scheduler_mode: min
+    scheduler_patience: 5
+    scheduler_threshold: 1e-4
+    scheduler_threshold_mode: rel
+    scheduler_cooldown: 0
+    scheduler_min_lr: 0.0
+    early_stopping_enabled: true
+    early_stopping_patience: 20
+    early_stopping_min_delta: 1e-4
+    scheduler_T_max: 200
+    scheduler_eta_min: 0.0
+    step_size: 50
+    gamma: 0.5
+
+  wandb:
+    log: true
+    name: null
+    group: wv-mcdropout
+    project: Flood_GINO_NoPhysics
+    entity: uva_mehdi
+    sweep: false
+    log_output: true
+    eval_interval: 1

@@ -49,7 +49,9 @@ from neuralop.flood.losses import (
 from neuralop.flood.processing.wv import (
     FloodGINODataProcessor,
 )
+from neuralop.flood.eval.mc_dropout import validate_mc_dropout_config
 from neuralop.flood.train.debug import overfit_sanity_check, verify_training_gradient_flow
+from neuralop.flood.train.deterministic import DeterministicARTrainer
 from neuralop.flood.train.fgn import FGNTrainer
 from neuralop.flood.train.gaussian import GaussianNLLTrainer
 from neuralop.flood.train.rollout import rollout_prediction
@@ -518,6 +520,15 @@ def main():
     )
     setattr(config.opt, "fgn_ar_state_update", fgn_ar_state_update)
 
+    mc_dropout_cfg = validate_mc_dropout_config(config, require_training_loss_l2=True)
+    if mc_dropout_cfg.enabled:
+        logger.info(
+            "MC-dropout training enabled: samples=%s dropout_probability=%.6f seed=%s",
+            mc_dropout_cfg.samples,
+            mc_dropout_cfg.dropout_probability,
+            mc_dropout_cfg.seed,
+        )
+
     if training_loss_name == "gaussian_nll" and output_distribution != "gaussian":
         raise ValueError(
             "training_loss='gaussian_nll' requires gino.output_distribution='gaussian'."
@@ -702,6 +713,9 @@ def main():
         )
         mixed_precision = False
     grad_accum_steps = max(1, _safe_int(_cfg_get(config.opt, "grad_accum_steps", 1), 1))
+    early_stopping_enabled = bool(_cfg_get(config.opt, "early_stopping_enabled", False))
+    early_stopping_patience = max(1, _safe_int(_cfg_get(config.opt, "early_stopping_patience", 20), 20))
+    early_stopping_min_delta = _safe_float(_cfg_get(config.opt, "early_stopping_min_delta", 1e-4), 1e-4)
     if use_fgn and training_loss_name == "crps":
         crps_l2_weight = _cfg_get(config.opt, "crps_l2_weight", 0.5)
         ar_finetune_start_epoch = max(0, _safe_int(_cfg_get(config.opt, "ar_finetune_start_epoch", 0), 0))
@@ -733,6 +747,9 @@ def main():
             deterministic_eval=deterministic,
             eval_seed=effective_seed,
             train_seed=effective_seed,
+            early_stopping_enabled=early_stopping_enabled,
+            early_stopping_patience=early_stopping_patience,
+            early_stopping_min_delta=early_stopping_min_delta,
             fgn_noise_dim=fgn_noise_dim,
             crps_n_samples=crps_n_samples,
             rel_l2_loss_fn=primary_l2_loss,
@@ -774,12 +791,42 @@ def main():
             deterministic_eval=deterministic,
             eval_seed=effective_seed,
             train_seed=effective_seed,
+            early_stopping_enabled=early_stopping_enabled,
+            early_stopping_patience=early_stopping_patience,
+            early_stopping_min_delta=early_stopping_min_delta,
             rel_l2_loss_fn=primary_l2_loss,
             ar_finetune_start_epoch=max(0, _safe_int(_cfg_get(config.opt, "ar_finetune_start_epoch", 0), 0)),
             ar_rollout_steps=ar_rollout_steps,
             ar_curriculum_epochs_per_step=max(0, _safe_int(_cfg_get(config.opt, "ar_curriculum_epochs_per_step", 0), 0)),
             gaussian_min_logvar=_safe_float(_cfg_get(config.opt, "gaussian_min_logvar", -9.0), -9.0),
             gaussian_max_logvar=_safe_float(_cfg_get(config.opt, "gaussian_max_logvar", 4.0), 4.0),
+        )
+    elif output_distribution == "deterministic" and training_loss_name == "l2" and ar_rollout_steps > 1:
+        trainer = DeterministicARTrainer(
+            model=model,
+            n_epochs=config.opt.n_epochs,
+            data_processor=data_processor,
+            device=device,
+            wandb_log=config.wandb.log,
+            verbose=is_logger,
+            logger=logger,
+            use_progress_bar=use_progress_bar,
+            scheduler_monitor=scheduler_monitor,
+            eval_interval=eval_interval,
+            use_distributed=use_distributed,
+            mixed_precision=mixed_precision,
+            grad_accum_steps=grad_accum_steps,
+            deterministic_eval=deterministic,
+            eval_seed=effective_seed,
+            train_seed=effective_seed,
+            early_stopping_enabled=early_stopping_enabled,
+            early_stopping_patience=early_stopping_patience,
+            early_stopping_min_delta=early_stopping_min_delta,
+            rel_l2_loss_fn=primary_l2_loss,
+            ar_finetune_start_epoch=max(0, _safe_int(_cfg_get(config.opt, "ar_finetune_start_epoch", 0), 0)),
+            ar_rollout_steps=ar_rollout_steps,
+            ar_curriculum_epochs_per_step=max(0, _safe_int(_cfg_get(config.opt, "ar_curriculum_epochs_per_step", 0), 0)),
+            ar_curriculum_start_steps=max(1, _safe_int(_cfg_get(config.opt, "ar_curriculum_start_steps", 1), 1)),
         )
     else:
         trainer = Trainer(
@@ -799,6 +846,9 @@ def main():
             deterministic_eval=deterministic,
             eval_seed=effective_seed,
             train_seed=effective_seed,
+            early_stopping_enabled=early_stopping_enabled,
+            early_stopping_patience=early_stopping_patience,
+            early_stopping_min_delta=early_stopping_min_delta,
         )
     logger.info(
         "Trainer settings: distributed=%s, mixed_precision=%s, grad_accum_steps=%s%s",
@@ -810,7 +860,12 @@ def main():
             f"ar_truncation_steps={_cfg_get(config.opt, 'ar_truncation_steps', 1)}, "
             f"use_activation_checkpointing={_cfg_get(config.opt, 'use_activation_checkpointing', False)}"
             if use_fgn and training_loss_name == "crps"
-            else ""
+            else (
+                f", deterministic_ar_rollout_steps={ar_rollout_steps}, "
+                f"ar_finetune_start_epoch={_cfg_get(config.opt, 'ar_finetune_start_epoch', 0)}"
+                if output_distribution == "deterministic" and training_loss_name == "l2" and ar_rollout_steps > 1
+                else ""
+            )
         ),
     )
     if use_fgn and training_loss_name == "crps":

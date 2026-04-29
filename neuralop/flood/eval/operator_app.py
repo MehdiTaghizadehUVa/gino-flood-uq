@@ -20,6 +20,10 @@ from neuralop.flood.eval.datasets import (
     _set_dataset_structural_dry_mask,
 )
 from neuralop.flood.eval.metrics import _build_eval_losses, _is_gaussian_mode
+from neuralop.flood.eval.mc_dropout import (
+    evaluate_mc_dropout_one_step,
+    validate_mc_dropout_config,
+)
 from neuralop.flood.eval.rollout import (
     _make_trainer,
     _rollout_prediction_generic,
@@ -61,7 +65,15 @@ def main() -> int:
     checkpoint_path = Path(_opt(config, "checkpoint", "save_dir", "."))
     if not checkpoint_path.is_absolute():
         checkpoint_path = checkpoint_path.resolve()
-    checkpoint_runs = _discover_checkpoint_runs(checkpoint_path, preferred_alias=_preferred_checkpoint_alias(config))
+    preferred_checkpoint_alias = _preferred_checkpoint_alias(config)
+    try:
+        checkpoint_runs = _discover_checkpoint_runs(
+            checkpoint_path, preferred_alias=preferred_checkpoint_alias
+        )
+    except TypeError as exc:
+        if "preferred_alias" not in str(exc):
+            raise
+        checkpoint_runs = _discover_checkpoint_runs(checkpoint_path)
     primary_dir, primary_alias, _ = checkpoint_runs[0]
     eval_log = Path(args.eval_log_file)
     if not eval_log.is_absolute():
@@ -90,6 +102,14 @@ def main() -> int:
     out_dist = str(_opt(config, "gino", "output_distribution", "deterministic")).strip().lower()
     train_loss_name = str(_opt(config, "opt", "training_loss", "l2")).strip().lower()
     use_fgn_cfg = bool(_opt(config, "gino", "use_fgn_noise", False))
+    mc_dropout_cfg = validate_mc_dropout_config(config)
+    if mc_dropout_cfg.enabled and is_logger:
+        logger.info(
+            "MC-dropout evaluation enabled: samples=%s dropout_probability=%.6f seed=%s",
+            mc_dropout_cfg.samples,
+            mc_dropout_cfg.dropout_probability,
+            mc_dropout_cfg.seed,
+        )
     fgn_latent_temporal_mode = normalize_fgn_latent_temporal_mode(
         _opt(config, "gino", "fgn_latent_temporal_mode", "stepwise")
     )
@@ -163,7 +183,14 @@ def main() -> int:
                     f"Model[{model_idx}] has fno_norm={model_fno_norm!r}. "
                     "Train/use Gaussian checkpoints with gino.fno_norm set to instance_norm."
                 )
-    eval_losses = _build_eval_losses(config, use_fgn)
+    try:
+        eval_losses = _build_eval_losses(
+            config, use_fgn, target_variables=target_variables
+        )
+    except TypeError as exc:
+        if "target_variables" not in str(exc):
+            raise
+        eval_losses = _build_eval_losses(config, use_fgn)
     logger.info(
         "Eval losses=%s inverse_test=%s n_models=%d gaussian_mode=%s",
         list(eval_losses.keys()),
@@ -195,9 +222,22 @@ def main() -> int:
                 )
                 data_processor.wrap(model)
                 trainer = _make_trainer(config, model, data_processor, device, logger)
-                metrics = trainer.evaluate(
-                    eval_losses, test_loader, log_prefix=f"test_m{model_idx}"
-                )
+                if mc_dropout_cfg.enabled:
+                    metrics = evaluate_mc_dropout_one_step(
+                        model=model,
+                        data_processor=data_processor,
+                        data_loader=test_loader,
+                        eval_losses=eval_losses,
+                        config=config,
+                        device=device,
+                        logger=logger,
+                        log_prefix=f"test_m{model_idx}",
+                        model_idx=model_idx,
+                    )
+                else:
+                    metrics = trainer.evaluate(
+                        eval_losses, test_loader, log_prefix=f"test_m{model_idx}"
+                    )
                 clean = {
                     k: float(v.item() if hasattr(v, "item") else v)
                     for k, v in metrics.items()
@@ -248,6 +288,13 @@ def main() -> int:
             "CLI override" if args.gaussian_state_update is not None else "config",
         )
     ens_per_model = _opt(config, "rollout", "n_ensemble_samples_per_model", None)
+    if mc_dropout_cfg.enabled:
+        rollout_n_ensemble = int(mc_dropout_cfg.samples)
+        ens_per_model = None
+        logger.info(
+            "Using MC-dropout rollout ensemble members=%d (uq.mc_samples); temporal_mode=stepwise.",
+            rollout_n_ensemble,
+        )
     if ens_per_model is not None:
         ens_per_model_int = int(ens_per_model)
         if ens_per_model_int < 1:
@@ -306,6 +353,8 @@ def main() -> int:
                 gaussian_max_logvar=_opt_float(config, "opt", "gaussian_max_logvar", 4.0),
                 gaussian_state_update=gaussian_state_update,
                 rollout_init_mode=rollout_init_mode,
+                mc_dropout_enabled=mc_dropout_cfg.enabled,
+                mc_dropout_seed=mc_dropout_cfg.seed,
             )
         else:
             _rollout_prediction_generic(
@@ -329,6 +378,8 @@ def main() -> int:
                 gaussian_min_logvar=_opt_float(config, "opt", "gaussian_min_logvar", -9.0),
                 gaussian_max_logvar=_opt_float(config, "opt", "gaussian_max_logvar", 4.0),
                 gaussian_state_update=gaussian_state_update,
+                mc_dropout_enabled=mc_dropout_cfg.enabled,
+                mc_dropout_seed=mc_dropout_cfg.seed,
             )
     logger.info("Evaluation finished successfully.")
     return 0
