@@ -307,6 +307,10 @@ def _build_rollout_normalized_dataset(
             skip_before_timestep=skip,
             **rollout_boundary_kwargs,
         )
+    boundary_channel_names = [
+        str(channel.get("name", f"boundary_{idx}"))
+        for idx, channel in enumerate(rollout_boundary_kwargs["boundary_spec"])
+    ]
     if structural_dry_artifact is not None:
         rds.set_structural_dry_mask(structural_dry_artifact["dry_mask"])
 
@@ -335,11 +339,13 @@ def _build_rollout_normalized_dataset(
 
     def _normalize_raw_sample(raw: Dict[str, Any]) -> Dict[str, Any]:
         dynamic = raw["dynamic"][..., target_indices]
+        boundary_raw = torch.as_tensor(raw["boundary"])
         out = {
             "run_id": raw["run_id"],
             "geometry": _normalize_field("geometry", raw["geometry"]),
             "static": _normalize_field("static", raw["static"]),
-            "boundary": _normalize_field("boundary", raw["boundary"]),
+            "boundary": _normalize_field("boundary", boundary_raw),
+            "boundary_series_raw": boundary_raw[:, 0, :].detach().cpu().clone(),
             "dynamic": _normalize_field("dynamic", dynamic),
         }
         if structural_dry_artifact is not None:
@@ -363,6 +369,8 @@ def _build_rollout_normalized_dataset(
                 "geometry": geometry,
                 "static": normalized_group[0]["static"],
                 "boundary": normalized_group[0]["boundary"],
+                "boundary_series_raw": normalized_group[0]["boundary_series_raw"],
+                "boundary_channel_names": list(boundary_channel_names),
                 "dynamic_ref": torch.stack([g["dynamic"] for g in normalized_group], dim=0),
                 "query_points": query_points,
                 "n_ref_sims": len(normalized_group),

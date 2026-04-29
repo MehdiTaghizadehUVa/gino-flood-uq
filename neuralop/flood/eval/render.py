@@ -748,6 +748,216 @@ def _save_nonspatial_uq_diagnostics(
         fig.savefig(os.path.join(out_dir, UQ_BOXPLOT_PNG), bbox_inches="tight")
         plt.close(fig)
 
+
+def _coerce_boundary_series_raw(boundary_series_raw: Optional[Any]) -> Optional[np.ndarray]:
+    if boundary_series_raw is None:
+        return None
+    if hasattr(boundary_series_raw, "detach"):
+        arr = boundary_series_raw.detach().cpu().numpy()
+    else:
+        arr = np.asarray(boundary_series_raw)
+    arr = np.asarray(arr, dtype=np.float64)
+    if arr.ndim == 3:
+        arr = arr[:, 0, :]
+    if arr.ndim == 1:
+        arr = arr[:, None]
+    if arr.ndim != 2 or arr.shape[0] == 0 or arr.shape[1] == 0:
+        return None
+    return arr
+
+
+def _boundary_channel_names(boundary_channel_names: Optional[List[str]], n_channels: int) -> List[str]:
+    names = [str(name).strip() for name in (boundary_channel_names or [])]
+    out = []
+    for idx in range(n_channels):
+        if idx < len(names) and names[idx]:
+            out.append(names[idx])
+        elif n_channels == 1:
+            out.append("inflow")
+        else:
+            out.append(f"boundary_{idx}")
+    return out
+
+
+def _find_boundary_channel(names: List[str], *needles: str) -> Optional[int]:
+    lowered = [name.lower() for name in names]
+    for idx, name in enumerate(lowered):
+        if any(needle in name for needle in needles):
+            return idx
+    return None
+
+
+def _boundary_plot_kind(name: str) -> str:
+    lower = str(name).lower()
+    if "precip" in lower or "rain" in lower:
+        return "bar"
+    return "line"
+
+
+def _boundary_display_label(name: str) -> str:
+    lower = str(name).lower()
+    if "stage" in lower:
+        return "Stage"
+    if "precip" in lower or "rain" in lower:
+        return "Precipitation"
+    if lower in {"inflow", "flow", "hydrograph", "boundary"}:
+        return "Inflow / flow"
+    return str(name).replace("_", " ").title()
+
+
+def _diagnostic_boundary_panels(boundary_channel_names: Optional[List[str]], n_channels: int) -> List[Tuple[int, str]]:
+    names = _boundary_channel_names(boundary_channel_names, n_channels)
+    stage_idx = _find_boundary_channel(names, "stage")
+    precip_idx = _find_boundary_channel(names, "precip", "rain")
+    if stage_idx is not None and precip_idx is not None:
+        return [(stage_idx, "line"), (precip_idx, "bar")]
+    if n_channels <= 0:
+        return []
+    if n_channels == 1:
+        return [(0, _boundary_plot_kind(names[0]))]
+    return [(idx, _boundary_plot_kind(names[idx])) for idx in range(min(n_channels, 2))]
+
+
+def _diagnostic_ylim(values: np.ndarray, *, force_zero_bottom: bool = False) -> Tuple[float, float]:
+    vals = np.asarray(values, dtype=np.float64)
+    vals = vals[np.isfinite(vals)]
+    if vals.size == 0:
+        return (0.0, 1.0)
+    vmin = float(np.min(vals))
+    vmax = float(np.max(vals))
+    if force_zero_bottom:
+        vmin = min(0.0, vmin)
+    if np.isclose(vmin, vmax):
+        pad = max(abs(vmax) * 0.05, 1.0 if force_zero_bottom else 0.1)
+    else:
+        pad = 0.08 * (vmax - vmin)
+    return (vmin - pad, vmax + pad)
+
+
+def _make_rollout_diagnostic_axes(
+    fig: Any,
+    gs: Any,
+    *,
+    boundary_series_raw: Optional[Any],
+    boundary_channel_names: Optional[List[str]],
+) -> Dict[str, Any]:
+    series = _coerce_boundary_series_raw(boundary_series_raw)
+    n_channels = int(series.shape[1]) if series is not None else 0
+    names = _boundary_channel_names(boundary_channel_names, n_channels)
+    panels = _diagnostic_boundary_panels(names, n_channels)
+    boundary_axes: List[Tuple[Any, int, str]] = []
+    if len(panels) == 1:
+        boundary_axes.append((fig.add_subplot(gs[2, 0:2]), panels[0][0], panels[0][1]))
+        rel_ax = fig.add_subplot(gs[2, 2])
+    elif len(panels) >= 2:
+        boundary_axes.append((fig.add_subplot(gs[2, 0]), panels[0][0], panels[0][1]))
+        boundary_axes.append((fig.add_subplot(gs[2, 1]), panels[1][0], panels[1][1]))
+        rel_ax = fig.add_subplot(gs[2, 2])
+    else:
+        rel_ax = fig.add_subplot(gs[2, :])
+    return {
+        "series": series,
+        "names": names,
+        "boundary_axes": boundary_axes,
+        "relative_l2_axis": rel_ax,
+    }
+
+
+def _draw_boundary_diagnostic_axis(
+    ax: Any,
+    *,
+    time_hours: np.ndarray,
+    values: np.ndarray,
+    name: str,
+    kind: str,
+    current_index: int,
+) -> None:
+    ax.clear()
+    values = np.asarray(values, dtype=np.float64)
+    current_index = int(np.clip(current_index, 0, max(values.size - 1, 0)))
+    label = _boundary_display_label(name)
+    color = "#2563eb" if kind != "bar" else "#0f766e"
+    if kind == "bar":
+        width = 0.8 * float(np.median(np.diff(time_hours))) if time_hours.size > 1 else 0.2
+        width = max(width, 0.02)
+        ax.bar(time_hours, values, width=width, color=color, alpha=0.18, linewidth=0)
+        ax.bar(time_hours[: current_index + 1], values[: current_index + 1], width=width, color=color, alpha=0.85, linewidth=0)
+        force_zero = True
+    else:
+        ax.plot(time_hours, values, color=color, alpha=0.24, linewidth=1.1)
+        ax.plot(time_hours[: current_index + 1], values[: current_index + 1], color=color, alpha=0.95, linewidth=2.0)
+        force_zero = False
+    ax.axvline(time_hours[current_index], color="#111827", alpha=0.8, linewidth=1.1, linestyle="--")
+    ax.set_title(label, fontsize=10.5)
+    ax.set_xlabel("Time (h)")
+    ax.set_ylabel(label)
+    ax.set_ylim(*_diagnostic_ylim(values, force_zero_bottom=force_zero))
+    ax.grid(True, alpha=0.25, linewidth=0.5)
+
+
+def _draw_relative_l2_axis(
+    ax: Any,
+    *,
+    relative_l2: Optional[np.ndarray],
+    frame_idx: int,
+    dt_seconds: float,
+    rollout_start_index: int,
+) -> None:
+    ax.clear()
+    if relative_l2 is None:
+        ax.set_axis_off()
+        return
+    rel = np.asarray(relative_l2, dtype=np.float64).reshape(-1)
+    if rel.size == 0:
+        ax.set_axis_off()
+        return
+    xh = (float(rollout_start_index) + np.arange(rel.size, dtype=np.float64)) * float(dt_seconds) / 3600.0
+    current = int(np.clip(frame_idx, 0, rel.size - 1))
+    ax.plot(xh, rel, color="#7c2d12", alpha=0.24, linewidth=1.1)
+    ax.plot(xh[: current + 1], rel[: current + 1], color="#7c2d12", alpha=0.98, linewidth=2.0)
+    ax.scatter([xh[current]], [rel[current]], s=18, color="#7c2d12", zorder=3)
+    ax.axvline(xh[current], color="#111827", alpha=0.8, linewidth=1.1, linestyle="--")
+    ax.set_title("WD relative L2", fontsize=10.5)
+    ax.set_xlabel("Time (h)")
+    ax.set_ylabel("rel. L2")
+    ax.set_ylim(*_diagnostic_ylim(rel, force_zero_bottom=True))
+    ax.grid(True, alpha=0.25, linewidth=0.5)
+
+
+def _draw_rollout_diagnostics(
+    *,
+    diag_axes: Dict[str, Any],
+    frame_idx: int,
+    dt_seconds: float,
+    boundary_series_raw: Optional[Any],
+    boundary_channel_names: Optional[List[str]],
+    relative_l2: Optional[np.ndarray],
+    rollout_start_index: int,
+) -> None:
+    series = diag_axes.get("series")
+    if series is None:
+        series = _coerce_boundary_series_raw(boundary_series_raw)
+    if series is not None:
+        names = diag_axes.get("names") or _boundary_channel_names(boundary_channel_names, series.shape[1])
+        time_hours = np.arange(series.shape[0], dtype=np.float64) * float(dt_seconds) / 3600.0
+        current_abs = int(np.clip(int(rollout_start_index) + int(frame_idx), 0, series.shape[0] - 1))
+        for ax, channel_idx, kind in diag_axes.get("boundary_axes", []):
+            _draw_boundary_diagnostic_axis(
+                ax,
+                time_hours=time_hours,
+                values=series[:, channel_idx],
+                name=names[channel_idx],
+                kind=kind,
+                current_index=current_abs,
+            )
+    _draw_relative_l2_axis(
+        diag_axes["relative_l2_axis"],
+        relative_l2=relative_l2,
+        frame_idx=frame_idx,
+        dt_seconds=dt_seconds,
+        rollout_start_index=rollout_start_index,
+    )
+
 def _save_hydrograph_uq_figures_and_animation(
     geometry: Any,
     pred_mean_by_channel: Dict[str, np.ndarray],
@@ -763,6 +973,10 @@ def _save_hydrograph_uq_figures_and_animation(
     pred_prob_wd: Optional[np.ndarray] = None,
     gt_prob_wd: Optional[np.ndarray] = None,
     crps_map_wd: Optional[np.ndarray] = None,
+    boundary_series_raw: Optional[Any] = None,
+    boundary_channel_names: Optional[List[str]] = None,
+    relative_l2_by_channel: Optional[Dict[str, np.ndarray]] = None,
+    rollout_start_index: int = 0,
 ) -> None:
     """Generate publication-ready UQ figures and animations per hydrograph."""
     import matplotlib as mpl
@@ -912,14 +1126,38 @@ def _save_hydrograph_uq_figures_and_animation(
             ratio_vmin, ratio_vmax = 0.5, 1.5
         ratio_norm = mcolors.TwoSlopeNorm(vmin=ratio_vmin, vcenter=1.0, vmax=ratio_vmax)
 
-        fig, axs = plt.subplots(2, 3, figsize=(14.8, 9.6), dpi=260, constrained_layout=True)
-        ax_gt_m, ax_pr_m, ax_err, ax_gt_s, ax_pr_s, ax_ratio = axs.flatten()
+        wd_relative_l2 = None
+        if relative_l2_by_channel is not None:
+            wd_relative_l2 = relative_l2_by_channel.get("wd")
+            if wd_relative_l2 is None and relative_l2_by_channel:
+                wd_relative_l2 = next(iter(relative_l2_by_channel.values()))
+
+        anim_figsize = (15.8, 12.6)
+        anim_dpi = 240
+        renderer_anim = _build_spatial_renderer(
+            x, y, figsize=anim_figsize, dpi=anim_dpi, n_rows=3, n_cols=3
+        )
+        fig = plt.figure(figsize=anim_figsize, dpi=anim_dpi, constrained_layout=True)
+        gs = fig.add_gridspec(3, 3, height_ratios=[1.0, 1.0, 0.52])
+        ax_gt_m = fig.add_subplot(gs[0, 0])
+        ax_pr_m = fig.add_subplot(gs[0, 1])
+        ax_err = fig.add_subplot(gs[0, 2])
+        ax_gt_s = fig.add_subplot(gs[1, 0])
+        ax_pr_s = fig.add_subplot(gs[1, 1])
+        ax_ratio = fig.add_subplot(gs[1, 2])
+        diag_axes = _make_rollout_diagnostic_axes(
+            fig,
+            gs,
+            boundary_series_raw=boundary_series_raw,
+            boundary_channel_names=boundary_channel_names,
+        )
+
         s_gt_m = _plot_spatial_field(
             ax=ax_gt_m,
             x=x,
             y=y,
             arr=wd_gt_mean[0],
-            renderer=renderer_2x3,
+            renderer=renderer_anim,
             cmap="viridis",
             vmin=0.0,
             vmax=vmax,
@@ -929,7 +1167,7 @@ def _save_hydrograph_uq_figures_and_animation(
             x=x,
             y=y,
             arr=wd_pred_mean[0],
-            renderer=renderer_2x3,
+            renderer=renderer_anim,
             cmap="viridis",
             vmin=0.0,
             vmax=vmax,
@@ -939,7 +1177,7 @@ def _save_hydrograph_uq_figures_and_animation(
             x=x,
             y=y,
             arr=wd_abs_err[0],
-            renderer=renderer_2x3,
+            renderer=renderer_anim,
             cmap="magma",
             vmin=0.0,
             vmax=err_max,
@@ -949,7 +1187,7 @@ def _save_hydrograph_uq_figures_and_animation(
             x=x,
             y=y,
             arr=wd_gt_std[0],
-            renderer=renderer_2x3,
+            renderer=renderer_anim,
             cmap="plasma",
             vmin=0.0,
             vmax=spread_max,
@@ -959,7 +1197,7 @@ def _save_hydrograph_uq_figures_and_animation(
             x=x,
             y=y,
             arr=wd_pred_std[0],
-            renderer=renderer_2x3,
+            renderer=renderer_anim,
             cmap="plasma",
             vmin=0.0,
             vmax=spread_max,
@@ -969,7 +1207,7 @@ def _save_hydrograph_uq_figures_and_animation(
             x=x,
             y=y,
             arr=wd_ratio[0],
-            renderer=renderer_2x3,
+            renderer=renderer_anim,
             cmap="RdBu_r",
             vmin=ratio_vmin,
             vmax=ratio_vmax,
@@ -993,19 +1231,37 @@ def _save_hydrograph_uq_figures_and_animation(
         fig.colorbar(s_pr_s, ax=ax_pr_s, fraction=0.046, pad=0.02)
         cb_ratio = fig.colorbar(s_ratio, ax=ax_ratio, fraction=0.046, pad=0.02)
         cb_ratio.set_label("ratio (center=1)")
+        _draw_rollout_diagnostics(
+            diag_axes=diag_axes,
+            frame_idx=0,
+            dt_seconds=dt_seconds,
+            boundary_series_raw=boundary_series_raw,
+            boundary_channel_names=boundary_channel_names,
+            relative_l2=wd_relative_l2,
+            rollout_start_index=rollout_start_index,
+        )
 
         def _animate(frame_idx: int) -> List[Any]:
-            time_hours = (frame_idx + 1) * dt_seconds / 3600.0
+            time_hours = (int(rollout_start_index) + frame_idx) * dt_seconds / 3600.0
             fig.suptitle(
                 f"Hydrograph {hid} | t={frame_idx} ({time_hours:.2f} h)",
                 fontsize=13,
             )
-            _update_spatial_artist(s_gt_m, wd_gt_mean[frame_idx], renderer_2x3)
-            _update_spatial_artist(s_pr_m, wd_pred_mean[frame_idx], renderer_2x3)
-            _update_spatial_artist(s_err, wd_abs_err[frame_idx], renderer_2x3)
-            _update_spatial_artist(s_gt_s, wd_gt_std[frame_idx], renderer_2x3)
-            _update_spatial_artist(s_pr_s, wd_pred_std[frame_idx], renderer_2x3)
-            _update_spatial_artist(s_ratio, wd_ratio[frame_idx], renderer_2x3)
+            _update_spatial_artist(s_gt_m, wd_gt_mean[frame_idx], renderer_anim)
+            _update_spatial_artist(s_pr_m, wd_pred_mean[frame_idx], renderer_anim)
+            _update_spatial_artist(s_err, wd_abs_err[frame_idx], renderer_anim)
+            _update_spatial_artist(s_gt_s, wd_gt_std[frame_idx], renderer_anim)
+            _update_spatial_artist(s_pr_s, wd_pred_std[frame_idx], renderer_anim)
+            _update_spatial_artist(s_ratio, wd_ratio[frame_idx], renderer_anim)
+            _draw_rollout_diagnostics(
+                diag_axes=diag_axes,
+                frame_idx=frame_idx,
+                dt_seconds=dt_seconds,
+                boundary_series_raw=boundary_series_raw,
+                boundary_channel_names=boundary_channel_names,
+                relative_l2=wd_relative_l2,
+                rollout_start_index=rollout_start_index,
+            )
             return [s_gt_m, s_pr_m, s_err, s_gt_s, s_pr_s, s_ratio]
 
         ani = animation.FuncAnimation(
