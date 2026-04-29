@@ -50,6 +50,28 @@ ROBUST_SPATIAL_COLOR_QUANTILE = 0.995
 WD_SPATIAL_VMAX_CAP_METERS = 3.0
 
 
+def _safe_linear_fit_and_corr(x: np.ndarray, y: np.ndarray) -> Optional[Tuple[float, float, float]]:
+    """Fit y=a*x+b only when spread-skill samples are numerically valid."""
+    x_arr = np.asarray(x, dtype=np.float64).reshape(-1)
+    y_arr = np.asarray(y, dtype=np.float64).reshape(-1)
+    mask = np.isfinite(x_arr) & np.isfinite(y_arr)
+    x_arr = x_arr[mask]
+    y_arr = y_arr[mask]
+    if x_arr.size <= 2:
+        return None
+    if np.ptp(x_arr) <= MIN_EPS or np.ptp(y_arr) <= MIN_EPS:
+        return None
+    try:
+        slope, intercept = np.polyfit(x_arr, y_arr, deg=1)
+        corr_matrix = np.corrcoef(x_arr, y_arr)
+        corr = float(corr_matrix[0, 1])
+    except (FloatingPointError, np.linalg.LinAlgError, ValueError):
+        return None
+    if not (np.isfinite(slope) and np.isfinite(intercept) and np.isfinite(corr)):
+        return None
+    return corr, float(slope), float(intercept)
+
+
 def _finite_spatial_values(*arrays: np.ndarray) -> np.ndarray:
     vals = []
     for arr in arrays:
@@ -506,17 +528,12 @@ def _save_nonspatial_uq_diagnostics(
         overall["rank_hist_l1_distance"] = float(np.sum(np.abs(rank_pdf - uniform_rank)))
 
     if spread_skill_samples.size > 0:
-        x = spread_skill_samples[:, 0]
-        y = spread_skill_samples[:, 1]
-        mask = np.isfinite(x) & np.isfinite(y)
-        x = x[mask]
-        y = y[mask]
-        if x.size > 2:
-            corr = float(np.corrcoef(x, y)[0, 1])
-            slope, intercept = np.polyfit(x, y, deg=1)
+        fit = _safe_linear_fit_and_corr(spread_skill_samples[:, 0], spread_skill_samples[:, 1])
+        if fit is not None:
+            corr, slope, intercept = fit
             overall["spread_skill_corr"] = corr
-            overall["spread_skill_slope"] = float(slope)
-            overall["spread_skill_intercept"] = float(intercept)
+            overall["spread_skill_slope"] = slope
+            overall["spread_skill_intercept"] = intercept
 
     json_path = os.path.join(out_dir, UQ_OVERALL_JSON)
     with open(json_path, "w", encoding="utf-8") as f:
@@ -594,11 +611,11 @@ def _save_nonspatial_uq_diagnostics(
             cb = fig.colorbar(hb, ax=ax, fraction=0.05, pad=0.03)
             cb.set_label("log10(count)")
             ax.plot([0, vmax], [0, vmax], "--", color="white", linewidth=1.2, label="Ideal y=x")
-            if x.size > 2:
-                slope, intercept = np.polyfit(x, y, deg=1)
+            fit = _safe_linear_fit_and_corr(x, y)
+            if fit is not None:
+                corr, slope, intercept = fit
                 xx = np.linspace(0.0, vmax, 100)
                 ax.plot(xx, slope * xx + intercept, color="#d62728", linewidth=1.4, label="Fit")
-                corr = np.corrcoef(x, y)[0, 1]
                 ax.text(
                     0.02,
                     0.95,
