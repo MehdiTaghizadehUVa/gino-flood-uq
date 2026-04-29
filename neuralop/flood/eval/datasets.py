@@ -42,6 +42,28 @@ from neuralop.flood.utils.runtime import (
     parse_target_variables,
 )
 
+def _normalizer_tensor_device(normalizer: Any, fallback: torch.device) -> torch.device:
+    """Return the current tensor device for a normalizer.
+
+    Lazy rollout hydrograph samples close over the normalizer dict, while rollout
+    code may later move target/dynamic normalizers to the sampling device. Device
+    choice must therefore be evaluated at transform time, not when the lazy
+    iterator is created.
+    """
+    for attr in ("mean", "std"):
+        tensor = getattr(normalizer, attr, None)
+        if isinstance(tensor, torch.Tensor):
+            return tensor.device
+    return fallback
+
+
+def _transform_with_current_normalizer_device(
+    normalizer: Any, value: torch.Tensor, fallback_device: torch.device
+) -> torch.Tensor:
+    norm_device = _normalizer_tensor_device(normalizer, fallback_device)
+    return normalizer.transform(value.unsqueeze(0).to(norm_device)).squeeze(0).cpu()
+
+
 def _load_or_fit_normalizers(
     config: Any,
     train_data: Any,
@@ -335,7 +357,7 @@ def _build_rollout_normalized_dataset(
             return value.cpu()
         # Normalizers were fit with a leading sample dimension. Keep that
         # dimension during transform, then drop it to preserve rollout shapes.
-        return normalizers[key].transform(value.unsqueeze(0).to(ref_device)).squeeze(0).cpu()
+        return _transform_with_current_normalizer_device(normalizers[key], value, ref_device)
 
     def _normalize_raw_sample(raw: Dict[str, Any]) -> Dict[str, Any]:
         dynamic = raw["dynamic"][..., target_indices]
