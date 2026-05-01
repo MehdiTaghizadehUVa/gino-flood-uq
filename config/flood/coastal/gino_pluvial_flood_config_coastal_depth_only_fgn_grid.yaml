@@ -55,7 +55,7 @@ flood: &FLOOD
     noise_type: "none"
     target_variables: ["wd"]
     noise_std: [0.01]
-    rollout_length: 78
+    rollout_length: -1
     skip_before_timestep: 12
     dt: 1200
 
@@ -198,6 +198,24 @@ flood: &FLOOD
     scheduler_eta_min: 0.0
     step_size: 50
     gamma: 0.5
+
+  visualization:
+    map:
+      enabled: true
+      crs: "EPSG:32618"
+      mode: "dem_elevation"  # topo | imagery | 3dep_hillshade | elevation_hillshade | dem_elevation
+      provider: "local_elevation"
+      dem_cmap: "hecras_dem"
+      dem_quantiles: [0.01, 0.99]
+      cache_scope: "run_extent"
+      fallback: "elevation_hillshade"
+    wd:
+      colormap: "cyan_depth"
+      overlay_alpha: 0.88
+      wet_edge_threshold_m: 0.05
+    output:
+      write_gif: true
+      write_mp4: true
 
   wandb:
     log: false

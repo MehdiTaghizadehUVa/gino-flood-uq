@@ -37,6 +37,7 @@ TRAIN_ROOT="${TRAIN_ROOT:-/scratch/$USER/Data_Generation_UQ_dataset/results/Dyna
 ARTIFACT_DIR="${ARTIFACT_DIR:?ARTIFACT_DIR must be set}"
 CHECKPOINT_ROOT="${CHECKPOINT_ROOT:?CHECKPOINT_ROOT must be set}"
 OUT_DIR="${OUT_DIR:?OUT_DIR must be set}"
+EVAL_CONFIG_RENDERED="${EVAL_CONFIG_RENDERED:-${OUT_DIR}/effective_eval_config.yaml}"
 NORMALIZER_PATH="${NORMALIZER_PATH:-${ARTIFACT_DIR}/normalizers_depth_only_masked_primary.pt}"
 MASK_PATH="${MASK_PATH:-${ARTIFACT_DIR}/structural_dry_mask_exact_zero.pt}"
 TEST_TXT_NAME="${TEST_TXT_NAME:-test.txt}"
@@ -50,6 +51,7 @@ RUN_ROLLOUT="${RUN_ROLLOUT:-true}"
 
 slurm_configure_host_ca
 slurm_assert_container_gpus "${CONTAINER_PATH}" 1
+slurm_prepare_geo_venv "${CONTAINER_PATH}"
 
 if [[ ! -f "${NORMALIZER_PATH}" ]]; then
   echo "ERROR: normalizer artifact not found: ${NORMALIZER_PATH}" >&2
@@ -90,9 +92,28 @@ if [[ "${MODEL_COUNT}" -lt 1 ]]; then
 fi
 TOTAL_ENSEMBLE=$((ENSEMBLE_PER_MODEL * MODEL_COUNT))
 mkdir -p "${OUT_DIR}"
+python3 - "${EVAL_CONFIG}" "${EVAL_CONFIG_RENDERED}" "${OUT_DIR}" <<'PY'
+import sys
+from pathlib import Path
+
+import yaml
+
+source = Path(sys.argv[1])
+dest = Path(sys.argv[2])
+out_dir = sys.argv[3]
+with source.open("r", encoding="utf-8-sig") as f:
+    payload = yaml.safe_load(f)
+root = payload.get("flood", payload) if isinstance(payload, dict) else payload
+if not isinstance(root, dict):
+    raise SystemExit(f"Unsupported eval config structure in {source}")
+root.setdefault("rollout", {})["out_dir"] = out_dir
+dest.parent.mkdir(parents=True, exist_ok=True)
+with dest.open("w", encoding="utf-8") as f:
+    yaml.safe_dump(payload, f, sort_keys=False)
+PY
 
 EVAL_ARGS=(
-  --config_path "${EVAL_CONFIG}"
+  --config_path "${EVAL_CONFIG_RENDERED}"
   --checkpoint.save_dir "${CHECKPOINT_ROOT}"
   --data.root "${TEST_ROOT}"
   --data.train_txt "${TRAIN_STUB_NAME}"
@@ -107,7 +128,6 @@ EVAL_ARGS=(
   --rollout_data.clean_boundary_root "${TEST_CLEAN_BOUNDARY_ROOT}"
   --rollout_data.clean_boundary_file "${TEST_CLEAN_BOUNDARY_FILE}"
   --rollout_data.test_txt "${TEST_TXT_NAME}"
-  --rollout.out_dir "${OUT_DIR}"
   --rollout.n_ensemble_samples "${TOTAL_ENSEMBLE}"
   --wandb.log false
 )

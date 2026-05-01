@@ -70,6 +70,7 @@ MC_SAMPLES="${MC_SAMPLES:-32}"
 
 slurm_configure_host_ca
 slurm_assert_container_gpus "${CONTAINER_PATH}" 1
+slurm_prepare_geo_venv "${CONTAINER_PATH}"
 
 if [[ ! -f "${NORMALIZER_PATH}" ]]; then
   echo "ERROR: training normalizer artifact not found: ${NORMALIZER_PATH}" >&2
@@ -101,6 +102,23 @@ sed \
   -e "s/Precipitation_Train_Clean.txt/Precipitation_Test_Clean.txt/g" \
   "${EVAL_CONFIG}" > "${RENDERED_CONFIG}"
 mkdir -p "${OUT_DIR}"
+python3 - "${RENDERED_CONFIG}" "${OUT_DIR}" <<'PY'
+import sys
+from pathlib import Path
+
+import yaml
+
+config_path = Path(sys.argv[1])
+out_dir = sys.argv[2]
+with config_path.open("r", encoding="utf-8-sig") as f:
+    payload = yaml.safe_load(f)
+root = payload.get("flood", payload) if isinstance(payload, dict) else payload
+if not isinstance(root, dict):
+    raise SystemExit(f"Unsupported eval config structure in {config_path}")
+root.setdefault("rollout", {})["out_dir"] = out_dir
+with config_path.open("w", encoding="utf-8") as f:
+    yaml.safe_dump(payload, f, sort_keys=False)
+PY
 
 CLI_ARGS=(
   --config_path "${RENDERED_CONFIG}"
@@ -116,7 +134,6 @@ CLI_ARGS=(
   --structural_dry.policy "${STRUCTURAL_DRY_POLICY}"
   --rollout_data.root "${TEST_ROOT}"
   --rollout_data.test_txt "${TEST_TXT_NAME}"
-  --rollout.out_dir "${OUT_DIR}"
   --rollout.n_ensemble_samples "${MC_SAMPLES}"
   --rollout.n_ensemble_samples_per_model null
   --uq.mc_samples "${MC_SAMPLES}"

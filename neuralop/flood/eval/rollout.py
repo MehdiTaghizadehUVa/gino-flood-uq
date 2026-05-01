@@ -104,6 +104,15 @@ def _masked_rmse(pred: np.ndarray, gt: np.ndarray, mask: np.ndarray | None) -> f
     return float(np.sqrt(_masked_mean(diff ** 2, mask)))
 
 
+def _masked_relative_l2(pred: np.ndarray, gt: np.ndarray, mask: np.ndarray | None) -> float:
+    pred_sel = np.asarray(_select_cells(pred, mask), dtype=np.float64).reshape(-1)
+    gt_sel = np.asarray(_select_cells(gt, mask), dtype=np.float64).reshape(-1)
+    if pred_sel.size == 0 or gt_sel.size == 0:
+        return 0.0
+    denom = max(float(np.linalg.norm(gt_sel)), MIN_EPS)
+    return float(np.linalg.norm(pred_sel - gt_sel) / denom)
+
+
 def _masked_mae(pred: np.ndarray, gt: np.ndarray, mask: np.ndarray | None) -> float:
     return _masked_mean(np.abs(np.asarray(pred) - np.asarray(gt)), mask)
 
@@ -187,6 +196,8 @@ def _rollout_prediction_per_hydrograph(
     rollout_init_mode: str = "mean_history",
     mc_dropout_enabled: bool = False,
     mc_dropout_seed: Optional[int] = None,
+    visualization_config: Optional[Any] = None,
+    calibration_coeffs_wd: Optional[Any] = None,
 ) -> None:
     """
     Evaluate per hydrograph using all reference simulations as ground-truth uncertainty.
@@ -367,6 +378,7 @@ def _rollout_prediction_per_hydrograph(
         run_pred_std_by_channel: Dict[str, List[np.ndarray]] = {name: [] for name in target_variables}
         run_gt_mean_by_channel: Dict[str, List[np.ndarray]] = {name: [] for name in target_variables}
         run_gt_std_by_channel: Dict[str, List[np.ndarray]] = {name: [] for name in target_variables}
+        run_relative_l2: Dict[str, List[float]] = {name: [] for name in target_variables}
         run_wd_pred_prob: List[np.ndarray] = []
         run_wd_gt_prob: List[np.ndarray] = []
         run_wd_crps_map: List[np.ndarray] = []
@@ -615,6 +627,7 @@ def _rollout_prediction_per_hydrograph(
 
                 rmse_full_t = _masked_rmse(pred_mean_ch, gt_mean_ch, None)
                 rmse_t = _masked_rmse(pred_mean_ch, gt_mean_ch, wettable_mask_np)
+                rel_l2_t = _masked_relative_l2(pred_mean_ch, gt_mean_ch, wettable_mask_np)
                 crps_map = _crps_ensemble_vs_reference(pred_ens_ch, gt_ref_ch)
                 crps_full_t = _masked_mean(crps_map, None)
                 crps_t = _masked_mean(crps_map, wettable_mask_np)
@@ -668,6 +681,7 @@ def _rollout_prediction_per_hydrograph(
 
                 run_rmse[ch_name].append(rmse_t)
                 run_rmse_full[ch_name].append(rmse_full_t)
+                run_relative_l2[ch_name].append(rel_l2_t)
                 run_crps[ch_name].append(crps_t)
                 run_crps_full[ch_name].append(crps_full_t)
                 run_gaussian_nll[ch_name].append(gaussian_nll_t)
@@ -830,9 +844,12 @@ def _rollout_prediction_per_hydrograph(
         pred_prob_wd = np.stack(run_wd_pred_prob, axis=0) if run_wd_pred_prob else None
         gt_prob_wd = np.stack(run_wd_gt_prob, axis=0) if run_wd_gt_prob else None
         crps_map_wd = np.stack(run_wd_crps_map, axis=0) if run_wd_crps_map else None
+        relative_l2_by_channel = {
+            k: np.asarray(v, dtype=np.float64) for k, v in run_relative_l2.items()
+        }
 
         _save_hydrograph_uq_figures_and_animation(
-            geometry=geometry,
+            geometry=sample.get("geometry_raw", geometry),
             pred_mean_by_channel=pred_mean_by_channel,
             pred_std_by_channel=pred_std_by_channel,
             gt_mean_by_channel=gt_mean_by_channel,
@@ -846,6 +863,12 @@ def _rollout_prediction_per_hydrograph(
             pred_prob_wd=pred_prob_wd,
             gt_prob_wd=gt_prob_wd,
             crps_map_wd=crps_map_wd,
+            boundary_series_raw=sample.get("boundary_series_raw"),
+            boundary_channel_names=sample.get("boundary_channel_names"),
+            relative_l2_by_channel=relative_l2_by_channel,
+            rollout_start_index=start_pred_t,
+            elevation_raw=sample.get("elevation_raw"),
+            visualization_config=visualization_config,
         )
 
         for ch_name in target_variables:
@@ -1199,6 +1222,7 @@ def _rollout_prediction_generic(
     gaussian_state_update: str = "sample",
     mc_dropout_enabled: bool = False,
     mc_dropout_seed: Optional[int] = None,
+    visualization_config: Optional[Any] = None,
 ) -> None:
     """
     Generic rollout mode (single reference trajectory per run).
@@ -1684,7 +1708,7 @@ def _rollout_prediction_generic(
                 filename_prefix="flood",
             )
             create_rollout_animation(
-                geometry=geometry,
+                geometry=sample.get("geometry_raw", geometry),
                 wd_gt=gt_arr["wd"],
                 wd_pred=pred_arr["wd"],
                 vx_gt=gt_arr["vx"],
@@ -1697,13 +1721,15 @@ def _rollout_prediction_generic(
             )
         else:
             _save_generic_rollout_visuals(
-                geometry=geometry,
+                geometry=sample.get("geometry_raw", geometry),
                 pred_by_channel=pred_arr,
                 gt_by_channel=gt_arr,
                 target_variables=target_variables,
                 out_dir=out_dir,
                 run_id=run_id,
                 dt_seconds=dt,
+                elevation_raw=sample.get("elevation_raw"),
+                visualization_config=visualization_config,
             )
         logger.info("Completed rollout run_id=%s", run_id)
 

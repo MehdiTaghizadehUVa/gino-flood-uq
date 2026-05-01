@@ -64,7 +64,7 @@ flood: &FLOOD
     noise_type: "none"
     target_variables: ["wd"]
     noise_std: [0.01]
-    rollout_length: 78
+    rollout_length: -1
     skip_before_timestep: 12
     dt : 1200
 

@@ -42,6 +42,7 @@ CHECKPOINT_ROOT="${CHECKPOINT_ROOT:-${PROJECT_DIR}/scripts/runtime/checkpoints_W
 JOB_NAME="${JOB_NAME:-fgn_wv_ev}"
 OUT_DIR_DEFAULT="${PROJECT_DIR}/scripts/runtime/eval_outputs/${JOB_NAME}_$(date +%Y%m%d_%H%M%S)"
 OUT_DIR="${OUT_DIR:-${OUT_DIR_DEFAULT}}"
+EVAL_CONFIG_RENDERED="${EVAL_CONFIG_RENDERED:-${OUT_DIR}/effective_eval_config.yaml}"
 TEST_TXT_NAME="${TEST_TXT_NAME:-test.txt}"
 TRAIN_STUB_NAME="${TRAIN_STUB_NAME:-train_eval_stub.txt}"
 TEST_CLEAN_BOUNDARY_ROOT="${TEST_CLEAN_BOUNDARY_ROOT:-$(cd "${TEST_ROOT}/.." && pwd)/metadata}"
@@ -51,6 +52,7 @@ RUN_SINGLE_STEP="${RUN_SINGLE_STEP:-false}"
 RUN_ROLLOUT="${RUN_ROLLOUT:-true}"
 
 slurm_configure_host_ca
+slurm_prepare_geo_venv "${CONTAINER_PATH}"
 
 TEST_TXT="${TEST_ROOT}/${TEST_TXT_NAME}"
 if [[ ! -f "${TEST_TXT}" ]]; then
@@ -84,9 +86,28 @@ fi
 TOTAL_ENSEMBLE=$((ENSEMBLE_PER_MODEL * MODEL_COUNT))
 
 mkdir -p "${OUT_DIR}"
+python3 - "${EVAL_CONFIG}" "${EVAL_CONFIG_RENDERED}" "${OUT_DIR}" <<'PY'
+import sys
+from pathlib import Path
+
+import yaml
+
+source = Path(sys.argv[1])
+dest = Path(sys.argv[2])
+out_dir = sys.argv[3]
+with source.open("r", encoding="utf-8-sig") as f:
+    payload = yaml.safe_load(f)
+root = payload.get("flood", payload) if isinstance(payload, dict) else payload
+if not isinstance(root, dict):
+    raise SystemExit(f"Unsupported eval config structure in {source}")
+root.setdefault("rollout", {})["out_dir"] = out_dir
+dest.parent.mkdir(parents=True, exist_ok=True)
+with dest.open("w", encoding="utf-8") as f:
+    yaml.safe_dump(payload, f, sort_keys=False)
+PY
 
 echo "Eval script:      ${EVAL_SCRIPT}"
-echo "Config:           ${EVAL_CONFIG}"
+echo "Config:           ${EVAL_CONFIG_RENDERED}"
 echo "Checkpoint root:  ${CHECKPOINT_ROOT}"
 echo "Test data root:   ${TEST_ROOT}"
 echo "Test boundary:    ${TEST_CLEAN_BOUNDARY_ROOT}/${TEST_CLEAN_BOUNDARY_FILE}"
@@ -98,7 +119,7 @@ echo "Output dir:       ${OUT_DIR}"
 echo "Host:             $(hostname)"
 
 EVAL_ARGS=(
-  --config_path "${EVAL_CONFIG}"
+  --config_path "${EVAL_CONFIG_RENDERED}"
   --checkpoint.save_dir "${CHECKPOINT_ROOT}"
   --data.root "${TEST_ROOT}"
   --data.train_txt "${TRAIN_STUB_NAME}"
@@ -112,7 +133,6 @@ EVAL_ARGS=(
   --rollout_data.clean_boundary_root "${TEST_CLEAN_BOUNDARY_ROOT}"
   --rollout_data.clean_boundary_file "${TEST_CLEAN_BOUNDARY_FILE}"
   --rollout_data.test_txt "${TEST_TXT_NAME}"
-  --rollout.out_dir "${OUT_DIR}"
   --rollout.n_ensemble_samples "${TOTAL_ENSEMBLE}"
   --wandb.log false
 )

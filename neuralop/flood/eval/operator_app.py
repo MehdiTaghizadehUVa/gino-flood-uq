@@ -51,6 +51,46 @@ from neuralop.flood.utils.runtime import (
     write_train_txt_from_data_root,
 )
 
+
+def _resolve_rollout_length_for_evaluation(config, rollout_dataset, logger) -> int:
+    """Resolve -1 to the full available rollout horizon; positive values stay fixed."""
+    configured = int(config.data.rollout_length)
+    if configured != -1:
+        logger.info(
+            "Using configured data.rollout_length=%d.",
+            configured,
+        )
+        return configured
+    available = getattr(rollout_dataset, "available_rollout_length", None)
+    if available is None:
+        raise ValueError(
+            "data.rollout_length=-1 requested full-length rollout, but dataset did not expose "
+            "an available horizon."
+        )
+    available = int(available)
+    if available < 1:
+        raise ValueError(
+            "data.rollout_length=-1 requested full-length rollout, but available forecast horizon is < 1 step."
+        )
+    logger.info(
+        "Resolved data.rollout_length=-1 to full available rollout horizon=%d steps.",
+        available,
+    )
+    return available
+
+
+def _normalize_config_rollout_out_dir(config) -> Path:
+    """Normalize rollout.out_dir once so every output writer sees the same path."""
+    raw_out_dir = _opt(config, "rollout", "out_dir", "rollout_outputs")
+    out_dir = Path(str(raw_out_dir)).expanduser()
+    if not out_dir.is_absolute():
+        out_dir = out_dir.resolve()
+    out_dir.mkdir(parents=True, exist_ok=True)
+    if hasattr(config, "rollout"):
+        setattr(config.rollout, "out_dir", str(out_dir))
+    return out_dir
+
+
 def main() -> int:
     """Run post-training one-step and/or rollout evaluation."""
     args = _parse_args()
@@ -65,6 +105,7 @@ def main() -> int:
     checkpoint_path = Path(_opt(config, "checkpoint", "save_dir", "."))
     if not checkpoint_path.is_absolute():
         checkpoint_path = checkpoint_path.resolve()
+    rollout_out_dir = _normalize_config_rollout_out_dir(config)
     preferred_checkpoint_alias = _preferred_checkpoint_alias(config)
     try:
         checkpoint_runs = _discover_checkpoint_runs(
@@ -75,8 +116,10 @@ def main() -> int:
             raise
         checkpoint_runs = _discover_checkpoint_runs(checkpoint_path)
     primary_dir, primary_alias, _ = checkpoint_runs[0]
-    eval_log = Path(args.eval_log_file)
-    if not eval_log.is_absolute():
+    eval_log = Path(args.eval_log_file).expanduser()
+    if args.eval_log_file == DEFAULT_EVAL_LOG:
+        eval_log = rollout_out_dir / DEFAULT_EVAL_LOG
+    elif not eval_log.is_absolute():
         eval_log = primary_dir / eval_log
     logger = setup_logging(
         log_level=_opt(config, None, "log_level", "INFO"),
@@ -97,6 +140,7 @@ def main() -> int:
             checkpoint_path,
             len(checkpoint_runs),
         )
+        logger.info("Rollout output directory=%s", config.rollout.out_dir)
         logger.info("data.root=%s", _opt(config, "data", "root", "N/A"))
 
     out_dist = str(_opt(config, "gino", "output_distribution", "deterministic")).strip().lower()
@@ -323,6 +367,11 @@ def main() -> int:
         logger,
         structural_dry_artifact=structural_dry_artifact,
     )
+    effective_rollout_length = _resolve_rollout_length_for_evaluation(
+        config,
+        rollout_norm_ds,
+        logger,
+    )
     logger.info("Rollout normalized dataset: %d runs", len(rollout_norm_ds))
     if hydrograph_samples:
         logger.info(
@@ -334,7 +383,7 @@ def main() -> int:
             _rollout_prediction_per_hydrograph(
                 models=models,
                 hydrograph_samples=hydrograph_samples,
-                rollout_length=config.data.rollout_length,
+                rollout_length=effective_rollout_length,
                 history_steps=config.data.n_history,
                 dynamic_norm=normalizers["dynamic"],
                 target_norm=normalizers["target"],
@@ -355,12 +404,13 @@ def main() -> int:
                 rollout_init_mode=rollout_init_mode,
                 mc_dropout_enabled=mc_dropout_cfg.enabled,
                 mc_dropout_seed=mc_dropout_cfg.seed,
+                visualization_config=_opt(config, None, "visualization", None),
             )
         else:
             _rollout_prediction_generic(
                 models=models,
                 rollout_dataset=rollout_norm_ds,
-                rollout_length=config.data.rollout_length,
+                rollout_length=effective_rollout_length,
                 history_steps=config.data.n_history,
                 dynamic_norm=normalizers["dynamic"],
                 target_norm=normalizers["target"],
@@ -380,6 +430,7 @@ def main() -> int:
                 gaussian_state_update=gaussian_state_update,
                 mc_dropout_enabled=mc_dropout_cfg.enabled,
                 mc_dropout_seed=mc_dropout_cfg.seed,
+                visualization_config=_opt(config, None, "visualization", None),
             )
     logger.info("Evaluation finished successfully.")
     return 0
