@@ -478,6 +478,7 @@ def main() -> int:
             gaussian_min_logvar=-9.0,
             gaussian_max_logvar=4.0,
             rollout_init_mode=rollout_init_mode,
+            visualization_config=_opt(config, None, "visualization", None),
         )
     else:
         _rollout_prediction_generic(
@@ -498,6 +499,7 @@ def main() -> int:
             gaussian_mode=False,
             gaussian_min_logvar=-9.0,
             gaussian_max_logvar=4.0,
+            visualization_config=_opt(config, None, "visualization", None),
         )
 
     logger.info("Diffusion rollout evaluation completed. Outputs: %s", out_dir)

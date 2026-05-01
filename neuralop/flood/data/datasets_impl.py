@@ -502,6 +502,7 @@ class FloodRolloutTestDatasetHDF(Dataset):
             raise ValueError("No valid run IDs found.")
 
         self.valid_run_ids = []
+        self.run_time_steps = {}
         self.xy_coords = None
         self.static_data = None
         self.cell_point_index = None
@@ -618,12 +619,33 @@ class FloodRolloutTestDatasetHDF(Dataset):
                 warnings.warn(f"Run {run_id} cell count {n_cells} != {self._reference_cell_count}, skipping.")
                 continue
             self.valid_run_ids.append(run_id)
+            self.run_time_steps[run_id] = int(n_time)
         if not self.valid_run_ids:
             raise ValueError("No HDF runs have enough time steps for rollout evaluation.")
         if self.static_data is None:
             self.static_data = torch.zeros((self._reference_cell_count, 0), device="cpu")
         self.geometry = self.xy_coords
         self.static = self.static_data
+
+    @property
+    def available_rollout_lengths(self):
+        """Available forecast steps per validated run after skip and history windows."""
+        start_pred_t = int(self.skip_before_timestep) + int(self.n_history)
+        return {
+            run_id: int(self.run_time_steps[run_id]) - start_pred_t
+            for run_id in self.valid_run_ids
+            if run_id in self.run_time_steps
+        }
+
+    @property
+    def min_available_rollout_length(self):
+        lengths = list(self.available_rollout_lengths.values())
+        return min(lengths) if lengths else 0
+
+    @property
+    def max_available_rollout_length(self):
+        lengths = list(self.available_rollout_lengths.values())
+        return max(lengths) if lengths else 0
 
     def __len__(self):
         return len(self.valid_run_ids)
@@ -667,6 +689,8 @@ class FloodRolloutTestDatasetHDF(Dataset):
             "boundary": boundary,
             "geometry": self.geometry,
             "static": self.static,
+            "n_time": int(n_time),
+            "available_rollout_length": int(n_time) - int(self.skip_before_timestep) - int(self.n_history),
         }
         if self.structural_dry_mask is not None:
             out["structural_dry_mask"] = self.structural_dry_mask

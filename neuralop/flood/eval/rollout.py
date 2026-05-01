@@ -196,6 +196,8 @@ def _rollout_prediction_per_hydrograph(
     rollout_init_mode: str = "mean_history",
     mc_dropout_enabled: bool = False,
     mc_dropout_seed: Optional[int] = None,
+    visualization_config: Optional[Any] = None,
+    calibration_coeffs_wd: Optional[Any] = None,
 ) -> None:
     """
     Evaluate per hydrograph using all reference simulations as ground-truth uncertainty.
@@ -847,7 +849,7 @@ def _rollout_prediction_per_hydrograph(
         }
 
         _save_hydrograph_uq_figures_and_animation(
-            geometry=geometry,
+            geometry=sample.get("geometry_raw", geometry),
             pred_mean_by_channel=pred_mean_by_channel,
             pred_std_by_channel=pred_std_by_channel,
             gt_mean_by_channel=gt_mean_by_channel,
@@ -865,6 +867,8 @@ def _rollout_prediction_per_hydrograph(
             boundary_channel_names=sample.get("boundary_channel_names"),
             relative_l2_by_channel=relative_l2_by_channel,
             rollout_start_index=start_pred_t,
+            elevation_raw=sample.get("elevation_raw"),
+            visualization_config=visualization_config,
         )
 
         for ch_name in target_variables:
@@ -1218,6 +1222,7 @@ def _rollout_prediction_generic(
     gaussian_state_update: str = "sample",
     mc_dropout_enabled: bool = False,
     mc_dropout_seed: Optional[int] = None,
+    visualization_config: Optional[Any] = None,
 ) -> None:
     """
     Generic rollout mode (single reference trajectory per run).
@@ -1703,7 +1708,7 @@ def _rollout_prediction_generic(
                 filename_prefix="flood",
             )
             create_rollout_animation(
-                geometry=geometry,
+                geometry=sample.get("geometry_raw", geometry),
                 wd_gt=gt_arr["wd"],
                 wd_pred=pred_arr["wd"],
                 vx_gt=gt_arr["vx"],
@@ -1716,13 +1721,15 @@ def _rollout_prediction_generic(
             )
         else:
             _save_generic_rollout_visuals(
-                geometry=geometry,
+                geometry=sample.get("geometry_raw", geometry),
                 pred_by_channel=pred_arr,
                 gt_by_channel=gt_arr,
                 target_variables=target_variables,
                 out_dir=out_dir,
                 run_id=run_id,
                 dt_seconds=dt,
+                elevation_raw=sample.get("elevation_raw"),
+                visualization_config=visualization_config,
             )
         logger.info("Completed rollout run_id=%s", run_id)
 

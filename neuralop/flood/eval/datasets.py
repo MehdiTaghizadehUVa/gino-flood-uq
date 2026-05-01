@@ -64,6 +64,20 @@ def _transform_with_current_normalizer_device(
     return normalizer.transform(value.unsqueeze(0).to(norm_device)).squeeze(0).cpu()
 
 
+def _extract_raw_render_context_from_sample(raw: Dict[str, Any]) -> Dict[str, torch.Tensor]:
+    """Preserve raw UTM/elevation context separately from model-normalized tensors."""
+    geometry_raw = torch.as_tensor(raw["geometry"]).detach().cpu().clone()
+    static_raw = torch.as_tensor(raw["static"]).detach().cpu().clone()
+    context: Dict[str, torch.Tensor] = {
+        "geometry_raw": geometry_raw,
+        "static_raw": static_raw,
+    }
+    if static_raw.ndim == 2 and static_raw.shape[1] > 0:
+        # Static channel 0 is the raw elevation column in FloodRolloutTestDatasetHDF.
+        context["elevation_raw"] = static_raw[:, 0].detach().cpu().clone()
+    return context
+
+
 def _load_or_fit_normalizers(
     config: Any,
     train_data: Any,
@@ -297,6 +311,8 @@ def _build_rollout_normalized_dataset(
     rollout_length = config.data.rollout_length
     history_steps = config.data.n_history
     skip = _opt(config, "data", "skip_before_timestep", 0)
+    rollout_full_length = int(rollout_length) == -1
+    validation_rollout_length = 1 if rollout_full_length else rollout_length
     target_indices = [CHANNEL_INDEX[v] for v in target_variables]
     rollout_static = _opt(config, config_section, "static_text_files", DEFAULT_STATIC_FILES)
     if not isinstance(rollout_static, list):
@@ -319,7 +335,7 @@ def _build_rollout_normalized_dataset(
         rds = FloodRolloutTestDatasetHDF(
             rollout_data_root=cfg.root,
             n_history=history_steps,
-            rollout_length=rollout_length,
+            rollout_length=validation_rollout_length,
             run_ids=None,
             test_txt=split_txt or _opt(config, config_section, "test_txt", "test.txt"),
             static_text_files=rollout_static,
@@ -329,6 +345,29 @@ def _build_rollout_normalized_dataset(
             skip_before_timestep=skip,
             **rollout_boundary_kwargs,
         )
+    available_lengths = getattr(rds, "available_rollout_lengths", {})
+    available_min = int(getattr(rds, "min_available_rollout_length", 0) or 0)
+    available_max = int(getattr(rds, "max_available_rollout_length", 0) or 0)
+    if rollout_full_length:
+        if available_min < 1:
+            raise ValueError(
+                "data.rollout_length=-1 requested full-length rollout, but found no forecast steps after "
+                f"skip_before_timestep={skip} and n_history={history_steps}."
+            )
+        if available_min != available_max:
+            logger.warning(
+                "Full-length rollout found variable HDF time-series lengths; using shortest "
+                "common forecast horizon=%d steps (max available=%d) so metrics remain stackable.",
+                available_min,
+                available_max,
+            )
+        else:
+            logger.info(
+                "data.rollout_length=-1 resolved to full available forecast horizon=%d steps.",
+                available_min,
+            )
+    else:
+        available_min = int(rollout_length)
     boundary_channel_names = [
         str(channel.get("name", f"boundary_{idx}"))
         for idx, channel in enumerate(rollout_boundary_kwargs["boundary_spec"])
@@ -369,6 +408,13 @@ def _build_rollout_normalized_dataset(
             "boundary": _normalize_field("boundary", boundary_raw),
             "boundary_series_raw": boundary_raw[:, 0, :].detach().cpu().clone(),
             "dynamic": _normalize_field("dynamic", dynamic),
+            "available_rollout_length": int(
+                raw.get(
+                    "available_rollout_length",
+                    max(0, int(dynamic.shape[0]) - int(skip) - int(history_steps)),
+                )
+            ),
+            **_extract_raw_render_context_from_sample(raw),
         }
         if structural_dry_artifact is not None:
             out["structural_dry_mask"] = structural_dry_artifact["dry_mask"]
@@ -389,13 +435,19 @@ def _build_rollout_normalized_dataset(
                 "hydrograph_id": hydro_id,
                 "reference_run_ids": [g["run_id"] for g in normalized_group],
                 "geometry": geometry,
+                "geometry_raw": normalized_group[0].get("geometry_raw", geometry),
                 "static": normalized_group[0]["static"],
+                "static_raw": normalized_group[0].get("static_raw"),
+                "elevation_raw": normalized_group[0].get("elevation_raw"),
                 "boundary": normalized_group[0]["boundary"],
                 "boundary_series_raw": normalized_group[0]["boundary_series_raw"],
                 "boundary_channel_names": list(boundary_channel_names),
                 "dynamic_ref": torch.stack([g["dynamic"] for g in normalized_group], dim=0),
                 "query_points": query_points,
                 "n_ref_sims": len(normalized_group),
+                "available_rollout_length": min(
+                    int(g.get("available_rollout_length", 0)) for g in normalized_group
+                ),
             }
             if structural_dry_artifact is not None:
                 sample["structural_dry_mask"] = structural_dry_artifact["dry_mask"]
@@ -456,6 +508,9 @@ def _build_rollout_normalized_dataset(
             len(hydrograph_samples),
         )
         rollout_dataset = _GroupedRolloutDatasetLengthProxy()
+        rollout_dataset.available_rollout_length = available_min
+        rollout_dataset.available_rollout_length_max = available_max
+        rollout_dataset.rollout_full_length = rollout_full_length
         return rollout_dataset, hydrograph_samples
 
     with _PhaseTimer(logger, "Normalizing rollout fields"):
@@ -469,4 +524,7 @@ def _build_rollout_normalized_dataset(
         normalized_samples=samples,
         query_res=config.data.query_res,
     )
+    rollout_dataset.available_rollout_length = available_min
+    rollout_dataset.available_rollout_length_max = available_max
+    rollout_dataset.rollout_full_length = rollout_full_length
     return rollout_dataset, None

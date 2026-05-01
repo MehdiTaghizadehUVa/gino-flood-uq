@@ -250,3 +250,4 @@ def test_operator_eval_passes_fgn_state_update_to_rollout(monkeypatch, tmp_path)
     assert app.main() == 0
     assert captured["fgn_ar_state_update"] == "member_feedback"
     assert captured["rollout_init_mode"] == "member_history"
+    assert captured["out_dir"] == str((tmp_path / "out").resolve())

@@ -403,6 +403,7 @@ def main() -> int:
                 gaussian_state_update=gaussian_state_update,
                 rollout_init_mode=rollout_init_mode,
                 calibration_coeffs_wd=None,
+                visualization_config=_opt(config, None, "visualization", None),
             )
         with _PhaseTimer(logger, "Rollout evaluation + plotting (calibrated)"):
             _rollout_prediction_per_hydrograph(
@@ -428,6 +429,7 @@ def main() -> int:
                 gaussian_state_update=gaussian_state_update,
                 rollout_init_mode=rollout_init_mode,
                 calibration_coeffs_wd=wd_coeffs,
+                visualization_config=_opt(config, None, "visualization", None),
             )
 
         raw_overall_json = Path(raw_out_dir) / UQ_OVERALL_JSON
@@ -479,6 +481,7 @@ def main() -> int:
                     gaussian_state_update=gaussian_state_update,
                     rollout_init_mode=rollout_init_mode,
                     calibration_coeffs_wd=None,
+                    visualization_config=_opt(config, None, "visualization", None),
                 )
             else:
                 _rollout_prediction_generic(
@@ -502,6 +505,7 @@ def main() -> int:
                     gaussian_min_logvar=_opt_float(config, "opt", "gaussian_min_logvar", -9.0),
                     gaussian_max_logvar=_opt_float(config, "opt", "gaussian_max_logvar", 4.0),
                     gaussian_state_update=gaussian_state_update,
+                    visualization_config=_opt(config, None, "visualization", None),
                 )
     logger.info("Evaluation finished successfully.")
     return 0

@@ -36,6 +36,7 @@ OUT_DIR_DEFAULT="${PROJECT_DIR}/scripts/runtime/eval_outputs/${JOB_NAME}_$(date 
 OUT_DIR="${OUT_DIR:-${OUT_DIR_DEFAULT}}"
 
 slurm_configure_host_ca
+slurm_prepare_geo_venv "${CONTAINER_PATH}"
 
 echo "Eval script:      ${EVAL_SCRIPT}"
 echo "Config:           ${EVAL_CONFIG}"
