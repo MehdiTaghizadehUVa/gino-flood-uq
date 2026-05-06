@@ -51,6 +51,174 @@ from neuralop.training.determinism import (
     stable_seed_from_parts,
 )
 
+
+def _diffusion_ar_enabled(opt_cfg) -> bool:
+    return bool(safe_get(opt_cfg, "diffusion_ar_rollout_training", False))
+
+
+def _effective_diffusion_ar_steps(epoch: int, opt_cfg, max_available_steps: int) -> int:
+    ar_rollout_steps = max(1, int(safe_get(opt_cfg, "ar_rollout_steps", 1)))
+    ar_start_epoch = max(0, int(safe_get(opt_cfg, "ar_finetune_start_epoch", 0)))
+    if (not _diffusion_ar_enabled(opt_cfg)) or ar_rollout_steps <= 1 or epoch < ar_start_epoch:
+        return 1
+    ar_curriculum_epochs = max(0, int(safe_get(opt_cfg, "ar_curriculum_epochs_per_step", 0)))
+    ar_start_steps = max(1, int(safe_get(opt_cfg, "ar_curriculum_start_steps", 1)))
+    if ar_curriculum_epochs > 0:
+        ar_epoch_index = max(0, epoch - ar_start_epoch)
+        step_index = ar_epoch_index // ar_curriculum_epochs
+        requested_steps = min(ar_start_steps + step_index, ar_rollout_steps)
+    else:
+        requested_steps = ar_rollout_steps
+    return max(1, min(int(requested_steps), int(max_available_steps)))
+
+
+def _build_diffusion_context(static: torch.Tensor, boundary_hist: torch.Tensor, dynamic_hist: torch.Tensor) -> torch.Tensor:
+    if static.ndim == 2:
+        static = static.unsqueeze(0)
+    if boundary_hist.ndim != 4 or dynamic_hist.ndim != 4:
+        raise ValueError(
+            "Diffusion AR context expects boundary/dynamic histories shaped [B, H, N, C]; "
+            f"got boundary={tuple(boundary_hist.shape)} dynamic={tuple(dynamic_hist.shape)}"
+        )
+    bsz, n_hist, n_cells, n_dyn = dynamic_hist.shape
+    bsz2, n_hist2, n_cells2, n_bc = boundary_hist.shape
+    if (bsz2, n_hist2, n_cells2) != (bsz, n_hist, n_cells):
+        raise ValueError(
+            "Diffusion AR boundary history must match dynamic history over batch/history/cells: "
+            f"boundary={(bsz2, n_hist2, n_cells2)} dynamic={(bsz, n_hist, n_cells)}"
+        )
+    dyn_flat = dynamic_hist.permute(0, 2, 1, 3).reshape(bsz, n_cells, n_hist * n_dyn)
+    bc_flat = boundary_hist.permute(0, 2, 1, 3).reshape(bsz, n_cells, n_hist * n_bc)
+    return torch.cat([static, bc_flat, dyn_flat], dim=2)
+
+
+def _require_diffusion_ar_tensors(sample: dict) -> None:
+    missing = [
+        key
+        for key in ("target_sequence", "boundary_sequence", "dynamic", "boundary", "static")
+        if key not in sample or sample[key] is None
+    ]
+    if missing:
+        raise ValueError(
+            "Diffusion AR rollout training requires target_sequence, boundary_sequence, "
+            f"dynamic, boundary, and static tensors. Missing: {missing}."
+        )
+
+
+def _slice_boundary_sequence_step(boundary_sequence: torch.Tensor, step: int) -> torch.Tensor:
+    bc_step = boundary_sequence[:, step]
+    if bc_step.ndim != 3:
+        raise ValueError(f"boundary_sequence step must be [B, N, C], got {tuple(bc_step.shape)}")
+    return bc_step.unsqueeze(1)
+
+
+def _diffusion_train_loss_for_epoch(
+    *,
+    forecaster: ConditionalDDOForecaster,
+    sample: dict,
+    opt_cfg,
+    epoch: int,
+    batch_idx: int,
+    seed: int,
+    rank: int,
+    deterministic: bool,
+    logger,
+    dist_ctx,
+):
+    if not _diffusion_ar_enabled(opt_cfg):
+        batch_seed = None
+        if deterministic:
+            batch_seed = stable_seed_from_parts("diffusion_train", int(seed), int(epoch), int(batch_idx), int(rank))
+        with deterministic_seed_context(batch_seed):
+            return forecaster.training_loss(sample)
+
+    _require_diffusion_ar_tensors(sample)
+    target_sequence = sample["target_sequence"]
+    boundary_sequence = sample["boundary_sequence"]
+    max_available_steps = int(target_sequence.shape[1])
+    n_ar_steps = _effective_diffusion_ar_steps(epoch, opt_cfg, max_available_steps)
+    if n_ar_steps <= 1:
+        batch_seed = None
+        if deterministic:
+            batch_seed = stable_seed_from_parts("diffusion_train", int(seed), int(epoch), int(batch_idx), int(rank))
+        with deterministic_seed_context(batch_seed):
+            loss, stats = forecaster.training_loss(sample)
+        stats = dict(stats)
+        stats["ar_rollout_steps"] = 1.0
+        return loss, stats
+
+    state_num_steps = max(1, int(safe_get(opt_cfg, "diffusion_ar_state_num_steps", 1)))
+    if batch_idx == 0:
+        _rank0_info(
+            logger,
+            dist_ctx,
+            "Diffusion AR rollout training: epoch=%d rollout_steps=%d (max=%d) [curriculum], state_update_sampler_steps=%d, state_update=detached_deterministic.",
+            epoch,
+            n_ar_steps,
+            max(1, int(safe_get(opt_cfg, "ar_rollout_steps", 1))),
+            state_num_steps,
+        )
+
+    dynamic_sliding = sample["dynamic"].clone()
+    boundary_sliding = sample["boundary"].clone()
+    static = sample["static"]
+    total_loss = None
+    mse_eps_total = 0.0
+    t_mean_total = 0.0
+    for step in range(n_ar_steps):
+        target_step = target_sequence[:, step]
+        if target_step.ndim == 2:
+            target_step = target_step.unsqueeze(0)
+        step_sample = {
+            "context": _build_diffusion_context(static, boundary_sliding, dynamic_sliding),
+            "target": target_step,
+            "input_geom": sample["input_geom"],
+            "latent_queries": sample["latent_queries"],
+            "output_queries": sample["output_queries"],
+        }
+        for optional_key in ("point_weights", "structural_dry_mask"):
+            if optional_key in sample:
+                step_sample[optional_key] = sample[optional_key]
+        step_seed = None
+        if deterministic:
+            step_seed = stable_seed_from_parts(
+                "diffusion_train_ar",
+                int(seed),
+                int(epoch),
+                int(batch_idx),
+                int(step),
+                int(rank),
+            )
+        with deterministic_seed_context(step_seed):
+            loss_step, stats_step = forecaster.training_loss(step_sample)
+        total_loss = loss_step if total_loss is None else total_loss + loss_step
+        mse_eps_total += float(stats_step.get("mse_eps", 0.0))
+        t_mean_total += float(stats_step.get("t_mean", 0.0))
+
+        if step + 1 < n_ar_steps:
+            with torch.no_grad():
+                pred_step = forecaster.sample_next(
+                    context=step_sample["context"],
+                    input_geom=step_sample["input_geom"],
+                    latent_queries=step_sample["latent_queries"],
+                    output_queries=step_sample["output_queries"],
+                    num_steps=state_num_steps,
+                    stochastic=False,
+                    initial_latent=torch.zeros_like(target_step),
+                )
+            dynamic_sliding = torch.cat([dynamic_sliding[:, 1:], pred_step.detach().unsqueeze(1)], dim=1)
+            bc_step = _slice_boundary_sequence_step(boundary_sequence, step)
+            boundary_sliding = torch.cat([boundary_sliding[:, 1:], bc_step], dim=1)[:, -dynamic_sliding.shape[1]:]
+
+    loss = total_loss / float(n_ar_steps)
+    return loss, {
+        "loss": float(loss.detach().item()),
+        "mse_eps": mse_eps_total / float(n_ar_steps),
+        "t_mean": t_mean_total / float(n_ar_steps),
+        "ar_rollout_steps": float(n_ar_steps),
+        "ar_state_num_steps": float(state_num_steps),
+    }
+
 def main() -> int:
     config = _load_config(_REPO_ROOT / "config" / "gino_pluvial_flood_config_WV_depth_only_diffusion.yaml")
     dist_ctx = _init_distributed(config)
@@ -370,8 +538,18 @@ def main() -> int:
                         int(batch_idx),
                         int(dist_ctx.rank),
                     )
-                with deterministic_seed_context(batch_seed):
-                    loss, stats = forecaster.training_loss(sample)
+                loss, stats = _diffusion_train_loss_for_epoch(
+                    forecaster=forecaster,
+                    sample=sample,
+                    opt_cfg=opt_cfg,
+                    epoch=epoch,
+                    batch_idx=batch_idx,
+                    seed=seed,
+                    rank=dist_ctx.rank,
+                    deterministic=deterministic,
+                    logger=logger,
+                    dist_ctx=dist_ctx,
+                )
                 loss.backward()
                 if grad_clip is not None and grad_clip > 0:
                     torch.nn.utils.clip_grad_norm_(optim_params, grad_clip)
@@ -389,6 +567,8 @@ def main() -> int:
                             "train/loss": float(loss.item()),
                             "train/mse_eps": stats["mse_eps"],
                             "train/t_mean": stats["t_mean"],
+                            "train/ar_rollout_steps": stats.get("ar_rollout_steps", 1.0),
+                            "train/ar_state_num_steps": stats.get("ar_state_num_steps", 0.0),
                             "train/lr": float(optimizer.param_groups[0]["lr"]),
                         },
                         step=global_step,

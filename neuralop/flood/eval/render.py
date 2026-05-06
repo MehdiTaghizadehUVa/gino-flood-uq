@@ -35,6 +35,7 @@ from neuralop.flood.eval.runtime import (
     PUBLICATION_TIMESTEPS,
     UQ_BOXPLOT_PNG,
     UQ_EXCEEDANCE_THRESHOLD,
+    UQ_IMPACT_CRPS_PNG,
     UQ_INTERVAL_COVERAGE_PNG,
     UQ_OVERALL_JSON,
     UQ_PIT_RANK_PNG,
@@ -52,7 +53,7 @@ def _geometry_xy(geometry):
 ROBUST_SPATIAL_COLOR_QUANTILE = 0.995
 WD_SPATIAL_VMAX_CAP_METERS = 3.0
 DEFAULT_VISUALIZATION_CRS = "EPSG:32618"
-DEFAULT_VISUALIZATION_MAP_MODE = "3dep_hillshade"
+DEFAULT_VISUALIZATION_MAP_MODE = "dem_elevation"
 DEFAULT_BASEMAP_PROVIDER_BY_MODE = {
     "topo": "Esri.WorldTopoMap",
     "imagery": "Esri.WorldImagery",
@@ -149,12 +150,15 @@ def _visualization_options(visualization_config: Any = None) -> Dict[str, Any]:
         "overlay_alpha": float(_cfg_path(visualization_config, ("map", "overlay_alpha"), 0.84)),
         "wd_overlay_alpha": float(_cfg_path(visualization_config, ("wd", "overlay_alpha"), default_wd_alpha)),
         "wd_colormap": str(_cfg_path(visualization_config, ("wd", "colormap"), default_wd_cmap)),
-        "show_wet_edge": _as_bool(_cfg_path(visualization_config, ("wd", "show_wet_edge"), True), True),
+        "show_wet_edge": _as_bool(_cfg_path(visualization_config, ("wd", "show_wet_edge"), False), False),
         "wet_edge_threshold_m": float(_cfg_path(visualization_config, ("wd", "wet_edge_threshold_m"), 0.05)),
         "diagnostic_zero_threshold": float(_cfg_path(visualization_config, ("diagnostics", "zero_threshold"), 1e-10)),
         "diagnostic_zero_fraction": float(_cfg_path(visualization_config, ("diagnostics", "zero_fraction"), 0.03)),
         "diagnostic_overlay_alpha": float(_cfg_path(visualization_config, ("diagnostics", "overlay_alpha"), 0.70)),
         "diagnostic_basemap_alpha": float(_cfg_path(visualization_config, ("diagnostics", "basemap_alpha"), 0.28)),
+        "diagnostic_error_colormap": str(_cfg_path(visualization_config, ("diagnostics", "error_colormap"), "error_rose_alpha_ramp")),
+        "diagnostic_spread_colormap": str(_cfg_path(visualization_config, ("diagnostics", "spread_colormap"), "spread_violet_alpha_ramp")),
+        "diagnostic_crps_colormap": str(_cfg_path(visualization_config, ("diagnostics", "crps_colormap"), "crps_indigo_alpha_ramp")),
         "cache_scope": str(_cfg_path(visualization_config, ("map", "cache_scope"), "run_extent")),
         "export_size_px": int(_cfg_path(visualization_config, ("map", "export_size_px"), 1024)),
         "hillshade_cmap": str(_cfg_path(visualization_config, ("map", "hillshade_cmap"), _cfg_path(visualization_config, ("map", "colormap"), "copper"))),
@@ -163,6 +167,7 @@ def _visualization_options(visualization_config: Any = None) -> Dict[str, Any]:
         "dem_quantiles": _as_quantile_pair(_cfg_path(visualization_config, ("map", "dem_quantiles"), None), (0.01, 0.99)),
         "write_gif": _as_bool(_cfg_path(visualization_config, ("output", "write_gif"), True), True),
         "write_mp4": _as_bool(_cfg_path(visualization_config, ("output", "write_mp4"), True), True),
+        "time_display": str(_cfg_path(visualization_config, ("time", "display"), "forecast_horizon_after_spinup")),
         "initial_history_steps": int(_cfg_path(visualization_config, ("time", "initial_history_steps"), DEFAULT_FORECAST_HISTORY_STEPS)),
     }
 
@@ -526,11 +531,11 @@ def _resolve_field_cmap(cmap: Any) -> Any:
         key = cmap.strip().lower()
         if key == "cyan_depth":
             return _cyan_depth_cmap()
-        if key == "error_rose":
+        if key in {"error_rose", "error_rose_alpha_ramp"}:
             return _error_rose_cmap()
-        if key == "spread_violet":
+        if key in {"spread_violet", "spread_violet_alpha_ramp"}:
             return _spread_violet_cmap()
-        if key == "crps_indigo":
+        if key in {"crps_indigo", "crps_indigo_alpha_ramp"}:
             return _crps_indigo_cmap()
     return cmap
 
@@ -712,6 +717,13 @@ def _plot_spatial_panel(
         alpha = options["wd_overlay_alpha"]
     elif zero_transparent:
         plot_arr = _mask_near_zero_for_overlay(arr, _diagnostic_zero_threshold(options, vmax))
+        cmap_key = str(cmap).strip().lower()
+        if cmap_key.startswith("error_rose"):
+            cmap = options.get("diagnostic_error_colormap", cmap)
+        elif cmap_key.startswith("spread_violet"):
+            cmap = options.get("diagnostic_spread_colormap", cmap)
+        elif cmap_key.startswith("crps_indigo"):
+            cmap = options.get("diagnostic_crps_colormap", cmap)
         # Diagnostic colormaps carry their own alpha ramp so low values reveal the DEM.
         alpha = None
     else:
@@ -1212,6 +1224,9 @@ def _plot_spatial_field(
             renderer["triangulation"],
             np.ma.masked_invalid(np.asarray(arr, dtype=np.float64)),
             shading="gouraud",
+            edgecolors="none",
+            linewidths=0.0,
+            antialiaseds=False,
             rasterized=True,
             **kwargs,
         )
@@ -1256,9 +1271,11 @@ def _save_nonspatial_uq_diagnostics(
 
     overall: Dict[str, Any] = {}
     for key, arr in metrics.items():
-        overall[f"{key}_overall_mean"] = float(np.mean(arr))
-        overall[f"{key}_overall_std"] = float(np.std(arr))
-        overall[f"{key}_leadtime_mean_last"] = float(np.mean(arr[:, -1]))
+        arr_np = np.asarray(arr)
+        overall[f"{key}_overall_mean"] = float(np.mean(arr_np))
+        overall[f"{key}_overall_std"] = float(np.std(arr_np))
+        if arr_np.ndim >= 2:
+            overall[f"{key}_leadtime_mean_last"] = float(np.mean(arr_np[:, -1]))
 
     if wasserstein_wd is not None:
         overall["wasserstein_wd_overall_mean"] = float(np.mean(wasserstein_wd))
@@ -1426,6 +1443,121 @@ def _save_nonspatial_uq_diagnostics(
         axs[1].grid(True, alpha=0.3)
         axs[1].legend(fontsize=8, ncol=2)
         fig.savefig(os.path.join(out_dir, UQ_INTERVAL_COVERAGE_PNG), bbox_inches="tight")
+        plt.close(fig)
+
+    # Flood-impact CRPS diagnostics.
+    pooled_avg_keys = sorted(
+        [key for key in metrics if key.startswith("pooled_avg_crps_wd_r")],
+        key=lambda key: float(key.rsplit("_r", 1)[1].replace("p", ".")),
+    )
+    pooled_max_keys = sorted(
+        [key for key in metrics if key.startswith("pooled_max_crps_wd_r")],
+        key=lambda key: float(key.rsplit("_r", 1)[1].replace("p", ".")),
+    )
+    impact_keys = {
+        "total": "crps_total_inundated_area_wd",
+        "total_fraction": "crps_total_inundated_area_fraction_wd",
+        "peak": "crps_peak_inundated_area_wd",
+        "peak_fraction": "crps_peak_inundated_area_fraction_wd",
+        "arrival": "crps_arrival_time_wd",
+        "arrival_fraction": "crps_arrival_time_fraction_wd",
+    }
+    if pooled_avg_keys or pooled_max_keys or any(key in metrics for key in impact_keys.values()):
+        fig, axs = plt.subplots(2, 2, figsize=(13.0, 8.2), dpi=280, constrained_layout=True)
+        ax_avg, ax_max, ax_area, ax_arrival = axs.reshape(-1)
+
+        for key in pooled_avg_keys:
+            arr = np.asarray(metrics[key])
+            if arr.ndim < 2:
+                continue
+            radius = key.rsplit("_r", 1)[1].replace("p", ".")
+            ax_avg.plot(time_hours, np.mean(arr, axis=0), linewidth=1.3, label=f"{radius} m")
+        ax_avg.set_title("Average-pooled WD CRPS")
+        ax_avg.set_xlabel("Lead time (hour)")
+        ax_avg.set_ylabel("CRPS (m)")
+        ax_avg.grid(True, alpha=0.3)
+        if pooled_avg_keys:
+            ax_avg.legend(fontsize=8, ncol=2)
+
+        for key in pooled_max_keys:
+            arr = np.asarray(metrics[key])
+            if arr.ndim < 2:
+                continue
+            radius = key.rsplit("_r", 1)[1].replace("p", ".")
+            ax_max.plot(time_hours, np.mean(arr, axis=0), linewidth=1.3, label=f"{radius} m")
+        ax_max.set_title("Max-pooled WD CRPS")
+        ax_max.set_xlabel("Lead time (hour)")
+        ax_max.set_ylabel("CRPS (m)")
+        ax_max.grid(True, alpha=0.3)
+        if pooled_max_keys:
+            ax_max.legend(fontsize=8, ncol=2)
+
+        for label, key in [
+            (
+                "Total inundated area",
+                impact_keys["total_fraction"]
+                if impact_keys["total_fraction"] in metrics
+                else impact_keys["total"],
+            ),
+            (
+                "Peak inundated area",
+                impact_keys["peak_fraction"]
+                if impact_keys["peak_fraction"] in metrics
+                else impact_keys["peak"],
+            ),
+        ]:
+            arr = np.asarray(metrics.get(key, np.array([])))
+            if arr.ndim >= 2 and arr.size > 0:
+                ax_area.plot(time_hours, np.mean(arr, axis=0), linewidth=1.4, label=label)
+        area_is_fraction = (
+            impact_keys["total_fraction"] in metrics or impact_keys["peak_fraction"] in metrics
+        )
+        ax_area.set_title("Normalized inundated-area CRPS" if area_is_fraction else "Inundated-area CRPS")
+        ax_area.set_xlabel("Lead time (hour)")
+        ax_area.set_ylabel(
+            "CRPS (fraction of active domain)" if area_is_fraction else "CRPS (area units)"
+        )
+        ax_area.grid(True, alpha=0.3)
+        if any(
+            key in metrics
+            for key in (
+                impact_keys["total"],
+                impact_keys["peak"],
+                impact_keys["total_fraction"],
+                impact_keys["peak_fraction"],
+            )
+        ):
+            ax_area.legend(fontsize=8)
+
+        arrival_key = (
+            impact_keys["arrival_fraction"]
+            if impact_keys["arrival_fraction"] in metrics
+            else impact_keys["arrival"]
+        )
+        arrival = np.asarray(metrics.get(arrival_key, np.array([])))
+        if arrival.size > 0:
+            ax_arrival.bar(
+                [0],
+                [float(np.mean(arrival))],
+                yerr=[float(np.std(arrival))],
+                color="#4c78a8",
+                alpha=0.86,
+            )
+        ax_arrival.set_xticks([0])
+        ax_arrival.set_xticklabels(["Arrival"])
+        ax_arrival.set_title(
+            "Normalized cell arrival-time CRPS"
+            if arrival_key == impact_keys["arrival_fraction"]
+            else "Cell arrival-time CRPS"
+        )
+        ax_arrival.set_ylabel(
+            "CRPS (fraction of rollout horizon)"
+            if arrival_key == impact_keys["arrival_fraction"]
+            else "CRPS (lead-time steps)"
+        )
+        ax_arrival.grid(True, axis="y", alpha=0.3)
+
+        fig.savefig(os.path.join(out_dir, UQ_IMPACT_CRPS_PNG), bbox_inches="tight")
         plt.close(fig)
 
     # Predictive variance decomposition (epistemic vs stochastic).

@@ -378,19 +378,28 @@ def _prepare_batch(batch: Dict[str, Any], device: torch.device) -> Dict[str, tor
         if isinstance(v, torch.Tensor):
             sample[k] = v.to(device)
 
-    dyn = sample["dynamic"]
-    if dyn.ndim == 3:
-        dyn = dyn.unsqueeze(0)
-    dyn = dyn.permute(0, 2, 1, 3)
-    bsz, n_cells, n_hist, n_dyn_ch = dyn.shape
-    dyn_flat = dyn.reshape(bsz, n_cells, n_hist * n_dyn_ch)
+    dyn_hist = sample["dynamic"]
+    if dyn_hist.ndim == 3:
+        dyn_hist = dyn_hist.unsqueeze(0)
+    if dyn_hist.ndim != 4:
+        raise ValueError(f"dynamic must have shape [B, H, N, C], got {tuple(dyn_hist.shape)}")
+    dyn_context = dyn_hist.permute(0, 2, 1, 3)
+    bsz, n_cells, n_hist, n_dyn_ch = dyn_context.shape
+    dyn_flat = dyn_context.reshape(bsz, n_cells, n_hist * n_dyn_ch)
 
-    bc = sample["boundary"]
-    if bc.ndim == 3:
-        bc = bc.unsqueeze(0)
-    bc = bc.permute(0, 2, 1, 3)
-    bsz2, n_cells2, n_hist2, n_bc_ch = bc.shape
-    bc_flat = bc.reshape(bsz2, n_cells2, n_hist2 * n_bc_ch)
+    bc_hist = sample["boundary"]
+    if bc_hist.ndim == 3:
+        bc_hist = bc_hist.unsqueeze(0)
+    if bc_hist.ndim != 4:
+        raise ValueError(f"boundary must have shape [B, H, N, C], got {tuple(bc_hist.shape)}")
+    bc_context = bc_hist.permute(0, 2, 1, 3)
+    bsz2, n_cells2, n_hist2, n_bc_ch = bc_context.shape
+    if (bsz2, n_cells2, n_hist2) != (bsz, n_cells, n_hist):
+        raise ValueError(
+            "boundary history shape must match dynamic history over batch/cells/history: "
+            f"dynamic={(bsz, n_cells, n_hist)} boundary={(bsz2, n_cells2, n_hist2)}"
+        )
+    bc_flat = bc_context.reshape(bsz2, n_cells2, n_hist2 * n_bc_ch)
 
     static = sample["static"]
     if static.ndim == 2:
@@ -418,7 +427,32 @@ def _prepare_batch(batch: Dict[str, Any], device: torch.device) -> Dict[str, tor
         "input_geom": geom_shared,
         "latent_queries": q_shared,
         "output_queries": geom_shared.clone(),
+        "static": static,
+        "dynamic": dyn_hist,
+        "boundary": bc_hist,
     }
+    if "target_sequence" in sample:
+        target_sequence = sample["target_sequence"]
+        if target_sequence.ndim == 3:
+            target_sequence = target_sequence.unsqueeze(0)
+        if target_sequence.ndim == 5 and target_sequence.shape[1] == 1:
+            target_sequence = target_sequence.squeeze(1)
+        if target_sequence.ndim != 4:
+            raise ValueError(
+                f"target_sequence must have shape [B, T, N, C], got {tuple(target_sequence.shape)}"
+            )
+        out["target_sequence"] = target_sequence
+    if "boundary_sequence" in sample:
+        boundary_sequence = sample["boundary_sequence"]
+        if boundary_sequence.ndim == 3:
+            boundary_sequence = boundary_sequence.unsqueeze(0)
+        if boundary_sequence.ndim == 5 and boundary_sequence.shape[1] == 1:
+            boundary_sequence = boundary_sequence.squeeze(1)
+        if boundary_sequence.ndim != 4:
+            raise ValueError(
+                f"boundary_sequence must have shape [B, T, N, C], got {tuple(boundary_sequence.shape)}"
+            )
+        out["boundary_sequence"] = boundary_sequence
     if "structural_dry_mask" in sample:
         structural_dry_mask = sample["structural_dry_mask"]
         wettable = dry_mask_to_wettable_mask(structural_dry_mask).to(device=device)

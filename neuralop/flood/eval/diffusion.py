@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import os
 import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -458,6 +459,16 @@ def main() -> int:
     )
     logger.info("Diffusion rollout initialization mode=%s", rollout_init_mode)
 
+    artifact_cfg = safe_get(safe_get(config, "rollout_calibration", {}), "forecast_artifacts", {})
+    forecast_artifact_dir = None
+    if bool(safe_get(artifact_cfg, "enabled", False)):
+        artifact_root_raw = safe_get(artifact_cfg, "root", str(out_dir / "forecast_artifacts"))
+        artifact_root = Path(os.path.expandvars(str(artifact_root_raw))).expanduser()
+        if not artifact_root.is_absolute():
+            artifact_root = (out_dir / artifact_root).resolve()
+        forecast_artifact_dir = str(artifact_root / "diffusion_raw")
+        logger.info("Diffusion forecast-member artifacts enabled: %s", forecast_artifact_dir)
+
     if hydrograph_samples:
         _rollout_prediction_per_hydrograph(
             models=models,
@@ -479,6 +490,9 @@ def main() -> int:
             gaussian_max_logvar=4.0,
             rollout_init_mode=rollout_init_mode,
             visualization_config=_opt(config, None, "visualization", None),
+            impact_metrics_config=_opt(config, "rollout", "impact_metrics", None),
+            forecast_artifact_dir=forecast_artifact_dir,
+            calibration_metadata={"artifact_role": "diffusion_rollout_raw"},
         )
     else:
         _rollout_prediction_generic(

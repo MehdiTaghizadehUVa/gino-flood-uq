@@ -405,6 +405,7 @@ def main() -> int:
                 mc_dropout_enabled=mc_dropout_cfg.enabled,
                 mc_dropout_seed=mc_dropout_cfg.seed,
                 visualization_config=_opt(config, None, "visualization", None),
+                impact_metrics_config=_opt(config, "rollout", "impact_metrics", None),
             )
         else:
             _rollout_prediction_generic(

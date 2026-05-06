@@ -190,6 +190,11 @@ def test_operator_eval_passes_fgn_state_update_to_rollout(monkeypatch, tmp_path)
             out_dir=str(tmp_path / "out"),
             n_ensemble_samples=2,
             init_mode="member_history",
+            impact_metrics=SimpleNamespace(
+                enabled=True,
+                inundation_threshold_m=0.10,
+                pooled_radii_m=[100.0],
+            ),
         ),
     )
 
@@ -251,3 +256,11 @@ def test_operator_eval_passes_fgn_state_update_to_rollout(monkeypatch, tmp_path)
     assert captured["fgn_ar_state_update"] == "member_feedback"
     assert captured["rollout_init_mode"] == "member_history"
     assert captured["out_dir"] == str((tmp_path / "out").resolve())
+    assert captured["impact_metrics_config"] is config.rollout.impact_metrics
+
+
+def test_calibrated_cli_uses_maintained_evaluator():
+    from neuralop.flood.cli import eval_operator_calibrated as cli
+    from neuralop.flood.eval import calibrated
+
+    assert cli.main is calibrated.main

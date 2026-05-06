@@ -96,10 +96,14 @@ def test_boundary_diagnostics_drop_skipped_spinup_steps():
         render.plt.close(fig)
 
 
-def test_visualization_map_mode_defaults_to_usgs_3dep_hillshade():
+def test_visualization_map_mode_defaults_to_local_dem_elevation():
     opts = render._visualization_options({"map": {"enabled": True}})
-    assert opts["mode"] == "3dep_hillshade"
-    assert opts["provider"] == "USGS.3DEP"
+    assert opts["mode"] == "dem_elevation"
+    assert opts["provider"] == "local_elevation"
+    assert opts["dem_cmap"] == "hecras_dem"
+    assert opts["wd_colormap"] == "cyan_depth"
+    assert opts["show_wet_edge"] is False
+    assert opts["diagnostic_crps_colormap"] == "crps_indigo_alpha_ramp"
 
 
 def test_visualization_map_mode_selects_mode_specific_default_providers():
@@ -425,6 +429,39 @@ def test_wet_edge_can_be_disabled_from_visualization_config():
         render.plt.close(fig)
 
 
+def test_wet_edge_defaults_off_for_spatial_panels():
+    opts = render._visualization_options({"map": {"enabled": False}})
+
+    assert opts["show_wet_edge"] is False
+
+
+def test_triangular_spatial_renderer_disables_mesh_edge_strokes():
+    x = np.array([0.0, 1.0, 0.25, 0.8])
+    y = np.array([0.0, 0.0, 0.9, 1.7])
+    arr = np.array([0.0, 0.1, 0.2, 0.3])
+    renderer = render._build_spatial_renderer(x, y, figsize=(3, 3), dpi=80, n_rows=1, n_cols=1)
+    assert renderer["mode"] == "tri"
+
+    fig, ax = render.plt.subplots()
+    try:
+        artist = render._plot_spatial_field(
+            ax=ax,
+            x=x,
+            y=y,
+            arr=arr,
+            renderer=renderer,
+            cmap="viridis",
+            vmin=0.0,
+            vmax=0.3,
+            alpha=0.8,
+        )
+
+        assert np.allclose(np.asarray(artist.get_linewidths(), dtype=float), 0.0)
+        assert artist.get_edgecolors().size == 0
+    finally:
+        render.plt.close(fig)
+
+
 def test_wd_spatial_panel_draws_wet_edge_when_threshold_crossed():
     x = np.array([0.0, 1.0, 0.0, 1.0])
     y = np.array([0.0, 0.0, 1.0, 1.0])
@@ -439,7 +476,13 @@ def test_wd_spatial_panel_draws_wet_edge_when_threshold_crossed():
             y=y,
             arr=arr,
             renderer=renderer,
-            context={"mode": "none", "options": render._visualization_options({"map": {"enabled": False}})},
+            context={
+                "mode": "none",
+                "options": render._visualization_options({
+                    "map": {"enabled": False},
+                    "wd": {"show_wet_edge": True},
+                }),
+            },
             cmap="viridis",
             vmin=0.0,
             vmax=0.3,
@@ -501,7 +544,7 @@ def test_cartographic_context_falls_back_to_elevation_hillshade(tmp_path, monkey
         y=np.array([4072000.0, 4072000.0, 4072100.0, 4072100.0]),
         elevation_raw=np.array([1.0, 2.0, 3.0, 4.0]),
         out_dir=str(tmp_path),
-        visualization_config={"map": {"enabled": True, "fallback": "elevation_hillshade"}},
+        visualization_config={"map": {"enabled": True, "mode": "3dep_hillshade", "fallback": "elevation_hillshade"}},
     )
     assert context["mode"] == "elevation_hillshade"
     assert (tmp_path / "cartographic_context" / "basemap_metadata.json").exists()

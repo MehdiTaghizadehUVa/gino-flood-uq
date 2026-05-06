@@ -212,7 +212,19 @@ flood: &FLOOD
     wd:
       colormap: "cyan_depth"
       overlay_alpha: 0.88
+      show_wet_edge: false
       wet_edge_threshold_m: 0.05
+    diagnostics:
+      zero_threshold: 1.0e-10
+      zero_fraction: 0.03
+      overlay_alpha: 0.70
+      basemap_alpha: 0.28
+      error_colormap: "error_rose_alpha_ramp"
+      spread_colormap: "spread_violet_alpha_ramp"
+      crps_colormap: "crps_indigo_alpha_ramp"
+    time:
+      display: "forecast_horizon_after_spinup"
+      initial_history_steps: 3
     output:
       write_gif: true
       write_mp4: true

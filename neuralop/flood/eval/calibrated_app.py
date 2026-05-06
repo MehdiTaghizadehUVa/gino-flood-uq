@@ -9,11 +9,21 @@ from pathlib import Path
 from typing import Dict, List
 
 from neuralop.flood.data.wv import NormalizedDatasetOnTheFly
-from neuralop.flood.eval.calibration import (
+from neuralop.flood.eval.scientific_calibration import (
     CALIBRATION_COMPARISON_JSON,
-    _build_calibration_comparison,
-    _fit_wd_leadtime_calibration_from_hydrographs,
-    _save_calibration_artifacts,
+    ARTIFACT_FORMAT,
+    CalibrationBins,
+    build_calibration_comparison,
+    compute_artifact_uq_metrics,
+    fit_crps_member_by_member_from_artifacts,
+    fit_exceedance_isotonic_from_artifacts,
+    list_forecast_artifacts,
+    load_forecast_artifact,
+    save_crps_mbm_coefficients,
+    save_exceedance_isotonic,
+    save_metrics_json,
+    validate_reference_split_no_leakage,
+    validate_scientific_calibration_config,
 )
 from neuralop.flood.eval.checkpoints import _discover_checkpoint_runs, _load_models_from_runs, _preferred_checkpoint_alias
 from neuralop.flood.eval.datasets import (
@@ -51,7 +61,6 @@ from neuralop.flood.utils.runtime import (
     setup_logging,
     write_train_txt_from_data_root,
 )
-from neuralop.training.leadtime_affine_calibration import validate_split_leakage_guard
 
 
 def _resolve_split_guard_root(config, section: str) -> Path:
@@ -65,6 +74,50 @@ def _resolve_split_guard_root(config, section: str) -> Path:
             )
         return Path(fallback_root).resolve()
     return root_path.resolve()
+
+
+def _nested_get(obj, *keys, default=None):
+    cur = obj
+    for key in keys:
+        if cur is None:
+            return default
+        try:
+            cur = getattr(cur, key)
+            continue
+        except (AttributeError, KeyError, TypeError):
+            pass
+        if isinstance(cur, dict):
+            if key not in cur:
+                return default
+            cur = cur[key]
+            continue
+        try:
+            cur = cur[key]
+        except Exception:
+            return default
+    return cur
+
+
+def _set_cfg_value(obj, key: str, value) -> None:
+    if isinstance(obj, dict):
+        obj[key] = value
+    else:
+        setattr(obj, key, value)
+
+
+def _expand_run_path(value, *, default: str | None = None) -> Path:
+    raw = default if value in (None, "") else str(value)
+    if raw is None or str(raw).strip() == "":
+        raise ValueError("Expected a non-empty path.")
+    return Path(os.path.expandvars(str(raw))).expanduser().resolve()
+
+
+def _load_json(path: Path) -> Dict[str, float]:
+    import json
+
+    with open(path, "r", encoding="utf-8") as handle:
+        return json.load(handle)
+
 
 def main() -> int:
     """Run post-training one-step and/or rollout evaluation."""
@@ -278,33 +331,58 @@ def main() -> int:
 
     rollout_cal_enabled = bool(_opt(config, "rollout_calibration", "enabled", True))
     if rollout_cal_enabled:
+        validate_scientific_calibration_config(config)
+        validate_reference_split_no_leakage(config)
         if "wd" not in target_variables:
             raise ValueError(
                 "rollout_calibration.enabled=true requires WD channel in target_variables."
             )
-        calib_txt = _opt(config, "rollout_calibration", "calib_txt", "")
-        test_txt = _opt(config, "rollout_data", "test_txt", "test.txt")
-        allow_same_split = bool(
-            _opt(config, "rollout_calibration", "allow_same_split", False)
+
+        calibration_cfg = _nested_get(config, "rollout_calibration")
+        reference_cfg = _nested_get(calibration_cfg, "reference")
+        artifact_cfg = _nested_get(calibration_cfg, "forecast_artifacts")
+        optimizer_cfg = _nested_get(calibration_cfg, "optimizer")
+        exceedance_cfg = _nested_get(calibration_cfg, "exceedance")
+
+        calibration_root = _expand_run_path(_nested_get(reference_cfg, "calibration_root"))
+        calibration_txt = str(_nested_get(reference_cfg, "calibration_txt"))
+        heldout_test_root = _expand_run_path(_nested_get(reference_cfg, "test_root"))
+        heldout_test_txt = str(_nested_get(reference_cfg, "test_txt"))
+        min_ref_members = int(_nested_get(reference_cfg, "min_reference_members_per_family", default=100))
+        artifact_root = _expand_run_path(
+            _nested_get(artifact_cfg, "root", default=None),
+            default=str(Path(config.rollout.out_dir) / "forecast_artifacts"),
         )
-        validate_split_leakage_guard(
-            str(calib_txt),
-            str(test_txt),
-            allow_same_split=allow_same_split,
-            calib_root=_resolve_split_guard_root(config, "rollout_calibration"),
-            test_root=_resolve_split_guard_root(config, "rollout_data"),
+        artifact_format = str(_nested_get(artifact_cfg, "format", default=ARTIFACT_FORMAT))
+        if artifact_format != ARTIFACT_FORMAT:
+            raise ValueError(
+                f"Unsupported forecast artifact format {artifact_format!r}; expected {ARTIFACT_FORMAT!r}."
+            )
+        calib_artifact_dir = artifact_root / "calibration"
+        test_artifact_dir = artifact_root / "test_raw"
+        calibration_diagnostics_dir = str(Path(config.rollout.out_dir) / "calibration_fit_diagnostics")
+
+        logger.info(
+            "Scientific calibration enabled: method=crps_member_by_member calibration_root=%s calibration_txt=%s test_root=%s test_txt=%s artifact_root=%s",
+            calibration_root,
+            calibration_txt,
+            heldout_test_root,
+            heldout_test_txt,
+            artifact_root,
         )
 
-        fit_wet_threshold = _opt_float(
-            config,
-            "rollout_calibration",
-            "fit_wet_threshold",
-            _opt_float(config, "opt", "wet_threshold", 0.01),
-        )
-        min_pred_std = _opt_float(config, "rollout_calibration", "min_pred_std", 1e-4)
-        c_clip_min = _opt_float(config, "rollout_calibration", "c_clip_min", 0.25)
-        c_clip_max = _opt_float(config, "rollout_calibration", "c_clip_max", 4.0)
-        smooth_window = int(_opt(config, "rollout_calibration", "smooth_window", 5))
+        # The rollout dataset builder still expects flat section fields. Resolve the
+        # new leakage-safe nested reference contract into those runtime fields.
+        _set_cfg_value(config.rollout_data, "root", str(heldout_test_root))
+        _set_cfg_value(config.rollout_data, "test_txt", heldout_test_txt)
+        _set_cfg_value(calibration_cfg, "root", str(calibration_root))
+        _set_cfg_value(calibration_cfg, "test_txt", calibration_txt)
+        if _nested_get(calibration_cfg, "static_text_files", default=None) is None:
+            _set_cfg_value(
+                calibration_cfg,
+                "static_text_files",
+                _opt(config, "rollout_data", "static_text_files", _opt(config, "data", "static_text_files", [])),
+            )
 
         rollout_norm_ds_test, hydrograph_samples_test = _build_rollout_normalized_dataset(
             config,
@@ -312,20 +390,15 @@ def main() -> int:
             target_variables,
             logger,
             structural_dry_artifact=structural_dry_artifact,
-            split_txt=str(test_txt),
+            split_txt=heldout_test_txt,
             split_name="test",
             config_section="rollout_data",
         )
-        logger.info("Rollout test dataset: %d runs", len(rollout_norm_ds_test))
+        logger.info("Held-out rollout test dataset: %d runs", len(rollout_norm_ds_test))
         if not hydrograph_samples_test:
             raise ValueError(
-                "Calibration evaluator requires grouped hydrograph rollout data for test split "
-                "(>1 reference simulation per hydrograph)."
+                "Scientific calibration requires grouped hydrograph test data with multiple reference simulations per family."
             )
-        logger.info(
-            "Hydrograph-grouped test mode: %d hydrographs.",
-            len(hydrograph_samples_test),
-        )
 
         rollout_norm_ds_calib, hydrograph_samples_calib = _build_rollout_normalized_dataset(
             config,
@@ -333,23 +406,18 @@ def main() -> int:
             target_variables,
             logger,
             structural_dry_artifact=structural_dry_artifact,
-            split_txt=str(calib_txt),
+            split_txt=calibration_txt,
             split_name="val",
             config_section="rollout_calibration",
         )
-        logger.info("Rollout calibration dataset: %d runs", len(rollout_norm_ds_calib))
+        logger.info("Calibration rollout dataset: %d runs", len(rollout_norm_ds_calib))
         if not hydrograph_samples_calib:
             raise ValueError(
-                "Calibration split has no grouped hydrograph UQ samples "
-                "(requires >1 reference simulation per hydrograph)."
+                "Scientific calibration split has no grouped hydrograph samples; expected >=2 reference simulations per family."
             )
-        logger.info(
-            "Hydrograph-grouped calibration mode: %d hydrographs.",
-            len(hydrograph_samples_calib),
-        )
 
-        with _PhaseTimer(logger, "Fitting WD lead-time affine calibration"):
-            wd_coeffs = _fit_wd_leadtime_calibration_from_hydrographs(
+        with _PhaseTimer(logger, "Generating calibration forecast-member artifacts"):
+            _rollout_prediction_per_hydrograph(
                 models=models,
                 hydrograph_samples=hydrograph_samples_calib,
                 rollout_length=config.data.rollout_length,
@@ -358,6 +426,8 @@ def main() -> int:
                 target_norm=normalizers["target"],
                 device=device,
                 skip_before_timestep=_opt(config, "data", "skip_before_timestep", 0),
+                dt=config.data.dt,
+                out_dir=calibration_diagnostics_dir,
                 target_variables=target_variables,
                 logger=logger,
                 fgn_noise_dim=_opt(config, "gino", "fgn_noise_dim", 32) if use_fgn else None,
@@ -369,17 +439,62 @@ def main() -> int:
                 gaussian_max_logvar=_opt_float(config, "opt", "gaussian_max_logvar", 4.0),
                 gaussian_state_update=gaussian_state_update,
                 rollout_init_mode=rollout_init_mode,
-                fit_wet_threshold=fit_wet_threshold,
-                min_pred_std=min_pred_std,
-                c_clip_min=c_clip_min,
-                c_clip_max=c_clip_max,
-                smooth_window=smooth_window,
+                visualization_config=_opt(config, None, "visualization", None),
+                impact_metrics_config=_opt(config, "rollout", "impact_metrics", None),
+                forecast_artifact_dir=str(calib_artifact_dir),
+                calibration_metadata={
+                    "artifact_role": "calibration_fit",
+                    "calibration_root": str(calibration_root),
+                    "calibration_txt": calibration_txt,
+                },
             )
-        _save_calibration_artifacts(config.rollout.out_dir, wd_coeffs, logger)
+
+        calib_artifacts = list_forecast_artifacts(calib_artifact_dir)
+        for artifact_path in calib_artifacts:
+            artifact_meta = load_forecast_artifact(artifact_path, load_members=False)
+            if int(artifact_meta["n_reference_members"]) < min_ref_members:
+                raise ValueError(
+                    f"Calibration artifact {artifact_path} has only {artifact_meta['n_reference_members']} reference members; "
+                    f"required >= {min_ref_members}."
+                )
+
+        bins = CalibrationBins.from_config(config)
+        bounds = _nested_get(optimizer_cfg, "bounds", default=None) or {
+            "a_m": [-2.0, 2.0],
+            "beta": [0.2, 2.5],
+            "gamma": [0.05, 3.0],
+        }
+        with _PhaseTimer(logger, "Fitting CRPS member-by-member WD calibration"):
+            calibration_model = fit_crps_member_by_member_from_artifacts(
+                calib_artifacts,
+                bins=bins,
+                max_fit_points_per_bin=int(_nested_get(optimizer_cfg, "max_fit_points_per_bin", default=1000000)),
+                min_fit_points_per_bin=int(_nested_get(optimizer_cfg, "min_fit_points_per_bin", default=32)),
+                seed=int(_nested_get(optimizer_cfg, "seed", default=123)),
+                bounds=bounds,
+            )
+        calibration_dir = Path(config.rollout.out_dir) / "calibration"
+        coeff_path = save_crps_mbm_coefficients(calibration_model, calibration_dir)
+        logger.info("Saved CRPS MBM coefficients to %s", coeff_path)
+
+        thresholds_m = _nested_get(exceedance_cfg, "thresholds_m", default=[0.01, 0.05, 0.10, 0.30, 0.50])
+        if str(_nested_get(exceedance_cfg, "method", default="isotonic")).strip().lower() == "isotonic":
+            with _PhaseTimer(logger, "Fitting isotonic exceedance calibration"):
+                exceedance_model = fit_exceedance_isotonic_from_artifacts(
+                    calib_artifacts,
+                    bins=bins,
+                    wet_frequency_by_cell=calibration_model["wet_frequency_by_cell"],
+                    thresholds_m=thresholds_m,
+                    min_fit_points_per_bin=int(_nested_get(exceedance_cfg, "min_fit_points_per_bin", default=128)),
+                )
+            iso_path = save_exceedance_isotonic(exceedance_model, calibration_dir)
+            logger.info("Saved isotonic exceedance curves to %s", iso_path)
+        else:
+            logger.warning("Exceedance calibration disabled or unsupported; skipping isotonic probability calibration.")
 
         raw_out_dir = os.path.join(config.rollout.out_dir, "raw")
         calibrated_out_dir = os.path.join(config.rollout.out_dir, "calibrated")
-        with _PhaseTimer(logger, "Rollout evaluation + plotting (raw)"):
+        with _PhaseTimer(logger, "Rollout evaluation + plotting (raw held-out test)"):
             _rollout_prediction_per_hydrograph(
                 models=models,
                 hydrograph_samples=hydrograph_samples_test,
@@ -402,10 +517,26 @@ def main() -> int:
                 gaussian_max_logvar=_opt_float(config, "opt", "gaussian_max_logvar", 4.0),
                 gaussian_state_update=gaussian_state_update,
                 rollout_init_mode=rollout_init_mode,
-                calibration_coeffs_wd=None,
                 visualization_config=_opt(config, None, "visualization", None),
+                impact_metrics_config=_opt(config, "rollout", "impact_metrics", None),
+                forecast_artifact_dir=str(test_artifact_dir),
+                calibration_metadata={
+                    "artifact_role": "heldout_test_raw",
+                    "test_root": str(heldout_test_root),
+                    "test_txt": heldout_test_txt,
+                },
             )
-        with _PhaseTimer(logger, "Rollout evaluation + plotting (calibrated)"):
+
+        test_artifacts = list_forecast_artifacts(test_artifact_dir)
+        for artifact_path in test_artifacts:
+            artifact_meta = load_forecast_artifact(artifact_path, load_members=False)
+            if int(artifact_meta["n_reference_members"]) < min_ref_members:
+                raise ValueError(
+                    f"Held-out test artifact {artifact_path} has only {artifact_meta['n_reference_members']} reference members; "
+                    f"required >= {min_ref_members}."
+                )
+
+        with _PhaseTimer(logger, "Rollout evaluation + plotting (CRPS-MBM calibrated held-out test)"):
             _rollout_prediction_per_hydrograph(
                 models=models,
                 hydrograph_samples=hydrograph_samples_test,
@@ -428,19 +559,48 @@ def main() -> int:
                 gaussian_max_logvar=_opt_float(config, "opt", "gaussian_max_logvar", 4.0),
                 gaussian_state_update=gaussian_state_update,
                 rollout_init_mode=rollout_init_mode,
-                calibration_coeffs_wd=wd_coeffs,
                 visualization_config=_opt(config, None, "visualization", None),
+                impact_metrics_config=_opt(config, "rollout", "impact_metrics", None),
+                calibration_model=calibration_model,
+                calibration_metadata={
+                    "artifact_role": "heldout_test_calibrated",
+                    "coefficient_path": str(coeff_path),
+                },
             )
 
-        raw_overall_json = Path(raw_out_dir) / UQ_OVERALL_JSON
-        cal_overall_json = Path(calibrated_out_dir) / UQ_OVERALL_JSON
-        comparison_json = Path(config.rollout.out_dir) / CALIBRATION_COMPARISON_JSON
-        _build_calibration_comparison(
-            raw_metrics_path=raw_overall_json,
-            calibrated_metrics_path=cal_overall_json,
-            out_path=comparison_json,
-            logger=logger,
+        raw_artifact_metrics = compute_artifact_uq_metrics(test_artifacts, thresholds_m=thresholds_m)
+        calibrated_artifact_metrics = compute_artifact_uq_metrics(
+            test_artifacts,
+            calibration_model=calibration_model,
+            thresholds_m=thresholds_m,
         )
+        save_metrics_json(raw_artifact_metrics, calibration_dir / "artifact_raw_uq_overall_metrics.json")
+        save_metrics_json(calibrated_artifact_metrics, calibration_dir / "artifact_calibrated_uq_overall_metrics.json")
+
+        raw_metrics_path = Path(raw_out_dir) / UQ_OVERALL_JSON
+        calibrated_metrics_path = Path(calibrated_out_dir) / UQ_OVERALL_JSON
+        if raw_metrics_path.exists() and calibrated_metrics_path.exists():
+            comparison = build_calibration_comparison(
+                _load_json(raw_metrics_path),
+                _load_json(calibrated_metrics_path),
+            )
+        else:
+            comparison = build_calibration_comparison(raw_artifact_metrics, calibrated_artifact_metrics)
+        comparison.update(
+            {
+                "method": "crps_member_by_member",
+                "raw_metrics_json": str(raw_metrics_path),
+                "calibrated_metrics_json": str(calibrated_metrics_path),
+                "artifact_raw_metrics_json": str(calibration_dir / "artifact_raw_uq_overall_metrics.json"),
+                "artifact_calibrated_metrics_json": str(calibration_dir / "artifact_calibrated_uq_overall_metrics.json"),
+                "coefficient_json": str(coeff_path),
+                "calibration_artifact_dir": str(calib_artifact_dir),
+                "heldout_test_artifact_dir": str(test_artifact_dir),
+            }
+        )
+        comparison_path = Path(config.rollout.out_dir) / CALIBRATION_COMPARISON_JSON
+        save_metrics_json(comparison, comparison_path)
+        logger.info("Saved scientific calibration comparison JSON to %s", comparison_path)
     else:
         rollout_norm_ds, hydrograph_samples = _build_rollout_normalized_dataset(
             config,
@@ -482,6 +642,7 @@ def main() -> int:
                     rollout_init_mode=rollout_init_mode,
                     calibration_coeffs_wd=None,
                     visualization_config=_opt(config, None, "visualization", None),
+                    impact_metrics_config=_opt(config, "rollout", "impact_metrics", None),
                 )
             else:
                 _rollout_prediction_generic(

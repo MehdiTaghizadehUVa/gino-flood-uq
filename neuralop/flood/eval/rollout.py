@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Any, Dict, List, Optional
+from pathlib import Path
+from typing import Any, Dict, List, Mapping, Optional
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -25,6 +26,10 @@ from neuralop.flood.eval.metrics import (
     _is_gaussian_mode,
     _pit_rank_counts_from_reference,
 )
+from neuralop.flood.eval.impact_metrics import (
+    compute_flood_impact_crps_metrics,
+    normalize_impact_metrics_config,
+)
 from neuralop.flood.eval.mc_dropout import (
     enable_mc_dropout_only,
     mc_dropout_seed_context,
@@ -33,6 +38,11 @@ from neuralop.flood.eval.render import (
     _save_nonspatial_uq_diagnostics,
     _save_generic_rollout_visuals,
     _save_hydrograph_uq_figures_and_animation,
+)
+from neuralop.flood.eval.scientific_calibration import (
+    ARTIFACT_FILE_SUFFIX,
+    apply_crps_mbm_to_wd_members,
+    save_forecast_artifact,
 )
 from neuralop.flood.eval.runtime import (
     LEGACY_3CH,
@@ -197,7 +207,11 @@ def _rollout_prediction_per_hydrograph(
     mc_dropout_enabled: bool = False,
     mc_dropout_seed: Optional[int] = None,
     visualization_config: Optional[Any] = None,
+    impact_metrics_config: Optional[Any] = None,
     calibration_coeffs_wd: Optional[Any] = None,
+    forecast_artifact_dir: Optional[str] = None,
+    calibration_model: Optional[Mapping[str, Any]] = None,
+    calibration_metadata: Optional[Mapping[str, Any]] = None,
 ) -> None:
     """
     Evaluate per hydrograph using all reference simulations as ground-truth uncertainty.
@@ -209,11 +223,20 @@ def _rollout_prediction_per_hydrograph(
         raise ValueError("No models provided for rollout evaluation.")
     if mc_dropout_enabled and (gaussian_mode or fgn_noise_dim is not None):
         raise ValueError("MC-dropout rollout is incompatible with Gaussian or FGN rollout modes.")
+    if calibration_coeffs_wd is not None and calibration_model is None:
+        raise ValueError(
+            "Legacy lead-time affine calibration_coeffs_wd is no longer supported in the "
+            "maintained rollout path. Use rollout_calibration.method=crps_member_by_member."
+        )
+    if calibration_model is not None and "wd" not in target_variables:
+        raise ValueError("CRPS MBM calibration requires target_variables to include wd.")
     for model in models:
         model.eval()
     dynamic_norm.to(device)
     target_norm.to(device)
     os.makedirs(out_dir, exist_ok=True)
+    impact_cfg = normalize_impact_metrics_config(impact_metrics_config)
+    impact_metrics_enabled = impact_cfg.enabled and "wd" in target_variables
 
     n_models = len(models)
     n_ens = max(1, int(n_ensemble_samples))
@@ -273,6 +296,14 @@ def _rollout_prediction_per_hydrograph(
         logger.warning(
             "Per-hydrograph UQ run without ensemble spread (single model, single member)."
         )
+    if impact_cfg.enabled and "wd" not in target_variables:
+        logger.warning("Flood-impact CRPS metrics requested but target_variables does not include 'wd'.")
+    elif impact_metrics_enabled:
+        logger.info(
+            "Flood-impact CRPS metrics enabled: threshold=%.3f m, pooled_radii_m=%s",
+            impact_cfg.inundation_threshold_m,
+            list(impact_cfg.pooled_radii_m),
+        )
 
     start_pred_t = skip_before_timestep + history_steps
     end_pred_t = start_pred_t + rollout_length
@@ -310,6 +341,7 @@ def _rollout_prediction_per_hydrograph(
     wd_falsewet_rate_001_dry_background: List[np.ndarray] = []
     wd_falsewet_rate_005_dry_background: List[np.ndarray] = []
     wd_pred_std_mean_dry_background: List[np.ndarray] = []
+    impact_metric_values: Dict[str, List[Any]] = {}
 
     interval_levels = (0.50, 0.80, 0.90, 0.95)
     wd_interval_coverage: Dict[float, List[np.ndarray]] = {a: [] for a in interval_levels}
@@ -393,8 +425,12 @@ def _rollout_prediction_per_hydrograph(
         run_wd_falsewet_rate_001_dry_background: List[float] = []
         run_wd_falsewet_rate_005_dry_background: List[float] = []
         run_wd_pred_std_mean_dry_background: List[float] = []
+        run_pred_wd_ens: List[np.ndarray] = []
+        run_gt_wd_ref: List[np.ndarray] = []
         run_interval_coverage: Dict[float, List[float]] = {a: [] for a in interval_levels}
         run_interval_width: Dict[float, List[float]] = {a: [] for a in interval_levels}
+        artifact_pred_wd_steps: List[np.ndarray] = []
+        artifact_ref_wd_steps: List[np.ndarray] = []
 
         init_histories, init_ref_indices = build_rollout_initial_histories(
             dynamic_ref,
@@ -589,6 +625,18 @@ def _rollout_prediction_per_hydrograph(
                 structural_dry_mask=structural_dry_mask,
             )
             inv_gt_ref = dynamic_norm.inverse_transform(gt_rollout_ref[:, t])
+            if calibration_model is not None:
+                wd_idx_cal = target_variables.index("wd")
+                pred_wd_raw = inv_pred_ens[:, :, wd_idx_cal].detach().cpu().numpy()
+                pred_wd_cal = apply_crps_mbm_to_wd_members(
+                    pred_wd_raw,
+                    lead_time_hour=float((t + 1) * dt / 3600.0),
+                    calibration_model=calibration_model,
+                    wettable_mask=wettable_mask_np,
+                )
+                inv_pred_ens[:, :, wd_idx_cal] = torch.as_tensor(
+                    pred_wd_cal, device=inv_pred_ens.device, dtype=inv_pred_ens.dtype
+                )
             if gaussian_mode and mu_stack is not None and logvar_stack is not None:
                 mu_phys_stack = target_norm.inverse_transform(mu_stack.squeeze(1))
                 mu_phys_stack = apply_structural_dry_zero_mask(
@@ -704,6 +752,12 @@ def _rollout_prediction_per_hydrograph(
                 run_between_to_within_full[ch_name].append(between_to_within_full_t)
 
                 if ch_name == "wd":
+                    if forecast_artifact_dir is not None:
+                        artifact_pred_wd_steps.append(np.asarray(pred_ens_ch, dtype=np.float32))
+                        artifact_ref_wd_steps.append(np.asarray(gt_ref_ch, dtype=np.float32))
+                    if impact_metrics_enabled:
+                        run_pred_wd_ens.append(np.asarray(pred_ens_ch, dtype=np.float64))
+                        run_gt_wd_ref.append(np.asarray(gt_ref_ch, dtype=np.float64))
                     pred_prob = np.mean(pred_ens_ch >= UQ_EXCEEDANCE_THRESHOLD, axis=0)
                     gt_prob = np.mean(gt_ref_ch >= UQ_EXCEEDANCE_THRESHOLD, axis=0)
                     run_wd_pred_prob.append(pred_prob)
@@ -848,6 +902,47 @@ def _rollout_prediction_per_hydrograph(
             k: np.asarray(v, dtype=np.float64) for k, v in run_relative_l2.items()
         }
 
+        if forecast_artifact_dir is not None and artifact_pred_wd_steps:
+            pred_art = np.stack(artifact_pred_wd_steps, axis=1)
+            ref_art = np.stack(artifact_ref_wd_steps, axis=1)
+            wettable_art = (
+                wettable_mask_np
+                if wettable_mask_np is not None
+                else np.ones(pred_art.shape[2], dtype=bool)
+            )
+            dry_art = (
+                dry_mask_np
+                if dry_mask_np is not None
+                else np.logical_not(np.asarray(wettable_art, dtype=bool))
+            )
+            safe_hydro_id = "".join(ch if ch.isalnum() or ch in {"-", "_"} else "_" for ch in str(hydro_id))
+            artifact_path = Path(forecast_artifact_dir) / f"{safe_hydro_id}{ARTIFACT_FILE_SUFFIX}"
+            save_forecast_artifact(
+                artifact_path,
+                hydrograph_id=str(hydro_id),
+                pred_members_wd=pred_art,
+                ref_members_wd=ref_art,
+                wettable_mask=wettable_art,
+                structural_dry_mask=dry_art,
+                boundary_series_raw=sample.get("boundary_series_raw"),
+                boundary_channel_names=sample.get("boundary_channel_names"),
+                member_model_id=[member_model_indices[i] for i in range(n_ens)],
+                member_sample_id=list(range(n_ens)),
+                time_hours=(np.arange(1, pred_art.shape[1] + 1, dtype=np.float64) * float(dt) / 3600.0),
+                metadata={
+                    "target_variable": "wd",
+                    "rollout_start_index": int(start_pred_t),
+                    "history_steps": int(history_steps),
+                    "skip_before_timestep": int(skip_before_timestep),
+                    "n_models": int(n_models),
+                    "gaussian_mode": bool(gaussian_mode),
+                    "fgn_noise_dim": None if fgn_noise_dim is None else int(fgn_noise_dim),
+                    "calibration_applied": calibration_model is not None,
+                    **dict(calibration_metadata or {}),
+                },
+            )
+            logger.info("Saved calibration forecast artifact for hydrograph %s to %s", hydro_id, artifact_path)
+
         _save_hydrograph_uq_figures_and_animation(
             geometry=sample.get("geometry_raw", geometry),
             pred_mean_by_channel=pred_mean_by_channel,
@@ -870,6 +965,18 @@ def _rollout_prediction_per_hydrograph(
             elevation_raw=sample.get("elevation_raw"),
             visualization_config=visualization_config,
         )
+
+        if impact_metrics_enabled and run_pred_wd_ens and run_gt_wd_ref:
+            run_impact_metrics = compute_flood_impact_crps_metrics(
+                pred_wd_rollout=np.stack(run_pred_wd_ens, axis=0),
+                ref_wd_rollout=np.stack(run_gt_wd_ref, axis=0),
+                geometry=sample.get("geometry_raw", geometry),
+                static_raw=sample.get("static_raw", sample.get("static")),
+                wettable_mask=wettable_mask_np,
+                config=impact_cfg,
+            )
+            for key, value in run_impact_metrics.items():
+                impact_metric_values.setdefault(key, []).append(value)
 
         for ch_name in target_variables:
             per_channel_rmse[ch_name].append(np.asarray(run_rmse[ch_name], dtype=np.float64))
@@ -1047,6 +1154,20 @@ def _rollout_prediction_per_hydrograph(
             pct = int(round(alpha * 100))
             metrics[f"coverage_wd_{pct}"] = np.stack(wd_interval_coverage[alpha], axis=0)
             metrics[f"width_wd_{pct}"] = np.stack(wd_interval_width[alpha], axis=0)
+    for key, values in sorted(impact_metric_values.items()):
+        if not values:
+            continue
+        first = np.asarray(values[0], dtype=np.float64)
+        if first.ndim == 0:
+            metrics[key] = np.asarray(
+                [float(np.asarray(value, dtype=np.float64)) for value in values],
+                dtype=np.float64,
+            )
+        else:
+            metrics[key] = np.stack(
+                [np.asarray(value, dtype=np.float64) for value in values],
+                axis=0,
+            )
 
     stats = {k: {"mean": v.mean(axis=0), "std": v.std(axis=0)} for k, v in metrics.items()}
     time_hours = (np.arange(1, rollout_length + 1) * dt) / 3600.0
@@ -1125,10 +1246,15 @@ def _rollout_prediction_per_hydrograph(
             mean = stats[key]["mean"]
             std = stats[key]["std"]
             ax = axs_flat[i]
-            ax.plot(time_hours, mean, linewidth=1.35, color="#1f77b4")
-            ax.fill_between(time_hours, mean - std, mean + std, alpha=0.18, color="#1f77b4")
+            if np.ndim(mean) == 0:
+                ax.bar([0], [float(mean)], yerr=[float(std)], color="#1f77b4", alpha=0.82)
+                ax.set_xticks([])
+                ax.set_xlabel("Hydrograph aggregate")
+            else:
+                ax.plot(time_hours, mean, linewidth=1.35, color="#1f77b4")
+                ax.fill_between(time_hours, mean - std, mean + std, alpha=0.18, color="#1f77b4")
+                ax.set_xlabel("Lead time (hour)")
             ax.set_title(key)
-            ax.set_xlabel("Lead time (hour)")
             if key.startswith("spread_ratio"):
                 ax.set_ylabel("Spread ratio")
                 ax.axhline(1.0, color="gray", linestyle="--", alpha=0.8, linewidth=0.9)
