@@ -305,8 +305,16 @@ def _rollout_prediction_per_hydrograph(
             list(impact_cfg.pooled_radii_m),
         )
 
+    requested_rollout_length = int(rollout_length)
+    if requested_rollout_length < -1 or requested_rollout_length == 0:
+        raise ValueError(
+            "rollout_length must be a positive integer or -1 for the full available horizon "
+            f"(got {requested_rollout_length})."
+        )
+    full_horizon_requested = requested_rollout_length == -1
+    full_horizon_log_emitted = False
     start_pred_t = skip_before_timestep + history_steps
-    end_pred_t = start_pred_t + rollout_length
+    end_pred_t = None if full_horizon_requested else start_pred_t + requested_rollout_length
 
     per_channel_rmse: Dict[str, List[np.ndarray]] = {name: [] for name in target_variables}
     per_channel_crps: Dict[str, List[np.ndarray]] = {name: [] for name in target_variables}
@@ -383,6 +391,28 @@ def _rollout_prediction_per_hydrograph(
 
         gt_rollout_ref = dynamic_ref[:, start_pred_t:end_pred_t]
         gt_boundary_rollout = full_boundary[start_pred_t:end_pred_t]
+        sample_rollout_length = min(int(gt_rollout_ref.shape[1]), int(gt_boundary_rollout.shape[0]))
+        if sample_rollout_length < 1:
+            raise ValueError(
+                "Hydrograph rollout has no forecast steps after skip/history slicing: "
+                f"hydrograph_id={hydro_id!r}, skip_before_timestep={skip_before_timestep}, "
+                f"history_steps={history_steps}, requested_rollout_length={requested_rollout_length}."
+            )
+        if not full_horizon_requested and sample_rollout_length < requested_rollout_length:
+            raise ValueError(
+                "Hydrograph rollout is shorter than requested: "
+                f"hydrograph_id={hydro_id!r}, available={sample_rollout_length}, "
+                f"requested={requested_rollout_length}."
+            )
+        if full_horizon_requested and not full_horizon_log_emitted:
+            logger.info(
+                "Resolved rollout_length=-1 to full available hydrograph horizon=%d steps "
+                "after skip_before_timestep=%d and history_steps=%d.",
+                sample_rollout_length,
+                skip_before_timestep,
+                history_steps,
+            )
+            full_horizon_log_emitted = True
 
         run_rmse: Dict[str, List[float]] = {name: [] for name in target_variables}
         run_crps: Dict[str, List[float]] = {name: [] for name in target_variables}
@@ -476,7 +506,7 @@ def _rollout_prediction_per_hydrograph(
                 temporal_mode=fgn_latent_temporal_mode,
             )
 
-        for t in range(rollout_length):
+        for t in range(sample_rollout_length):
             mu_stack: Optional[torch.Tensor] = None
             logvar_stack: Optional[torch.Tensor] = None
             state_stack: Optional[torch.Tensor] = None
@@ -1172,7 +1202,16 @@ def _rollout_prediction_per_hydrograph(
             )
 
     stats = {k: {"mean": v.mean(axis=0), "std": v.std(axis=0)} for k, v in metrics.items()}
-    time_hours = (np.arange(1, rollout_length + 1) * dt) / 3600.0
+    time_metric_lengths = [int(v.shape[1]) for v in metrics.values() if getattr(v, "ndim", 0) >= 2]
+    if not time_metric_lengths:
+        raise ValueError("No time-indexed rollout metrics were produced.")
+    if len(set(time_metric_lengths)) != 1:
+        raise ValueError(
+            "Generic rollout metrics have inconsistent horizons: "
+            f"{sorted(set(time_metric_lengths))}."
+        )
+    effective_rollout_length = time_metric_lengths[0]
+    time_hours = (np.arange(1, effective_rollout_length + 1) * dt) / 3600.0
     npz_data: Dict[str, Any] = {"time_hours": time_hours}
     for key, stat_dict in stats.items():
         npz_data[f"{key}_mean"] = stat_dict["mean"]
@@ -1909,7 +1948,16 @@ def _rollout_prediction_generic(
             )
 
     stats = {k: {"mean": v.mean(axis=0), "std": v.std(axis=0)} for k, v in metrics.items()}
-    time_hours = (np.arange(1, rollout_length + 1) * dt) / 3600.0
+    time_metric_lengths = [int(v.shape[1]) for v in metrics.values() if getattr(v, "ndim", 0) >= 2]
+    if not time_metric_lengths:
+        raise ValueError("No time-indexed rollout metrics were produced.")
+    if len(set(time_metric_lengths)) != 1:
+        raise ValueError(
+            "Per-hydrograph rollout metrics have inconsistent horizons: "
+            f"{sorted(set(time_metric_lengths))}."
+        )
+    effective_rollout_length = time_metric_lengths[0]
+    time_hours = (np.arange(1, effective_rollout_length + 1) * dt) / 3600.0
     npz_data: Dict[str, Any] = {"time_hours": time_hours}
     for key, stat_dict in stats.items():
         npz_data[f"{key}_mean"] = stat_dict["mean"]

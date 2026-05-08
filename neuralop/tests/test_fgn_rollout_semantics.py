@@ -11,7 +11,7 @@ try:
         sample_fgn_rollout_latent_bank,
         update_fgn_dynamic_members,
     )
-    from neuralop.flood.eval.common import (
+    from neuralop.flood.eval.rollout import (
         _rollout_prediction_generic,
         _rollout_prediction_per_hydrograph,
     )
@@ -45,13 +45,13 @@ class DummyFGNModel(nn.Module):
 
 
 def _make_geometry(n_cells: int) -> torch.Tensor:
-    return torch.stack(
-        [
-            torch.linspace(0.0, 1.0, n_cells),
-            torch.linspace(0.0, 1.0, n_cells),
-        ],
-        dim=1,
+    side = int(torch.ceil(torch.sqrt(torch.tensor(float(n_cells)))).item())
+    xx, yy = torch.meshgrid(
+        torch.linspace(0.0, 1.0, side),
+        torch.linspace(0.0, 1.0, side),
+        indexing="xy",
     )
+    return torch.stack([xx.reshape(-1), yy.reshape(-1)], dim=1)[:n_cells]
 
 
 def _make_query_points() -> torch.Tensor:
@@ -264,3 +264,42 @@ def test_eval_hydrograph_fgn_persistent_rollout_smoke(tmp_path: Path):
     assert len(model.ada_calls) == 4
     assert torch.equal(model.ada_calls[0], model.ada_calls[2])
     assert torch.equal(model.ada_calls[1], model.ada_calls[3])
+
+def test_eval_hydrograph_full_horizon_rollout_minus_one_smoke(tmp_path: Path):
+    torch.manual_seed(0)
+    n_cells = 12
+    n_steps = 6
+    model = DummyFGNModel().eval()
+    norm = IdentityNormalizer()
+    geometry = _make_geometry(n_cells)
+    hydro_sample = {
+        "hydrograph_id": "H_full",
+        "geometry": geometry,
+        "static": torch.randn(n_cells, 2),
+        "boundary": torch.randn(n_steps, n_cells, 1),
+        "dynamic_ref": torch.randn(2, n_steps, n_cells, 1),
+        "query_points": _make_query_points(),
+        "n_ref_sims": 2,
+    }
+    out_dir = str(tmp_path / "rollout_hydro_full")
+    _rollout_prediction_per_hydrograph(
+        models=[model],
+        hydrograph_samples=[hydro_sample],
+        rollout_length=-1,
+        history_steps=2,
+        dynamic_norm=norm,
+        target_norm=norm,
+        device=torch.device("cpu"),
+        skip_before_timestep=1,
+        dt=60.0,
+        out_dir=out_dir,
+        target_variables=["wd"],
+        logger=logging.getLogger("test_eval_fgn_hydro_full"),
+        fgn_noise_dim=8,
+        n_ensemble_samples=1,
+        fgn_latent_temporal_mode="persistent",
+        gaussian_mode=False,
+    )
+    assert (tmp_path / "rollout_hydro_full" / "rollout_metrics_per_hydrograph.npz").exists()
+    # Full horizon after skip/history is n_steps - (skip_before_timestep + history_steps).
+    assert len(model.ada_calls) == 3
