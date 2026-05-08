@@ -6,6 +6,7 @@ import logging
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+import numpy as np
 import torch
 from torch.utils.data import DataLoader, Subset, random_split
 
@@ -42,6 +43,12 @@ from neuralop.flood.utils.runtime import (
     parse_target_variables,
 )
 
+def _log_debug(logger: Any, message: str, *args: Any) -> None:
+    debug = getattr(logger, "debug", None)
+    if callable(debug):
+        debug(message, *args)
+
+
 def _normalizer_tensor_device(normalizer: Any, fallback: torch.device) -> torch.device:
     """Return the current tensor device for a normalizer.
 
@@ -76,6 +83,194 @@ def _extract_raw_render_context_from_sample(raw: Dict[str, Any]) -> Dict[str, to
         # Static channel 0 is the raw elevation column in FloodRolloutTestDatasetHDF.
         context["elevation_raw"] = static_raw[:, 0].detach().cpu().clone()
     return context
+
+
+def _clean_family_member_boundary_file_candidates(clean_boundary_file: str) -> List[str]:
+    """Return likely member-specific forcing files next to a *_Clean table."""
+    file_path = Path(str(clean_boundary_file))
+    stem = file_path.stem
+    suffix = file_path.suffix
+    candidates: List[str] = []
+    for token in ("_Clean", "_clean", "Clean", "clean"):
+        if token not in stem:
+            continue
+        candidate = file_path.with_name(stem.replace(token, "") + suffix).as_posix()
+        if candidate != file_path.as_posix() and candidate not in candidates:
+            candidates.append(candidate)
+    return candidates
+
+
+def _reference_member_boundary_column_candidates(run_id: str) -> List[str]:
+    """Return exact-first column aliases for member forcing tables.
+
+    Some dataset packages prefix run IDs (for example
+    ``Flood_coastal_TE000001_sim00``) while forcing tables may use the bare
+    event/member key (``TE000001_sim00``). Keep exact matching first, then try
+    suffix aliases that preserve the member id.
+    """
+    rid = str(run_id).strip()
+    candidates: List[str] = []
+
+    def _add(value: str) -> None:
+        value = str(value).strip()
+        if value and value not in candidates:
+            candidates.append(value)
+
+    _add(rid)
+    if "_sim" not in rid:
+        return candidates
+    family_id, _, sim_suffix = rid.rpartition("_sim")
+    if not family_id or not sim_suffix:
+        return candidates
+    parts = [part for part in family_id.split("_") if part]
+    family_candidates = [family_id]
+    if len(parts) > 1:
+        for start in range(1, len(parts)):
+            alias = "_".join(parts[start:])
+            if alias and alias not in family_candidates:
+                family_candidates.append(alias)
+    for family_candidate in family_candidates:
+        _add(f"{family_candidate}_sim{sim_suffix}")
+    return candidates
+
+
+def _load_reference_member_boundary_table(
+    channel: Dict[str, Any],
+    *,
+    logger: logging.Logger | None = None,
+) -> Optional[Dict[str, Any]]:
+    candidates = _clean_family_member_boundary_file_candidates(
+        str(channel.get("clean_boundary_file", ""))
+    )
+    if not candidates:
+        return None
+
+    from neuralop.flood.utils.runtime_core import _load_clean_boundary_table
+
+    for candidate in candidates:
+        try:
+            return _load_clean_boundary_table(channel["clean_boundary_root"], candidate)
+        except FileNotFoundError:
+            continue
+    _log_debug(
+        logger,
+        "No member-specific boundary table found for clean table %s; tried %s",
+        channel.get("clean_boundary_file"),
+        candidates,
+    )
+    return None
+
+
+def _reference_member_boundary_series_from_table(
+    channel: Dict[str, Any],
+    run_ids: List[str],
+    *,
+    logger: logging.Logger | None = None,
+) -> Optional[np.ndarray]:
+    bundle = _load_reference_member_boundary_table(channel, logger=logger)
+    if bundle is None:
+        return None
+    boundary_by_member = bundle["boundary_by_family"]
+    member_series: List[np.ndarray] = []
+    missing: List[str] = []
+    for run_id in run_ids:
+        matched_key = None
+        for candidate in _reference_member_boundary_column_candidates(run_id):
+            if candidate in boundary_by_member:
+                matched_key = candidate
+                break
+        if matched_key is None:
+            missing.append(str(run_id))
+            continue
+        member_series.append(
+            np.asarray(boundary_by_member[matched_key], dtype=np.float32).copy()
+        )
+    if missing:
+        if logger is not None:
+            logger.warning(
+                "Member-specific boundary table %s is missing %d/%d reference members "
+                "for channel %s; falling back to configured boundary series for this channel.",
+                bundle["path"],
+                len(missing),
+                len(run_ids),
+                channel.get("name"),
+            )
+        return None
+    if not member_series:
+        return None
+    lengths = {int(series.shape[0]) for series in member_series}
+    if len(lengths) != 1:
+        if logger is not None:
+            logger.warning(
+                "Member-specific boundary table %s has inconsistent time lengths %s "
+                "for channel %s; falling back to configured boundary series for this channel.",
+                bundle["path"],
+                sorted(lengths),
+                channel.get("name"),
+            )
+        return None
+    return np.stack(member_series, axis=0)
+
+
+def _boundary_ensemble_series_from_reference_members(
+    boundary_spec: List[Dict[str, Any]],
+    run_ids: List[str],
+    fallback_boundary_series_raw: torch.Tensor,
+    *,
+    logger: logging.Logger | None = None,
+) -> Optional[torch.Tensor]:
+    """Build raw forcing ensemble for grouped rollout diagnostics.
+
+    The model may be configured to consume clean-family forcings, but the
+    grouped reference simulations are generated by member-specific perturbations
+    in sibling tables. The renderer should show those reference-member forcings
+    when available and fall back to the configured series otherwise.
+    """
+    fallback = torch.as_tensor(fallback_boundary_series_raw).detach().cpu()
+    if fallback.ndim == 2:
+        fallback = fallback.unsqueeze(0)
+    if fallback.ndim != 3 or fallback.shape[0] == 0 or fallback.shape[1] == 0:
+        return None
+
+    channels = list(boundary_spec or [])
+    if not channels:
+        return fallback.clone()
+
+    per_channel: List[np.ndarray] = []
+    for channel_idx, channel in enumerate(channels):
+        channel_series = None
+        if str(channel.get("mode", "")).strip().lower() == "clean_family":
+            channel_series = _reference_member_boundary_series_from_table(
+                channel, run_ids, logger=logger
+            )
+        if channel_series is None:
+            if channel_idx >= int(fallback.shape[2]):
+                if logger is not None:
+                    logger.warning(
+                        "Boundary spec has channel %d but fallback boundary series has shape %s; "
+                        "skipping ensemble forcing diagnostics for this hydrograph.",
+                        channel_idx,
+                        tuple(fallback.shape),
+                    )
+                return None
+            channel_series = fallback[:, :, channel_idx].numpy().astype(np.float32, copy=True)
+        if int(channel_series.shape[0]) != int(fallback.shape[0]):
+            if logger is not None:
+                logger.warning(
+                    "Boundary ensemble member count mismatch for channel %s: got %d, expected %d; "
+                    "skipping ensemble forcing diagnostics for this hydrograph.",
+                    channel.get("name"),
+                    int(channel_series.shape[0]),
+                    int(fallback.shape[0]),
+                )
+            return None
+        per_channel.append(np.asarray(channel_series, dtype=np.float32))
+
+    min_time = min(int(arr.shape[1]) for arr in per_channel)
+    if min_time <= 0:
+        return None
+    stacked = np.stack([arr[:, :min_time] for arr in per_channel], axis=-1)
+    return torch.as_tensor(stacked, dtype=torch.float32)
 
 
 def _load_or_fit_normalizers(
@@ -431,9 +626,13 @@ def _build_rollout_normalized_dataset(
         def _build_hydrograph_sample(hydro_id: str, normalized_group: List[Dict[str, Any]]):
             geometry = normalized_group[0]["geometry"]
             query_points = _build_query_points_from_geometry(geometry, config.data.query_res)
+            reference_run_ids = [g["run_id"] for g in normalized_group]
+            fallback_boundary_ensemble_raw = torch.stack(
+                [g["boundary_series_raw"] for g in normalized_group], dim=0
+            )
             sample = {
                 "hydrograph_id": hydro_id,
-                "reference_run_ids": [g["run_id"] for g in normalized_group],
+                "reference_run_ids": reference_run_ids,
                 "geometry": geometry,
                 "geometry_raw": normalized_group[0].get("geometry_raw", geometry),
                 "static": normalized_group[0]["static"],
@@ -441,6 +640,12 @@ def _build_rollout_normalized_dataset(
                 "elevation_raw": normalized_group[0].get("elevation_raw"),
                 "boundary": normalized_group[0]["boundary"],
                 "boundary_series_raw": normalized_group[0]["boundary_series_raw"],
+                "boundary_ensemble_series_raw": _boundary_ensemble_series_from_reference_members(
+                    rollout_boundary_kwargs["boundary_spec"],
+                    reference_run_ids,
+                    fallback_boundary_ensemble_raw,
+                    logger=logger,
+                ),
                 "boundary_channel_names": list(boundary_channel_names),
                 "dynamic_ref": torch.stack([g["dynamic"] for g in normalized_group], dim=0),
                 "query_points": query_points,

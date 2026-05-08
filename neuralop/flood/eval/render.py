@@ -11,6 +11,8 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import matplotlib.animation as animation
 from matplotlib import colors as mcolors
+from matplotlib.lines import Line2D
+from matplotlib.patches import Patch
 import matplotlib.patheffects as patheffects
 import matplotlib.pyplot as plt
 import matplotlib.tri as mtri
@@ -66,6 +68,9 @@ BASEMAP_CACHE_DIRNAME = "cartographic_context"
 BASEMAP_NPZ = "basemap_context.npz"
 BASEMAP_METADATA_JSON = "basemap_metadata.json"
 DEFAULT_FORECAST_HISTORY_STEPS = 3
+BOUNDARY_ENSEMBLE_TRACE_LIMIT = 60
+BOUNDARY_ENSEMBLE_LOWER_PERCENTILE = 5.0
+BOUNDARY_ENSEMBLE_UPPER_PERCENTILE = 95.0
 
 
 def _cfg_value(obj: Any, key: str, default: Any = None) -> Any:
@@ -1679,6 +1684,25 @@ def _coerce_boundary_series_raw(boundary_series_raw: Optional[Any]) -> Optional[
     return arr
 
 
+def _coerce_boundary_ensemble_series_raw(boundary_ensemble_series_raw: Optional[Any]) -> Optional[np.ndarray]:
+    if boundary_ensemble_series_raw is None:
+        return None
+    if hasattr(boundary_ensemble_series_raw, "detach"):
+        arr = boundary_ensemble_series_raw.detach().cpu().numpy()
+    else:
+        arr = np.asarray(boundary_ensemble_series_raw)
+    arr = np.asarray(arr, dtype=np.float64)
+    if arr.ndim == 4:
+        arr = arr[:, :, 0, :]
+    if arr.ndim == 2:
+        arr = arr[None, :, :]
+    if arr.ndim == 1:
+        arr = arr[None, :, None]
+    if arr.ndim != 3 or arr.shape[0] == 0 or arr.shape[1] == 0 or arr.shape[2] == 0:
+        return None
+    return arr
+
+
 def _boundary_channel_names(boundary_channel_names: Optional[List[str]], n_channels: int) -> List[str]:
     names = [str(name).strip() for name in (boundary_channel_names or [])]
     out = []
@@ -1747,6 +1771,40 @@ def _diagnostic_ylim(values: np.ndarray, *, force_zero_bottom: bool = False) -> 
     return (vmin - pad, vmax + pad)
 
 
+def _diagnostic_ylim_from_arrays(*arrays: Optional[np.ndarray], force_zero_bottom: bool = False) -> Tuple[float, float]:
+    finite_parts = []
+    for arr in arrays:
+        if arr is None:
+            continue
+        vals = np.asarray(arr, dtype=np.float64).reshape(-1)
+        vals = vals[np.isfinite(vals)]
+        if vals.size:
+            finite_parts.append(vals)
+    if not finite_parts:
+        return (0.0, 1.0)
+    return _diagnostic_ylim(np.concatenate(finite_parts), force_zero_bottom=force_zero_bottom)
+
+
+def _boundary_uncertainty_legend_handle(kind: str) -> Any:
+    """Return a legend glyph that matches the plotted forcing uncertainty geometry."""
+    if kind == "bar":
+        return Patch(
+            facecolor="#93c5fd",
+            edgecolor="none",
+            alpha=0.35,
+            label="GT forcing 5-95%",
+        )
+    return Line2D(
+        [0],
+        [0],
+        color="#93c5fd",
+        linewidth=7.0,
+        alpha=0.55,
+        solid_capstyle="butt",
+        label="GT forcing 5-95%",
+    )
+
+
 def _forecast_horizon_hours(
     n_steps: int,
     dt_seconds: float,
@@ -1766,15 +1824,29 @@ def _visible_rollout_boundary_series(series: np.ndarray, rollout_start_index: in
     return series[start:]
 
 
+def _visible_rollout_boundary_ensemble(ensemble_series: np.ndarray, rollout_start_index: int) -> np.ndarray:
+    start = max(int(rollout_start_index), 0)
+    if start >= int(ensemble_series.shape[1]):
+        return ensemble_series[:, 0:0, :]
+    return ensemble_series[:, start:, :]
+
+
 def _make_rollout_diagnostic_axes(
     fig: Any,
     gs: Any,
     *,
     boundary_series_raw: Optional[Any],
     boundary_channel_names: Optional[List[str]],
+    boundary_ensemble_series_raw: Optional[Any] = None,
 ) -> Dict[str, Any]:
     series = _coerce_boundary_series_raw(boundary_series_raw)
-    n_channels = int(series.shape[1]) if series is not None else 0
+    ensemble_series = _coerce_boundary_ensemble_series_raw(boundary_ensemble_series_raw)
+    channel_counts = []
+    if series is not None:
+        channel_counts.append(int(series.shape[1]))
+    if ensemble_series is not None:
+        channel_counts.append(int(ensemble_series.shape[2]))
+    n_channels = max(channel_counts) if channel_counts else 0
     names = _boundary_channel_names(boundary_channel_names, n_channels)
     panels = _diagnostic_boundary_panels(names, n_channels)
     boundary_axes: List[Tuple[Any, int, str]] = []
@@ -1789,6 +1861,7 @@ def _make_rollout_diagnostic_axes(
         rel_ax = fig.add_subplot(gs[2, :])
     return {
         "series": series,
+        "ensemble_series": ensemble_series,
         "names": names,
         "boundary_axes": boundary_axes,
         "relative_l2_axis": rel_ax,
@@ -1799,32 +1872,190 @@ def _draw_boundary_diagnostic_axis(
     ax: Any,
     *,
     time_hours: np.ndarray,
-    values: np.ndarray,
+    values: Optional[np.ndarray],
     name: str,
     kind: str,
     current_index: int,
+    ensemble_values: Optional[np.ndarray] = None,
 ) -> None:
     ax.clear()
-    values = np.asarray(values, dtype=np.float64)
-    current_index = int(np.clip(current_index, 0, max(values.size - 1, 0)))
+    time_hours = np.asarray(time_hours, dtype=np.float64).reshape(-1)
+    if time_hours.size == 0:
+        ax.set_axis_off()
+        return
+    values_arr = None
+    if values is not None:
+        values_arr = np.asarray(values, dtype=np.float64).reshape(-1)[: time_hours.size]
+    ensemble_arr = None
+    if ensemble_values is not None:
+        ensemble_arr = np.asarray(ensemble_values, dtype=np.float64)
+        if ensemble_arr.ndim == 1:
+            ensemble_arr = ensemble_arr[None, :]
+        if ensemble_arr.ndim != 2 or ensemble_arr.shape[0] == 0 or ensemble_arr.shape[1] == 0:
+            ensemble_arr = None
+        else:
+            ensemble_arr = ensemble_arr[:, : time_hours.size]
+            if not np.isfinite(ensemble_arr).any():
+                ensemble_arr = None
+    if values_arr is None and ensemble_arr is None:
+        ax.set_axis_off()
+        return
+
+    n_steps = min(
+        [time_hours.size]
+        + ([values_arr.size] if values_arr is not None else [])
+        + ([ensemble_arr.shape[1]] if ensemble_arr is not None else [])
+    )
+    time_hours = time_hours[:n_steps]
+    if values_arr is not None:
+        values_arr = values_arr[:n_steps]
+    if ensemble_arr is not None:
+        ensemble_arr = ensemble_arr[:, :n_steps]
+    current_index = int(np.clip(current_index, 0, max(n_steps - 1, 0)))
     label = _boundary_display_label(name)
     color = "#2563eb" if kind != "bar" else "#0f766e"
+
+    if ensemble_arr is None:
+        if values_arr is None:
+            ax.set_axis_off()
+            return
+        if kind == "bar":
+            width = 0.8 * float(np.median(np.diff(time_hours))) if time_hours.size > 1 else 0.2
+            width = max(width, 0.02)
+            ax.bar(time_hours, values_arr, width=width, color=color, alpha=0.18, linewidth=0)
+            ax.bar(time_hours[: current_index + 1], values_arr[: current_index + 1], width=width, color=color, alpha=0.85, linewidth=0)
+            force_zero = True
+        else:
+            ax.plot(time_hours, values_arr, color=color, alpha=0.24, linewidth=1.1)
+            ax.plot(time_hours[: current_index + 1], values_arr[: current_index + 1], color=color, alpha=0.95, linewidth=2.0)
+            force_zero = False
+        ax.axvline(time_hours[current_index], color="#111827", alpha=0.8, linewidth=1.1, linestyle="--")
+        ax.set_title(label, fontsize=10.5)
+        ax.set_xlabel("Forecast horizon (h)")
+        ax.set_ylabel(label)
+        ax.set_ylim(*_diagnostic_ylim(values_arr, force_zero_bottom=force_zero))
+        ax.grid(True, alpha=0.25, linewidth=0.5)
+        return
+
+    q_low, q_high = np.nanpercentile(
+        ensemble_arr,
+        [BOUNDARY_ENSEMBLE_LOWER_PERCENTILE, BOUNDARY_ENSEMBLE_UPPER_PERCENTILE],
+        axis=0,
+    )
+    ens_mean = np.nanmean(ensemble_arr, axis=0)
+    force_zero = kind == "bar"
     if kind == "bar":
         width = 0.8 * float(np.median(np.diff(time_hours))) if time_hours.size > 1 else 0.2
         width = max(width, 0.02)
-        ax.bar(time_hours, values, width=width, color=color, alpha=0.18, linewidth=0)
-        ax.bar(time_hours[: current_index + 1], values[: current_index + 1], width=width, color=color, alpha=0.85, linewidth=0)
-        force_zero = True
+        ax.fill_between(
+            time_hours,
+            q_low,
+            q_high,
+            step="mid",
+            color="#93c5fd",
+            alpha=0.28,
+            linewidth=0,
+            label="GT forcing 5-95%",
+        )
+        ax.bar(time_hours, ens_mean, width=width, color="#0f766e", alpha=0.22, linewidth=0)
+        ax.bar(
+            time_hours[: current_index + 1],
+            ens_mean[: current_index + 1],
+            width=width,
+            color="#0f766e",
+            alpha=0.82,
+            linewidth=0,
+            label="GT forcing mean",
+        )
+        if values_arr is not None:
+            ax.step(
+                time_hours,
+                values_arr,
+                where="mid",
+                color="#c2410c",
+                alpha=0.92,
+                linewidth=1.4,
+                label="Clean backbone",
+            )
     else:
-        ax.plot(time_hours, values, color=color, alpha=0.24, linewidth=1.1)
-        ax.plot(time_hours[: current_index + 1], values[: current_index + 1], color=color, alpha=0.95, linewidth=2.0)
-        force_zero = False
+        trace_count = min(int(ensemble_arr.shape[0]), BOUNDARY_ENSEMBLE_TRACE_LIMIT)
+        if trace_count > 1:
+            trace_indices = np.unique(
+                np.linspace(0, int(ensemble_arr.shape[0]) - 1, trace_count, dtype=int)
+            )
+            for idx in trace_indices:
+                ax.plot(time_hours, ensemble_arr[idx], color="#60a5fa", alpha=0.13, linewidth=0.75)
+        ax.fill_between(
+            time_hours,
+            q_low,
+            q_high,
+            color="#93c5fd",
+            alpha=0.26,
+            linewidth=0,
+            label="GT forcing 5-95%",
+        )
+        ax.plot(time_hours, ens_mean, color="#0f172a", alpha=0.38, linewidth=1.25)
+        ax.plot(
+            time_hours[: current_index + 1],
+            ens_mean[: current_index + 1],
+            color="#0f172a",
+            alpha=0.98,
+            linewidth=2.1,
+            label="GT forcing mean",
+        )
+        if values_arr is not None:
+            ax.plot(time_hours, values_arr, color="#c2410c", alpha=0.62, linewidth=1.15)
+            ax.plot(
+                time_hours[: current_index + 1],
+                values_arr[: current_index + 1],
+                color="#c2410c",
+                alpha=0.95,
+                linewidth=1.8,
+                label="Clean backbone",
+            )
+
     ax.axvline(time_hours[current_index], color="#111827", alpha=0.8, linewidth=1.1, linestyle="--")
     ax.set_title(label, fontsize=10.5)
     ax.set_xlabel("Forecast horizon (h)")
     ax.set_ylabel(label)
-    ax.set_ylim(*_diagnostic_ylim(values, force_zero_bottom=force_zero))
+    ax.set_ylim(
+        *_diagnostic_ylim_from_arrays(
+            ensemble_arr,
+            values_arr,
+            q_low,
+            q_high,
+            ens_mean,
+            force_zero_bottom=force_zero,
+        )
+    )
     ax.grid(True, alpha=0.25, linewidth=0.5)
+    legend_handles: List[Any] = [_boundary_uncertainty_legend_handle(kind)]
+    if kind == "bar":
+        legend_handles.append(
+            Patch(
+                facecolor="#0f766e",
+                edgecolor="#0f766e",
+                linewidth=0.6,
+                alpha=0.82,
+                label="GT forcing mean",
+            )
+        )
+    else:
+        legend_handles.append(
+            Line2D([0], [0], color="#0f172a", linewidth=2.1, label="GT forcing mean")
+        )
+    if values_arr is not None:
+        legend_handles.append(
+            Line2D([0], [0], color="#c2410c", linewidth=1.8, label="Clean backbone")
+        )
+    ax.legend(
+        legend_handles,
+        [handle.get_label() for handle in legend_handles],
+        loc="best",
+        fontsize=6.4,
+        framealpha=0.82,
+        borderpad=0.35,
+    )
 
 
 def _draw_relative_l2_axis(
@@ -1867,26 +2098,56 @@ def _draw_rollout_diagnostics(
     relative_l2: Optional[np.ndarray],
     rollout_start_index: int,
     initial_history_steps: int = DEFAULT_FORECAST_HISTORY_STEPS,
+    boundary_ensemble_series_raw: Optional[Any] = None,
 ) -> None:
     series = diag_axes.get("series")
     if series is None:
         series = _coerce_boundary_series_raw(boundary_series_raw)
+    ensemble_series = diag_axes.get("ensemble_series")
+    if ensemble_series is None:
+        ensemble_series = _coerce_boundary_ensemble_series_raw(boundary_ensemble_series_raw)
+
+    channel_counts = []
     if series is not None:
-        names = diag_axes.get("names") or _boundary_channel_names(boundary_channel_names, series.shape[1])
-        visible_series = _visible_rollout_boundary_series(series, rollout_start_index)
-        if visible_series.shape[0] > 0:
+        channel_counts.append(int(series.shape[1]))
+    if ensemble_series is not None:
+        channel_counts.append(int(ensemble_series.shape[2]))
+    n_channels = max(channel_counts) if channel_counts else 0
+
+    if n_channels > 0:
+        names = diag_axes.get("names") or _boundary_channel_names(boundary_channel_names, n_channels)
+        visible_series = _visible_rollout_boundary_series(series, rollout_start_index) if series is not None else None
+        visible_ensemble = (
+            _visible_rollout_boundary_ensemble(ensemble_series, rollout_start_index)
+            if ensemble_series is not None
+            else None
+        )
+        visible_lengths = []
+        if visible_series is not None and visible_series.shape[0] > 0:
+            visible_lengths.append(int(visible_series.shape[0]))
+        if visible_ensemble is not None and visible_ensemble.shape[1] > 0:
+            visible_lengths.append(int(visible_ensemble.shape[1]))
+        if visible_lengths:
+            n_visible = min(visible_lengths)
             time_hours = _forecast_horizon_hours(
-                visible_series.shape[0],
+                n_visible,
                 dt_seconds,
                 initial_history_steps=initial_history_steps,
             )
-            current_rel = int(np.clip(frame_idx, 0, visible_series.shape[0] - 1))
+            current_rel = int(np.clip(frame_idx, 0, n_visible - 1))
             for ax, channel_idx, kind in diag_axes.get("boundary_axes", []):
+                values = None
+                if visible_series is not None and channel_idx < int(visible_series.shape[1]):
+                    values = visible_series[:n_visible, channel_idx]
+                ensemble_values = None
+                if visible_ensemble is not None and channel_idx < int(visible_ensemble.shape[2]):
+                    ensemble_values = visible_ensemble[:, :n_visible, channel_idx]
                 _draw_boundary_diagnostic_axis(
                     ax,
                     time_hours=time_hours,
-                    values=visible_series[:, channel_idx],
-                    name=names[channel_idx],
+                    values=values,
+                    ensemble_values=ensemble_values,
+                    name=names[channel_idx] if channel_idx < len(names) else f"boundary_{channel_idx}",
                     kind=kind,
                     current_index=current_rel,
                 )
@@ -1919,6 +2180,7 @@ def _save_hydrograph_uq_figures_and_animation(
     gt_prob_wd: Optional[np.ndarray] = None,
     crps_map_wd: Optional[np.ndarray] = None,
     boundary_series_raw: Optional[Any] = None,
+    boundary_ensemble_series_raw: Optional[Any] = None,
     boundary_channel_names: Optional[List[str]] = None,
     relative_l2_by_channel: Optional[Dict[str, np.ndarray]] = None,
     rollout_start_index: int = 0,
@@ -2105,6 +2367,7 @@ def _save_hydrograph_uq_figures_and_animation(
             fig,
             gs,
             boundary_series_raw=boundary_series_raw,
+            boundary_ensemble_series_raw=boundary_ensemble_series_raw,
             boundary_channel_names=boundary_channel_names,
         )
 
@@ -2206,6 +2469,7 @@ def _save_hydrograph_uq_figures_and_animation(
             frame_idx=0,
             dt_seconds=dt_seconds,
             boundary_series_raw=boundary_series_raw,
+            boundary_ensemble_series_raw=boundary_ensemble_series_raw,
             boundary_channel_names=boundary_channel_names,
             relative_l2=wd_relative_l2,
             rollout_start_index=rollout_start_index,

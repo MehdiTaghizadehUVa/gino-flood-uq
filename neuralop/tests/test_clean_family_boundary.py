@@ -214,6 +214,43 @@ def test_clean_family_rollout_boundary_is_shared_within_family(tmp_path: Path):
     assert torch.allclose(sample_a["boundary"], expected)
 
 
+def test_clean_family_diagnostics_load_member_specific_sibling_forcings(tmp_path: Path):
+    from neuralop.flood.eval.datasets import _boundary_ensemble_series_from_reference_members
+
+    meta_root = tmp_path / "metadata_member_forcing"
+    meta_root.mkdir()
+    _write_clean_boundary_table(
+        meta_root / "Stage_Hydrographs_Test_Clean.txt",
+        {"TE000001": np.array([10.0, 11.0, 12.0], dtype=np.float32)},
+    )
+    _write_clean_boundary_table(
+        meta_root / "Stage_Hydrographs_Test.txt",
+        {
+            "TE000001_sim00": np.array([1.0, 2.0, 3.0], dtype=np.float32),
+            "TE000001_sim01": np.array([4.0, 5.0, 6.0], dtype=np.float32),
+        },
+    )
+    fallback = torch.zeros((2, 3, 1), dtype=torch.float32)
+
+    ensemble = _boundary_ensemble_series_from_reference_members(
+        [
+            {
+                "name": "stage",
+                "mode": "clean_family",
+                "clean_boundary_root": str(meta_root),
+                "clean_boundary_file": "Stage_Hydrographs_Test_Clean.txt",
+            }
+        ],
+        ["Flood_coastal_TE000001_sim00", "Flood_coastal_TE000001_sim01"],
+        fallback,
+    )
+
+    assert ensemble is not None
+    assert ensemble.shape == (2, 3, 1)
+    expected = torch.tensor([[[1.0], [2.0], [3.0]], [[4.0], [5.0], [6.0]]])
+    assert torch.allclose(ensemble, expected)
+
+
 def test_clean_family_prefixed_run_id_resolves_to_clean_event_id(tmp_path: Path):
     data_root = tmp_path / "data_prefixed"
     meta_root = tmp_path / "metadata_prefixed"

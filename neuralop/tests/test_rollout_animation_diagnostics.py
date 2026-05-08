@@ -96,6 +96,74 @@ def test_boundary_diagnostics_drop_skipped_spinup_steps():
         render.plt.close(fig)
 
 
+def test_boundary_diagnostics_plot_reference_forcing_ensemble():
+    fig = render.plt.figure()
+    try:
+        gs = fig.add_gridspec(3, 3)
+        backbone = np.array(
+            [
+                [1.0, 0.0],
+                [1.1, 0.2],
+                [1.2, 0.4],
+                [1.3, 0.1],
+                [1.1, 0.0],
+            ],
+            dtype=np.float64,
+        )
+        ensemble = np.array(
+            [
+                [[1.0, 0.0], [1.2, 0.1], [1.4, 0.4], [1.5, 0.2], [1.2, 0.0]],
+                [[1.0, 0.0], [1.0, 0.3], [1.1, 0.6], [1.2, 0.1], [1.0, 0.0]],
+                [[1.0, 0.0], [1.3, 0.2], [1.5, 0.5], [1.4, 0.3], [1.2, 0.0]],
+            ],
+            dtype=np.float64,
+        )
+        diag_axes = render._make_rollout_diagnostic_axes(
+            fig,
+            gs,
+            boundary_series_raw=backbone,
+            boundary_ensemble_series_raw=ensemble,
+            boundary_channel_names=["stage", "precipitation"],
+        )
+        assert diag_axes["ensemble_series"].shape == (3, 5, 2)
+        render._draw_rollout_diagnostics(
+            diag_axes=diag_axes,
+            frame_idx=1,
+            dt_seconds=1200.0,
+            boundary_series_raw=backbone,
+            boundary_ensemble_series_raw=ensemble,
+            boundary_channel_names=["stage", "precipitation"],
+            relative_l2=np.array([0.1, 0.2, 0.3]),
+            rollout_start_index=2,
+            initial_history_steps=3,
+        )
+        stage_ax = diag_axes["boundary_axes"][0][0]
+        precip_ax = diag_axes["boundary_axes"][1][0]
+        assert any(line.get_label() == "GT forcing mean" for line in stage_ax.lines)
+        assert any(line.get_label() == "Clean backbone" for line in stage_ax.lines)
+        assert len(stage_ax.collections) >= 1
+        assert len(precip_ax.patches) > 0
+        stage_legend = stage_ax.get_legend()
+        assert stage_legend is not None
+        assert [text.get_text() for text in stage_legend.get_texts()] == [
+            "GT forcing 5-95%",
+            "GT forcing mean",
+            "Clean backbone",
+        ]
+        legend_handles = getattr(stage_legend, "legend_handles", None)
+        if legend_handles is None:
+            legend_handles = stage_legend.legendHandles
+        assert legend_handles[0].get_linewidth() >= 6.0
+        precip_legend = precip_ax.get_legend()
+        assert precip_legend is not None
+        precip_handles = getattr(precip_legend, "legend_handles", None)
+        if precip_handles is None:
+            precip_handles = precip_legend.legendHandles
+        assert precip_handles[0].get_facecolor()[-1] >= 0.30
+    finally:
+        render.plt.close(fig)
+
+
 def test_visualization_map_mode_defaults_to_local_dem_elevation():
     opts = render._visualization_options({"map": {"enabled": True}})
     assert opts["mode"] == "dem_elevation"

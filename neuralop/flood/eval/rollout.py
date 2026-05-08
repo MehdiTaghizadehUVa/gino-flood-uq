@@ -959,6 +959,7 @@ def _rollout_prediction_per_hydrograph(
             gt_prob_wd=gt_prob_wd,
             crps_map_wd=crps_map_wd,
             boundary_series_raw=sample.get("boundary_series_raw"),
+            boundary_ensemble_series_raw=sample.get("boundary_ensemble_series_raw"),
             boundary_channel_names=sample.get("boundary_channel_names"),
             relative_l2_by_channel=relative_l2_by_channel,
             rollout_start_index=start_pred_t,
