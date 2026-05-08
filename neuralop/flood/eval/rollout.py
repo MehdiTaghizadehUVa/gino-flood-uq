@@ -926,6 +926,7 @@ def _rollout_prediction_per_hydrograph(
                 structural_dry_mask=dry_art,
                 boundary_series_raw=sample.get("boundary_series_raw"),
                 boundary_channel_names=sample.get("boundary_channel_names"),
+                geometry_raw=sample.get("geometry_raw", sample.get("geometry")),
                 member_model_id=[member_model_indices[i] for i in range(n_ens)],
                 member_sample_id=list(range(n_ens)),
                 time_hours=(np.arange(1, pred_art.shape[1] + 1, dtype=np.float64) * float(dt) / 3600.0),

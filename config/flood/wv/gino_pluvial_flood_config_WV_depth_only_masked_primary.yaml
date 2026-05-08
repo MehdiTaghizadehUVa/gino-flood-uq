@@ -58,18 +58,10 @@ flood: &FLOOD
       - "M40_FA.txt"
 
   rollout_calibration:
-    enabled: true
-    root: "C:/Users/jrj6wm/Desktop/Data_Generation_UQ/Results/M40"
-    boundary_source: "clean_family"
-    clean_boundary_root: "../metadata"
-    clean_boundary_file: "Hydrographs_Val_Clean.txt"
-    calib_txt: "calib.txt"
-    fit_wet_threshold: 0.01
-    min_pred_std: 1.0e-4
-    c_clip_min: 0.25
-    c_clip_max: 4.0
-    smooth_window: 5
-    allow_same_split: false
+    enabled: false
+    # Scientific calibration is available only through the calibrated evaluator
+    # with rollout_calibration.method: crps_member_by_member and nested
+    # reference/forecast_artifacts/bins/optimizer/exceedance blocks.
 
   structural_dry:
     policy: "masked_primary"

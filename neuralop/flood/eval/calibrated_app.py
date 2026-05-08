@@ -17,6 +17,7 @@ from neuralop.flood.eval.scientific_calibration import (
     compute_artifact_uq_metrics,
     fit_crps_member_by_member_from_artifacts,
     fit_exceedance_isotonic_from_artifacts,
+    save_fit_diagnostics,
     list_forecast_artifacts,
     load_forecast_artifact,
     save_crps_mbm_coefficients,
@@ -349,6 +350,7 @@ def main() -> int:
         heldout_test_root = _expand_run_path(_nested_get(reference_cfg, "test_root"))
         heldout_test_txt = str(_nested_get(reference_cfg, "test_txt"))
         min_ref_members = int(_nested_get(reference_cfg, "min_reference_members_per_family", default=100))
+        regenerate_calibrated_visuals = bool(_nested_get(calibration_cfg, "regenerate_calibrated_visuals", default=False))
         artifact_root = _expand_run_path(
             _nested_get(artifact_cfg, "root", default=None),
             default=str(Path(config.rollout.out_dir) / "forecast_artifacts"),
@@ -469,13 +471,21 @@ def main() -> int:
                 calib_artifacts,
                 bins=bins,
                 max_fit_points_per_bin=int(_nested_get(optimizer_cfg, "max_fit_points_per_bin", default=1000000)),
-                min_fit_points_per_bin=int(_nested_get(optimizer_cfg, "min_fit_points_per_bin", default=32)),
+                min_fit_points_per_bin=int(_nested_get(optimizer_cfg, "min_fit_points_per_bin", default=1000)),
                 seed=int(_nested_get(optimizer_cfg, "seed", default=123)),
                 bounds=bounds,
+                objective=str(_nested_get(optimizer_cfg, "objective", default="empirical_crps")),
+                tail_threshold_m=float(_nested_get(optimizer_cfg, "tail_threshold_m", default=0.30)),
+                tail_weight=float(_nested_get(optimizer_cfg, "tail_weight", default=4.0)),
+                multistart=bool(_nested_get(optimizer_cfg, "multistart", default=True)),
             )
         calibration_dir = Path(config.rollout.out_dir) / "calibration"
         coeff_path = save_crps_mbm_coefficients(calibration_model, calibration_dir)
+        diag_path = save_fit_diagnostics(calibration_model, calibration_dir)
         logger.info("Saved CRPS MBM coefficients to %s", coeff_path)
+        logger.info("Saved CRPS MBM fit diagnostics to %s", diag_path)
+        for warning in calibration_model.get("diagnostics", {}).get("warnings", []):
+            logger.warning("Calibration fit diagnostic warning: %s", warning)
 
         thresholds_m = _nested_get(exceedance_cfg, "thresholds_m", default=[0.01, 0.05, 0.10, 0.30, 0.50])
         if str(_nested_get(exceedance_cfg, "method", default="isotonic")).strip().lower() == "isotonic":
@@ -536,42 +546,48 @@ def main() -> int:
                     f"required >= {min_ref_members}."
                 )
 
-        with _PhaseTimer(logger, "Rollout evaluation + plotting (CRPS-MBM calibrated held-out test)"):
-            _rollout_prediction_per_hydrograph(
-                models=models,
-                hydrograph_samples=hydrograph_samples_test,
-                rollout_length=config.data.rollout_length,
-                history_steps=config.data.n_history,
-                dynamic_norm=normalizers["dynamic"],
-                target_norm=normalizers["target"],
-                device=device,
-                skip_before_timestep=_opt(config, "data", "skip_before_timestep", 0),
-                dt=config.data.dt,
-                out_dir=calibrated_out_dir,
-                target_variables=target_variables,
-                logger=logger,
-                fgn_noise_dim=_opt(config, "gino", "fgn_noise_dim", 32) if use_fgn else None,
-                n_ensemble_samples=rollout_n_ensemble,
-                fgn_latent_temporal_mode=fgn_latent_temporal_mode,
-                fgn_ar_state_update=fgn_ar_state_update,
-                gaussian_mode=gaussian_mode,
-                gaussian_min_logvar=_opt_float(config, "opt", "gaussian_min_logvar", -9.0),
-                gaussian_max_logvar=_opt_float(config, "opt", "gaussian_max_logvar", 4.0),
-                gaussian_state_update=gaussian_state_update,
-                rollout_init_mode=rollout_init_mode,
-                visualization_config=_opt(config, None, "visualization", None),
-                impact_metrics_config=_opt(config, "rollout", "impact_metrics", None),
-                calibration_model=calibration_model,
-                calibration_metadata={
-                    "artifact_role": "heldout_test_calibrated",
-                    "coefficient_path": str(coeff_path),
-                },
-            )
+        if regenerate_calibrated_visuals:
+            with _PhaseTimer(logger, "Rollout evaluation + plotting (CRPS-MBM calibrated held-out test)"):
+                _rollout_prediction_per_hydrograph(
+                    models=models,
+                    hydrograph_samples=hydrograph_samples_test,
+                    rollout_length=config.data.rollout_length,
+                    history_steps=config.data.n_history,
+                    dynamic_norm=normalizers["dynamic"],
+                    target_norm=normalizers["target"],
+                    device=device,
+                    skip_before_timestep=_opt(config, "data", "skip_before_timestep", 0),
+                    dt=config.data.dt,
+                    out_dir=calibrated_out_dir,
+                    target_variables=target_variables,
+                    logger=logger,
+                    fgn_noise_dim=_opt(config, "gino", "fgn_noise_dim", 32) if use_fgn else None,
+                    n_ensemble_samples=rollout_n_ensemble,
+                    fgn_latent_temporal_mode=fgn_latent_temporal_mode,
+                    fgn_ar_state_update=fgn_ar_state_update,
+                    gaussian_mode=gaussian_mode,
+                    gaussian_min_logvar=_opt_float(config, "opt", "gaussian_min_logvar", -9.0),
+                    gaussian_max_logvar=_opt_float(config, "opt", "gaussian_max_logvar", 4.0),
+                    gaussian_state_update=gaussian_state_update,
+                    rollout_init_mode=rollout_init_mode,
+                    visualization_config=_opt(config, None, "visualization", None),
+                    impact_metrics_config=_opt(config, "rollout", "impact_metrics", None),
+                    calibration_model=calibration_model,
+                    calibration_metadata={
+                        "artifact_role": "heldout_test_calibrated",
+                        "coefficient_path": str(coeff_path),
+                    },
+                )
+        else:
+            logger.info("Skipping calibrated rollout regeneration; calibrated metrics will be computed from held-out test artifacts.")
 
+        apply_isotonic = bool(_nested_get(exceedance_cfg, "apply_isotonic", default=True))
         raw_artifact_metrics = compute_artifact_uq_metrics(test_artifacts, thresholds_m=thresholds_m)
         calibrated_artifact_metrics = compute_artifact_uq_metrics(
             test_artifacts,
             calibration_model=calibration_model,
+            isotonic_model=exceedance_model if "exceedance_model" in locals() else None,
+            apply_isotonic=apply_isotonic,
             thresholds_m=thresholds_m,
         )
         save_metrics_json(raw_artifact_metrics, calibration_dir / "artifact_raw_uq_overall_metrics.json")
@@ -579,7 +595,7 @@ def main() -> int:
 
         raw_metrics_path = Path(raw_out_dir) / UQ_OVERALL_JSON
         calibrated_metrics_path = Path(calibrated_out_dir) / UQ_OVERALL_JSON
-        if raw_metrics_path.exists() and calibrated_metrics_path.exists():
+        if regenerate_calibrated_visuals and raw_metrics_path.exists() and calibrated_metrics_path.exists():
             comparison = build_calibration_comparison(
                 _load_json(raw_metrics_path),
                 _load_json(calibrated_metrics_path),

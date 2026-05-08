@@ -5,11 +5,15 @@ import pytest
 
 from neuralop.flood.eval.scientific_calibration import (
     CalibrationBins,
+    apply_isotonic_exceedance_probability,
+    build_fit_diagnostics,
+    compute_artifact_uq_metrics,
     apply_crps_mbm_to_wd_members,
     apply_member_by_member_transform,
     build_calibration_comparison,
     empirical_crps_mean,
     fit_crps_member_by_member_from_artifacts,
+    weighted_empirical_crps_mean,
     isotonic_predict,
     pava_isotonic_fit,
     save_forecast_artifact,
@@ -61,6 +65,7 @@ def test_optimizer_improves_synthetic_crps_transform():
     assert fit["beta"] == pytest.approx(1.15, abs=0.05)
     assert fit["gamma"] == pytest.approx(0.65, abs=0.05)
     assert fit["n_points"] == 80
+    assert "L-BFGS-B" not in fit["optimizer_methods"]
 
 
 def test_apply_crps_mbm_zeroes_structural_dry_cells():
@@ -152,3 +157,128 @@ def test_artifact_fit_path_smoke(tmp_path):
     )
     assert model["coefficients"].shape == (2, 3, 3)
     assert model["wet_frequency_by_cell"].shape == (6,)
+
+
+
+def test_lead_bins_must_start_at_zero():
+    bins = CalibrationBins(
+        lead_time_hours=(1.0, 2.0, np.inf),
+        wet_frequency_edges=(0.0, 1.0),
+        wet_threshold_m=0.01,
+    )
+    with pytest.raises(ValueError, match="start at 0.0"):
+        bins.validate()
+
+
+def test_low_sample_bins_record_fallback_diagnostics(tmp_path):
+    h5py = pytest.importorskip("h5py")
+    del h5py
+    pred = np.full((3, 1, 4), 0.2, dtype=np.float64)
+    ref = np.full((3, 1, 4), 0.25, dtype=np.float64)
+    art = save_forecast_artifact(
+        tmp_path / "TE000010.calibration_artifact.h5",
+        hydrograph_id="TE000010",
+        pred_members_wd=pred,
+        ref_members_wd=ref,
+        wettable_mask=np.ones(4, dtype=bool),
+        time_hours=[1.0],
+    )
+    bins = CalibrationBins((0.0, 2.0, np.inf), (0.0, 0.5, 1.0), 0.01)
+    model = fit_crps_member_by_member_from_artifacts(
+        [art], bins=bins, min_fit_points_per_bin=1000, max_fit_points_per_bin=10, seed=9
+    )
+    diagnostics = build_fit_diagnostics(model)
+    assert diagnostics["fallback_counts"]["global"] >= 1
+    assert diagnostics["warnings"]
+
+
+def test_mixed_member_counts_raise_clear_error(tmp_path):
+    h5py = pytest.importorskip("h5py")
+    del h5py
+    a = save_forecast_artifact(
+        tmp_path / "A.calibration_artifact.h5",
+        hydrograph_id="A",
+        pred_members_wd=np.zeros((3, 1, 2)),
+        ref_members_wd=np.zeros((4, 1, 2)),
+        time_hours=[1.0],
+    )
+    b = save_forecast_artifact(
+        tmp_path / "B.calibration_artifact.h5",
+        hydrograph_id="B",
+        pred_members_wd=np.zeros((2, 1, 2)),
+        ref_members_wd=np.zeros((4, 1, 2)),
+        time_hours=[1.0],
+    )
+    bins = CalibrationBins((0.0, np.inf), (0.0, 1.0), 0.01)
+    with pytest.raises(ValueError, match="uniform member/time/cell"):
+        fit_crps_member_by_member_from_artifacts([a, b], bins=bins)
+
+
+def test_geometry_hash_mismatch_raises_before_fit(tmp_path):
+    h5py = pytest.importorskip("h5py")
+    del h5py
+    kwargs = dict(
+        pred_members_wd=np.zeros((2, 1, 2)),
+        ref_members_wd=np.zeros((2, 1, 2)),
+        time_hours=[1.0],
+    )
+    a = save_forecast_artifact(
+        tmp_path / "A.calibration_artifact.h5",
+        hydrograph_id="A",
+        geometry_raw=np.array([[0.0, 0.0], [1.0, 0.0]]),
+        **kwargs,
+    )
+    b = save_forecast_artifact(
+        tmp_path / "B.calibration_artifact.h5",
+        hydrograph_id="B",
+        geometry_raw=np.array([[0.0, 0.0], [2.0, 0.0]]),
+        **kwargs,
+    )
+    bins = CalibrationBins((0.0, np.inf), (0.0, 1.0), 0.01)
+    with pytest.raises(ValueError, match="hash mismatch"):
+        fit_crps_member_by_member_from_artifacts([a, b], bins=bins)
+
+
+def test_isotonic_probability_calibration_is_applied_to_artifact_brier(tmp_path):
+    h5py = pytest.importorskip("h5py")
+    del h5py
+    art = save_forecast_artifact(
+        tmp_path / "TE000011.calibration_artifact.h5",
+        hydrograph_id="TE000011",
+        pred_members_wd=np.array([[[0.0]], [[0.2]]]),
+        ref_members_wd=np.array([[[0.2]], [[0.3]]]),
+        wettable_mask=np.array([True]),
+        time_hours=[1.0],
+    )
+    calibration_model = {
+        "coefficients": np.array([[[0.0, 1.0, 1.0]]]),
+        "lead_time_hours": np.array([0.0, np.inf]),
+        "wet_frequency_edges": np.array([0.0, 1.0]),
+        "wet_threshold_m": 0.01,
+        "wet_frequency_by_cell": np.array([1.0]),
+    }
+    isotonic_model = {
+        "lead_time_hours": [0.0, np.inf],
+        "wet_frequency_edges": [0.0, 1.0],
+        "curves": {"0.1": {"lead_0_wet_0": {"x": [1.0], "y": [1.0], "n": 1}}},
+    }
+    raw = compute_artifact_uq_metrics([art], thresholds_m=[0.1])
+    cal = compute_artifact_uq_metrics(
+        [art], calibration_model=calibration_model, isotonic_model=isotonic_model, apply_isotonic=True, thresholds_m=[0.1]
+    )
+    assert cal["brier_isotonic_wd_exceed_0p10m_overall_mean"] < raw["brier_wd_exceed_0p10m_overall_mean"]
+
+
+def test_tail_weighted_objective_changes_fit_on_tail_heavy_fixture():
+    rng = np.random.default_rng(42)
+    pred = rng.uniform(0.0, 0.2, size=(5, 40))
+    pred[:, -8:] += rng.uniform(0.5, 1.0, size=(5, 8))
+    ref = pred.copy()
+    ref[:, -8:] *= 1.8
+    bounds = {"a_m": [-0.5, 0.5], "beta": [0.5, 2.5], "gamma": [0.2, 2.0]}
+    empirical = _fit_one_bin(pred, ref, bounds=bounds, objective="empirical_crps", seed=1)
+    tail = _fit_one_bin(pred, ref, bounds=bounds, objective="tail_weighted_crps", tail_threshold_m=0.5, tail_weight=10.0, seed=1)
+    empirical_vec = np.array([empirical["a_m"], empirical["beta"], empirical["gamma"]])
+    tail_vec = np.array([tail["a_m"], tail["beta"], tail["gamma"]])
+    assert np.linalg.norm(empirical_vec - tail_vec) > 1e-4
+    assert weighted_empirical_crps_mean(pred, ref, threshold_m=0.5, tail_weight=10.0) != pytest.approx(empirical_crps_mean(pred, ref))
