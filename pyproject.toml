@@ -12,6 +12,7 @@ dependencies = [
     "tensorly-torch",
     "torch-harmonics==0.7.4",
     "matplotlib",
+    "pillow",
     "numpy>=1.25",
     "opt-einsum",
     "h5py",
@@ -46,8 +47,23 @@ neuralop-flood-train-diffusion = "neuralop.flood.cli.train_diffusion:main"
 neuralop-flood-eval-operator = "neuralop.flood.eval.common:main"
 neuralop-flood-eval-operator-calibrated = "neuralop.flood.eval.calibrated:main"
 neuralop-flood-eval-diffusion = "neuralop.flood.eval.diffusion:main"
+neuralop-flood-serving-validate-bundle = "neuralop.flood.serving.cli:validate_bundle_main"
+neuralop-flood-serving-worker-preload = "neuralop.flood.serving.worker:main"
+neuralop-flood-serving-build-bundle = "neuralop.flood.serving.bundle_builder:main"
+neuralop-flood-serving-smoke = "neuralop.flood.serving.smoke:main"
+neuralop-flood-serving-cleanup = "neuralop.flood.serving.cleanup:main"
 
 [project.optional-dependencies]
+serve = [
+    "fastapi",
+    "uvicorn[standard]",
+    "python-multipart",
+    "celery",
+    "redis",
+    "sqlalchemy",
+    "psycopg[binary]",
+    "authlib",
+]
 dev = [
     "pytest",
     "flaky",

@@ -1,0 +1,24 @@
+{$FGN_SITE_HOSTNAME} {
+  tls internal
+  encode gzip
+
+  handle_path /oauth2/* {
+    reverse_proxy oauth2-proxy:4180
+  }
+
+  route /api/* {
+    forward_auth oauth2-proxy:4180 {
+      uri /oauth2/auth
+      copy_headers X-Auth-Request-Email X-Auth-Request-User
+    }
+    reverse_proxy api:8000
+  }
+
+  route {
+    forward_auth oauth2-proxy:4180 {
+      uri /oauth2/auth
+      copy_headers X-Auth-Request-Email X-Auth-Request-User
+    }
+    reverse_proxy frontend:3000
+  }
+}

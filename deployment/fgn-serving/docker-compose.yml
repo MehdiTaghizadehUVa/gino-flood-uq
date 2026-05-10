@@ -1,0 +1,162 @@
+services:
+  api:
+    build:
+      context: ../..
+      dockerfile: deployment/fgn-serving/python.Dockerfile
+    command: uvicorn neuralop.flood.serving.api_app:app --host 0.0.0.0 --port 8000
+    env_file: .env
+    volumes:
+      - ${FGN_DATA_ROOT:?set FGN_DATA_ROOT}/model_bundle:/model_bundle:ro
+      - ${FGN_DATA_ROOT:?set FGN_DATA_ROOT}/artifacts:/artifacts
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "python -c 'import urllib.request; r=urllib.request.urlopen(\"http://127.0.0.1:8000/api/health\", timeout=3); import sys; sys.exit(0 if r.status == 200 else 1)'"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  worker-gpu:
+    build:
+      context: ../..
+      dockerfile: deployment/fgn-serving/python.Dockerfile
+    command: celery -A neuralop.flood.serving.celery_app worker --loglevel=INFO --concurrency=1
+    env_file: .env
+    volumes:
+      - ${FGN_DATA_ROOT:?set FGN_DATA_ROOT}/model_bundle:/model_bundle:ro
+      - ${FGN_DATA_ROOT:?set FGN_DATA_ROOT}/artifacts:/artifacts
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "celery -A neuralop.flood.serving.celery_app inspect ping --timeout=5 -d celery@$$HOSTNAME 2>&1 | grep -q pong"]
+      interval: 60s
+      timeout: 15s
+      retries: 3
+      start_period: 120s
+
+  frontend:
+    build:
+      context: ../../apps/fgn-serving-frontend
+    env_file: .env
+    depends_on:
+      - api
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1:3000/ >/dev/null 2>&1 || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  oauth2-proxy:
+    image: quay.io/oauth2-proxy/oauth2-proxy:v7.6.0
+    env_file: .env
+    command:
+      - --provider=google
+      - --http-address=0.0.0.0:4180
+      - --reverse-proxy=true
+      - --set-xauthrequest=true
+      - --email-domain=*
+      - --client-id=${GOOGLE_CLIENT_ID:?set GOOGLE_CLIENT_ID}
+      - --client-secret=${GOOGLE_CLIENT_SECRET:?set GOOGLE_CLIENT_SECRET}
+      - --cookie-secret=${OAUTH2_PROXY_COOKIE_SECRET:?set OAUTH2_PROXY_COOKIE_SECRET}
+      - --cookie-secure=true
+      - --upstream=static://200
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1:4180/ping >/dev/null 2>&1 || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  cleanup-backup:
+    build:
+      context: ../..
+      dockerfile: deployment/fgn-serving/python.Dockerfile
+    command: sh -c 'while true; do python -m neuralop.flood.serving.cleanup; sleep 86400; done'
+    env_file: .env
+    volumes:
+      - ${FGN_DATA_ROOT:?set FGN_DATA_ROOT}/model_bundle:/model_bundle:ro
+      - ${FGN_DATA_ROOT:?set FGN_DATA_ROOT}/artifacts:/artifacts
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  postgres-backup:
+    image: postgres:16-alpine
+    env_file: .env
+    volumes:
+      - ${FGN_DATA_ROOT:?set FGN_DATA_ROOT}/backups:/backups
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -e
+        mkdir -p /backups/postgres
+        while true; do
+          STAMP=$$(date -u +%Y%m%dT%H%M%SZ)
+          OUT=/backups/postgres/fgn_serving_$${STAMP}.sql.gz
+          echo "[postgres-backup] writing $$OUT"
+          PGPASSWORD="$$POSTGRES_PASSWORD" pg_dump -h postgres -U fgn_serving -d fgn_serving | gzip -9 > "$$OUT.tmp" && mv "$$OUT.tmp" "$$OUT"
+          # Retain only the most recent 14 daily dumps.
+          ls -1tr /backups/postgres/fgn_serving_*.sql.gz 2>/dev/null | head -n -14 | xargs -r rm -f
+          sleep 86400
+        done
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: fgn_serving
+      POSTGRES_USER: fgn_serving
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+    volumes:
+      - ${FGN_DATA_ROOT:?set FGN_DATA_ROOT}/postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U fgn_serving -d fgn_serving"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  proxy:
+    image: caddy:2-alpine
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+    depends_on:
+      api:
+        condition: service_healthy
+      frontend:
+        condition: service_healthy
+      oauth2-proxy:
+        condition: service_healthy
+
+volumes:
+  caddy-data:

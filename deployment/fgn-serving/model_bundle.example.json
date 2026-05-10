@@ -1,0 +1,36 @@
+{
+  "bundle_id": "coastal-fgn-60-v1",
+  "domain_name": "Portsmouth coastal flood domain",
+  "git_commit": "REPLACE_WITH_TRAINING_COMMIT",
+  "checkpoint_dirs": [
+    "/model_bundle/checkpoints/coastal_fgn_ens0",
+    "/model_bundle/checkpoints/coastal_fgn_ens1",
+    "/model_bundle/checkpoints/coastal_fgn_ens2"
+  ],
+  "checkpoint_alias": "best_model",
+  "normalizer_path": "/model_bundle/artifacts/normalizers_depth_only.pt",
+  "geometry_path": "/model_bundle/domain/geometry.npy",
+  "static_tensor_path": "/model_bundle/domain/static.npy",
+  "structural_dry_mask_path": "/model_bundle/domain/structural_dry_mask.npy",
+  "static_files": [
+    "/model_bundle/domain/Coastal_Slope.txt",
+    "/model_bundle/domain/Coastal_Aspect.txt",
+    "/model_bundle/domain/Coastal_FlowDirection.txt",
+    "/model_bundle/domain/Coastal_Curvature.txt",
+    "/model_bundle/domain/Coastal_FlowAccumulation.txt"
+  ],
+  "calibration_coefficients_path": "/model_bundle/calibration/crps_mbm_coefficients.json",
+  "isotonic_curves_path": "/model_bundle/calibration/exceedance_isotonic_curves.json",
+  "boundary_channels": ["stage", "precipitation"],
+  "dt_seconds": 1200,
+  "n_history": 3,
+  "skip_before_timestep": 12,
+  "max_forecast_steps": 94,
+  "fgn_noise_dim": 32,
+  "members_per_checkpoint": 20,
+  "query_res": [48, 48],
+  "crs": "EPSG:32618",
+  "mesh_hash": "REPLACE_WITH_DOMAIN_HASH",
+  "expected_mesh_hash": "REPLACE_WITH_DOMAIN_HASH",
+  "research_disclaimer": "Research only; not for emergency or operational decision use."
+}
