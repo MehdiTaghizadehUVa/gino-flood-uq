@@ -66,6 +66,7 @@ serve = [
 ]
 dev = [
     "pytest",
+    "httpx",
     "flaky",
     "black"
 ]

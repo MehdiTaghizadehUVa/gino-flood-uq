@@ -99,6 +99,13 @@ class FGNModelBundle:
             "n_checkpoints": self.n_checkpoints,
             "members_per_checkpoint": self.members_per_checkpoint,
             "total_members": self.total_members,
+            "member_budget": {
+                "max_ensembles": self.n_checkpoints,
+                "max_members_per_ensemble": self.members_per_checkpoint,
+                "default_ensembles": self.n_checkpoints,
+                "default_members_per_ensemble": self.members_per_checkpoint,
+                "default_total_members": self.total_members,
+            },
             "boundary_channels": list(self.boundary_channels),
             "dt_seconds": self.dt_seconds,
             "n_history": self.n_history,

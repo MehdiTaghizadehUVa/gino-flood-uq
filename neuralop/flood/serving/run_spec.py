@@ -19,9 +19,16 @@ class RunStatus(str, Enum):
     FAILED = "FAILED"
     CANCELED = "CANCELED"
     EXPIRED = "EXPIRED"
+    DELETED = "DELETED"
 
 
-TERMINAL_STATUSES = {RunStatus.COMPLETED, RunStatus.FAILED, RunStatus.CANCELED, RunStatus.EXPIRED}
+TERMINAL_STATUSES = {
+    RunStatus.COMPLETED,
+    RunStatus.FAILED,
+    RunStatus.CANCELED,
+    RunStatus.EXPIRED,
+    RunStatus.DELETED,
+}
 
 DEFAULT_EXCEEDANCE_THRESHOLDS_M = (0.01, 0.05, 0.10, 0.30, 0.50)
 ALLOWED_EXCEEDANCE_THRESHOLDS_M = DEFAULT_EXCEEDANCE_THRESHOLDS_M
@@ -33,10 +40,11 @@ _ALLOWED_TRANSITIONS = {
     RunStatus.QUEUED: {RunStatus.RUNNING, RunStatus.CANCELED, RunStatus.FAILED},
     RunStatus.RUNNING: {RunStatus.POSTPROCESSING, RunStatus.FAILED, RunStatus.CANCELED},
     RunStatus.POSTPROCESSING: {RunStatus.COMPLETED, RunStatus.FAILED, RunStatus.CANCELED},
-    RunStatus.COMPLETED: {RunStatus.EXPIRED},
-    RunStatus.FAILED: {RunStatus.EXPIRED},
-    RunStatus.CANCELED: {RunStatus.EXPIRED},
-    RunStatus.EXPIRED: set(),
+    RunStatus.COMPLETED: {RunStatus.EXPIRED, RunStatus.DELETED},
+    RunStatus.FAILED: {RunStatus.EXPIRED, RunStatus.DELETED},
+    RunStatus.CANCELED: {RunStatus.EXPIRED, RunStatus.DELETED},
+    RunStatus.EXPIRED: {RunStatus.DELETED},
+    RunStatus.DELETED: set(),
 }
 
 
@@ -59,8 +67,10 @@ class RunSpec:
     input_hash: str
     forecast_steps: int
     output_detail: str = "standard"
-    request_full_hdf5: bool = False
+    request_full_hdf5: bool = True
     request_animation: bool = False
+    ensemble_count: int = 3
+    members_per_ensemble: int = 20
     calibration_mode: str = "calibrated_default"
     exceedance_thresholds_m: Sequence[float] = (0.01, 0.05, 0.10, 0.30, 0.50)
     seed: int = 123
@@ -76,8 +86,10 @@ class RunSpec:
         forecast_steps: int,
         label: Optional[str] = None,
         output_detail: str = "standard",
-        request_full_hdf5: bool = False,
+        request_full_hdf5: bool = True,
         request_animation: bool = False,
+        ensemble_count: int = 3,
+        members_per_ensemble: int = 20,
         exceedance_thresholds_m: Sequence[float] | None = None,
         seed: int = 123,
     ) -> "RunSpec":
@@ -94,6 +106,12 @@ class RunSpec:
                 "exceedance_thresholds_m may only contain configured thresholds "
                 f"{list(ALLOWED_EXCEEDANCE_THRESHOLDS_M)}; got {invalid}."
             )
+        ensemble_count = int(ensemble_count)
+        members_per_ensemble = int(members_per_ensemble)
+        if ensemble_count < 1:
+            raise ValueError("ensemble_count must be >= 1.")
+        if members_per_ensemble < 1:
+            raise ValueError("members_per_ensemble must be >= 1.")
         return RunSpec(
             run_id=uuid4().hex,
             user_id=user_id,
@@ -104,6 +122,8 @@ class RunSpec:
             output_detail=output_detail,
             request_full_hdf5=bool(request_full_hdf5),
             request_animation=bool(request_animation),
+            ensemble_count=ensemble_count,
+            members_per_ensemble=members_per_ensemble,
             exceedance_thresholds_m=thresholds,
             seed=int(seed),
         )
@@ -118,6 +138,8 @@ class RunSpec:
             "output_detail": self.output_detail,
             "request_full_hdf5": self.request_full_hdf5,
             "request_animation": self.request_animation,
+            "ensemble_count": self.ensemble_count,
+            "members_per_ensemble": self.members_per_ensemble,
             "calibration_mode": self.calibration_mode,
             "exceedance_thresholds_m": list(self.exceedance_thresholds_m),
             "seed": self.seed,

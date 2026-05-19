@@ -54,7 +54,7 @@ class RetentionManager:
     def _should_expire(record: RunRecord, *, cutoff: datetime) -> bool:
         if record.pinned:
             return False
-        if record.status not in TERMINAL_STATUSES - {RunStatus.EXPIRED}:
+        if record.status not in TERMINAL_STATUSES - {RunStatus.EXPIRED, RunStatus.DELETED}:
             return False
         updated_at = record.updated_at
         if updated_at.tzinfo is None:

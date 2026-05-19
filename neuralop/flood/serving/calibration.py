@@ -124,3 +124,53 @@ class CalibrationAdapter:
                 isotonic_model=self.isotonic,
             )
         return out
+
+    def apply_isotonic_exceedance_for_cell(
+        self,
+        raw_probability_by_time: np.ndarray,
+        *,
+        threshold_m: float,
+        lead_time_hour: np.ndarray,
+        cell_index: int,
+        wettable_mask: np.ndarray | None = None,
+    ) -> np.ndarray:
+        """Apply isotonic exceedance calibration to one cell's probability trace.
+
+        The dashboard cell inspector reads one ``[n_time]`` trace from HDF5,
+        so it cannot use ``apply_isotonic_exceedance`` directly: that method
+        expects a full wettable-cell probability map. This adapter preserves
+        the same calibration math while selecting the single cell's
+        wet-frequency bin.
+        """
+        raw = np.asarray(raw_probability_by_time, dtype=np.float64).reshape(-1)
+        if not self.has_isotonic_curves():
+            return raw.copy()
+        wet_freq_full = np.asarray(
+            self.crps_mbm.get("wet_frequency_by_cell", []),
+            dtype=np.float64,
+        ).reshape(-1)
+        idx = int(cell_index)
+        if idx < 0 or idx >= wet_freq_full.shape[0]:
+            return raw.copy()
+        if wettable_mask is not None:
+            mask = np.asarray(wettable_mask, dtype=bool).reshape(-1)
+            if mask.shape[0] != wet_freq_full.shape[0]:
+                raise ValueError(
+                    "wettable_mask length must match crps_mbm wet_frequency_by_cell length."
+                )
+            if not bool(mask[idx]):
+                return raw.copy()
+        lead = np.asarray(lead_time_hour, dtype=np.float64).reshape(-1)
+        if lead.shape[0] != raw.shape[0]:
+            raise ValueError("lead_time_hour must have length equal to raw_probability_by_time.")
+        wet_freq = np.asarray([wet_freq_full[idx]], dtype=np.float64)
+        out = np.empty_like(raw)
+        for t_idx, value in enumerate(raw):
+            out[t_idx] = apply_isotonic_exceedance_probability(
+                np.asarray([value], dtype=np.float64),
+                threshold_m=float(threshold_m),
+                lead_time_hour=float(lead[t_idx]),
+                wet_frequency_by_cell=wet_freq,
+                isotonic_model=self.isotonic,
+            )[0]
+        return out

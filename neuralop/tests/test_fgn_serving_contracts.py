@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import numpy as np
@@ -7,7 +8,7 @@ from neuralop.flood.serving.access import AccessDenied, AccessPolicy, User
 from neuralop.flood.serving.calibration import CalibrationAdapter
 from neuralop.flood.serving.forcing import ForcingValidationError, parse_forcing_csv
 from neuralop.flood.serving.forcing import build_forcing_template_csv
-from neuralop.flood.serving.inference import FakeFGNInferenceService
+from neuralop.flood.serving.inference import DomainAssets, FakeFGNInferenceService, ProductionFGNInferenceService
 from neuralop.flood.serving.model_bundle import FGNModelBundle, ModelBundleError
 from neuralop.flood.serving.orchestrator import RunOrchestrator
 from neuralop.flood.serving.products import ForecastProductBuilder, ForecastResult
@@ -63,6 +64,26 @@ def _valid_csv(n=24):
     return "\n".join(lines) + "\n"
 
 
+def _fake_orchestrator(tmp_path: Path) -> RunOrchestrator:
+    bundle = _bundle(tmp_path)
+    coeff = {
+        "lead_time_hours": [0.0, 999.0],
+        "wet_frequency_edges": [0.0, 1.0],
+        "wet_frequency_by_cell": [1.0] * 8,
+        "coefficients": [[[0.0, 1.0, 0.5]]],
+    }
+    return RunOrchestrator(
+        bundle=bundle,
+        repository=InMemoryRunRepository(),
+        queue=InMemoryJobQueue(),
+        artifact_store=LocalArtifactStore(tmp_path / "artifacts"),
+        access_policy=AccessPolicy(allowed_emails=["user@example.com"]),
+        inference_service=FakeFGNInferenceService(bundle, n_cells=8),
+        calibration_adapter=CalibrationAdapter(crps_mbm=coeff),
+        product_builder=ForecastProductBuilder(),
+    )
+
+
 def test_model_bundle_rejects_missing_calibration(tmp_path):
     bundle = _bundle(tmp_path, paths=False)
     with pytest.raises(ModelBundleError, match="missing required files"):
@@ -91,6 +112,336 @@ def test_forcing_template_is_valid_for_bundle(tmp_path):
     assert forcing.forecast_steps == 1
 
 
+class _FakeCudaUnavailable:
+    @staticmethod
+    def is_available():
+        return False
+
+
+class _FakeTorchNoCuda:
+    """Stand-in for the ``torch`` module that ``_device()`` resolves through
+    ``self._torch()``. Only the surface used by ``_device`` is implemented;
+    keeping it minimal makes the contract between the test and production code
+    explicit (any drift surfaces as an AttributeError, not as a silent pass).
+    """
+
+    cuda = _FakeCudaUnavailable()
+
+    @staticmethod
+    def device(name):
+        # Mirrors torch.device's "addressable identifier" semantics for the
+        # subset of behaviour _device returns. The actual torch.device object
+        # is opaque enough that string identity is a safe proxy here.
+        return name
+
+
+def test_production_inference_refuses_cpu_fallback_when_cuda_missing(tmp_path, monkeypatch):
+    service = ProductionFGNInferenceService(_bundle(tmp_path), device="cuda:0")
+    monkeypatch.setenv("FGN_INFERENCE_MODE", "production")
+    monkeypatch.setattr(service, "_torch", lambda: _FakeTorchNoCuda())
+
+    with pytest.raises(RuntimeError, match="refuses to fall back to CPU"):
+        service._device()
+
+
+def test_inference_falls_back_to_cpu_when_not_production(tmp_path, monkeypatch, caplog):
+    """Non-production callers (CLI smoke, local dev) must keep the documented
+    silent CPU fallback so the worker still functions without a GPU. The
+    fail-fast behaviour is gated strictly on ``FGN_INFERENCE_MODE=production``.
+    """
+    import logging
+
+    service = ProductionFGNInferenceService(_bundle(tmp_path), device="cuda:0")
+    monkeypatch.delenv("FGN_INFERENCE_MODE", raising=False)
+    monkeypatch.setattr(service, "_torch", lambda: _FakeTorchNoCuda())
+
+    with caplog.at_level(logging.WARNING, logger="neuralop.flood.serving.inference"):
+        device = service._device()
+
+    assert device == "cpu"
+    assert any("Falling back to CPU" in record.getMessage() for record in caplog.records), (
+        "Operators rely on this log line to know the worker silently downgraded; do not remove it."
+    )
+
+
+def test_production_inference_exposes_static_context_columns(tmp_path):
+    """Static tensor columns should reach geometry_meta for cell inspection.
+
+    The bundle builder writes static columns as elevation, cell area, slope,
+    aspect, flow direction, curvature, flow accumulation. The inspector needs
+    elevation/slope/flow accumulation for physical context at the clicked cell.
+    """
+    pytest.importorskip("torch")
+
+    class _IdentityNormalizer:
+        def transform(self, value):
+            return value
+
+        def to(self, _device):
+            return self
+
+    class _DummyModel:
+        def to(self, _device):
+            return self
+
+        def eval(self):
+            return self
+
+    service = ProductionFGNInferenceService(
+        _bundle(tmp_path),
+        device="cpu",
+        preloaded_models=[_DummyModel(), _DummyModel(), _DummyModel()],
+        preloaded_normalizers={
+            "geometry": _IdentityNormalizer(),
+            "static": _IdentityNormalizer(),
+            "boundary": _IdentityNormalizer(),
+            "dynamic": _IdentityNormalizer(),
+            "target": _IdentityNormalizer(),
+        },
+        preloaded_domain_assets=DomainAssets(
+            geometry=np.array([[100.0, 200.0], [110.0, 210.0]], dtype=np.float32),
+            static=np.array(
+                [
+                    [1.0, 100.0, 0.1, 10.0, 1.0, 0.01, 1000.0],
+                    [2.0, 200.0, 0.2, 20.0, 2.0, 0.02, 2000.0],
+                ],
+                dtype=np.float32,
+            ),
+        ),
+    )
+
+    prepared = service._ensure_loaded()
+
+    np.testing.assert_allclose(prepared["elevation_raw_np"], [1.0, 2.0])
+    np.testing.assert_allclose(prepared["cell_area_m2_np"], [100.0, 200.0])
+    np.testing.assert_allclose(prepared["slope_raw_np"], [0.1, 0.2])
+    np.testing.assert_allclose(prepared["flow_accumulation_raw_np"], [1000.0, 2000.0])
+
+
+def test_celery_worker_defers_model_preload_until_run_is_marked_running(monkeypatch):
+    pytest.importorskip("celery")
+    from neuralop.flood.serving import celery_app
+
+    calls = []
+    sentinel = object()
+
+    def fake_build_orchestrator(*, queue_override, preload_models):
+        calls.append({"queue_override": queue_override, "preload_models": preload_models})
+        return sentinel
+
+    monkeypatch.setattr(celery_app, "_orchestrator", None)
+    monkeypatch.setattr(celery_app, "build_orchestrator", fake_build_orchestrator)
+    monkeypatch.setenv("FGN_PRELOAD_MODELS", "1")
+
+    assert celery_app.get_orchestrator() is sentinel
+    assert calls == [{"queue_override": None, "preload_models": False}]
+
+
+def test_orchestrator_execute_ignores_run_canceled_before_worker_start(tmp_path):
+    orchestrator = _fake_orchestrator(tmp_path)
+    user = User(user_id="u1", email="user@example.com", disclaimer_acknowledged=True)
+    record = orchestrator.submit(user=user, forcing_csv=_valid_csv(24), forecast_steps=2)
+
+    class ExplodingInference(FakeFGNInferenceService):
+        def run(self, spec, forcing):  # pragma: no cover - should not be called
+            raise AssertionError("Canceled runs must not enter inference.")
+
+    orchestrator.inference_service = ExplodingInference(orchestrator.bundle, n_cells=8)
+    orchestrator.cancel(record.spec.run_id)
+
+    orchestrator.execute(record.spec.run_id)
+
+    assert orchestrator.repository.get(record.spec.run_id).status == RunStatus.CANCELED
+
+
+def test_orchestrator_execute_records_progress_label_and_runtime(tmp_path):
+    orchestrator = _fake_orchestrator(tmp_path)
+    user = User(user_id="u1", email="user@example.com", disclaimer_acknowledged=True)
+    record = orchestrator.submit(user=user, forcing_csv=_valid_csv(24), forecast_steps=4)
+
+    orchestrator.execute(record.spec.run_id)
+
+    done = orchestrator.repository.get(record.spec.run_id)
+    assert done.status == RunStatus.COMPLETED
+    assert done.progress == 1.0
+    assert done.progress_label == "Completed"
+    assert done.started_at is not None
+    assert done.completed_at is not None
+    assert done.runtime_seconds is not None
+
+
+def test_orchestrator_delete_run_tombstones_record_and_purges_artifacts(tmp_path):
+    """Deleting a terminal run removes artifacts while preserving audit metadata.
+
+    Run metadata is the audit surface for bundle ID, input hash, calibration
+    settings, and timestamps, so user-facing delete must never physically
+    remove the row.
+    """
+    bundle = _bundle(tmp_path)
+    coeff = {
+        "lead_time_hours": [0.0, 999.0],
+        "wet_frequency_edges": [0.0, 1.0],
+        "wet_frequency_by_cell": [1.0] * 8,
+        "coefficients": [[[0.0, 1.0, 0.5]]],
+    }
+    orchestrator = RunOrchestrator(
+        bundle=bundle,
+        repository=InMemoryRunRepository(),
+        queue=InMemoryJobQueue(),
+        artifact_store=LocalArtifactStore(tmp_path / "artifacts"),
+        access_policy=AccessPolicy(allowed_emails=["user@example.com"]),
+        inference_service=FakeFGNInferenceService(bundle, n_cells=8),
+        calibration_adapter=CalibrationAdapter(crps_mbm=coeff),
+        product_builder=ForecastProductBuilder(),
+    )
+    user = User(user_id="u1", email="user@example.com", disclaimer_acknowledged=True)
+    record = orchestrator.submit(user=user, forcing_csv=_valid_csv(24), forecast_steps=4)
+    orchestrator.execute(record.spec.run_id)
+    run_id = record.spec.run_id
+    assert orchestrator.repository.get(run_id).status == RunStatus.COMPLETED
+    assert list(orchestrator.artifact_store.list(run_id))  # has artifacts
+
+    orchestrator.delete_run(run_id, user=user)
+
+    tombstone = orchestrator.repository.get(run_id)
+    assert tombstone.status == RunStatus.DELETED
+    assert tombstone.spec.bundle_id == record.spec.bundle_id
+    assert tombstone.spec.input_hash == record.spec.input_hash
+    assert tombstone.spec.calibration_mode == record.spec.calibration_mode
+    assert not list(orchestrator.artifact_store.list(run_id))
+
+
+def test_orchestrator_delete_run_refuses_active_run(tmp_path):
+    """Active runs must not be deletable — the worker is still writing files."""
+    bundle = _bundle(tmp_path)
+    orchestrator = RunOrchestrator(
+        bundle=bundle,
+        repository=InMemoryRunRepository(),
+        queue=InMemoryJobQueue(),
+        artifact_store=LocalArtifactStore(tmp_path / "artifacts"),
+        access_policy=AccessPolicy(allowed_emails=["user@example.com"]),
+        inference_service=FakeFGNInferenceService(bundle, n_cells=8),
+        calibration_adapter=CalibrationAdapter(
+            crps_mbm={
+                "lead_time_hours": [0.0, 999.0],
+                "wet_frequency_edges": [0.0, 1.0],
+                "wet_frequency_by_cell": [1.0] * 8,
+                "coefficients": [[[0.0, 1.0, 0.5]]],
+            }
+        ),
+        product_builder=ForecastProductBuilder(),
+    )
+    user = User(user_id="u1", email="user@example.com", disclaimer_acknowledged=True)
+    record = orchestrator.submit(user=user, forcing_csv=_valid_csv(24), forecast_steps=2)
+    # Don't execute → status stays QUEUED → still active.
+    with pytest.raises(ValueError, match="Cancel the run first"):
+        orchestrator.delete_run(record.spec.run_id, user=user)
+    # Run must still exist after the refused delete.
+    assert orchestrator.repository.get(record.spec.run_id).status == RunStatus.QUEUED
+
+
+def test_orchestrator_delete_run_refuses_other_users_run(tmp_path):
+    """A non-admin user cannot delete a run owned by someone else."""
+    bundle = _bundle(tmp_path)
+    orchestrator = RunOrchestrator(
+        bundle=bundle,
+        repository=InMemoryRunRepository(),
+        queue=InMemoryJobQueue(),
+        artifact_store=LocalArtifactStore(tmp_path / "artifacts"),
+        access_policy=AccessPolicy(allowed_emails=["owner@example.com", "intruder@example.com"]),
+        inference_service=FakeFGNInferenceService(bundle, n_cells=8),
+        calibration_adapter=CalibrationAdapter(
+            crps_mbm={
+                "lead_time_hours": [0.0, 999.0],
+                "wet_frequency_edges": [0.0, 1.0],
+                "wet_frequency_by_cell": [1.0] * 8,
+                "coefficients": [[[0.0, 1.0, 0.5]]],
+            }
+        ),
+        product_builder=ForecastProductBuilder(),
+    )
+    owner = User(user_id="owner", email="owner@example.com", disclaimer_acknowledged=True)
+    intruder = User(user_id="intruder", email="intruder@example.com", disclaimer_acknowledged=True)
+    record = orchestrator.submit(user=owner, forcing_csv=_valid_csv(24), forecast_steps=2)
+    orchestrator.execute(record.spec.run_id)
+    with pytest.raises(PermissionError):
+        orchestrator.delete_run(record.spec.run_id, user=intruder)
+    # Record and artifacts are still present.
+    assert orchestrator.repository.get(record.spec.run_id).status == RunStatus.COMPLETED
+    assert list(orchestrator.artifact_store.list(record.spec.run_id))
+
+
+def test_orchestrator_delete_runs_batch_returns_per_id_outcomes(tmp_path):
+    """Batch delete returns granular outcomes; one bad apple does not stop the rest.
+
+    This is the contract the UI depends on: a multi-select Delete must
+    succeed for completed runs even when an active or unknown id is in the
+    same payload.
+    """
+    bundle = _bundle(tmp_path)
+    orchestrator = RunOrchestrator(
+        bundle=bundle,
+        repository=InMemoryRunRepository(),
+        queue=InMemoryJobQueue(),
+        artifact_store=LocalArtifactStore(tmp_path / "artifacts"),
+        access_policy=AccessPolicy(allowed_emails=["user@example.com"]),
+        inference_service=FakeFGNInferenceService(bundle, n_cells=8),
+        calibration_adapter=CalibrationAdapter(
+            crps_mbm={
+                "lead_time_hours": [0.0, 999.0],
+                "wet_frequency_edges": [0.0, 1.0],
+                "wet_frequency_by_cell": [1.0] * 8,
+                "coefficients": [[[0.0, 1.0, 0.5]]],
+            }
+        ),
+        product_builder=ForecastProductBuilder(),
+    )
+    user = User(user_id="u1", email="user@example.com", disclaimer_acknowledged=True)
+
+    done = orchestrator.submit(user=user, forcing_csv=_valid_csv(24), forecast_steps=2)
+    orchestrator.execute(done.spec.run_id)
+    active = orchestrator.submit(user=user, forcing_csv=_valid_csv(24), forecast_steps=2)
+    # active is QUEUED, not yet executed.
+
+    result = orchestrator.delete_runs(
+        [done.spec.run_id, active.spec.run_id, "does-not-exist"],
+        user=user,
+    )
+
+    assert result["deleted"] == [done.spec.run_id]
+    skipped_ids = {row["run_id"]: row["reason"] for row in result["skipped"]}
+    assert skipped_ids[active.spec.run_id] == "active"
+    assert skipped_ids["does-not-exist"] == "not_found"
+    # done is tombstoned; active still present.
+    assert orchestrator.repository.get(done.spec.run_id).status == RunStatus.DELETED
+    assert not list(orchestrator.artifact_store.list(done.spec.run_id))
+    assert orchestrator.repository.get(active.spec.run_id).status == RunStatus.QUEUED
+
+
+def test_serving_renderer_depends_on_eval_render_private_helpers():
+    """Contract test: serving's map renderer reaches into private helpers in
+    ``neuralop.flood.eval.render``. If any of these are renamed or removed,
+    the worker will silently produce broken images at runtime — fail loudly
+    here in CI where the breakage is one-line obvious to fix.
+    """
+    from neuralop.flood.eval import render as eval_render
+
+    expected = (
+        "_build_spatial_renderer",
+        "_cartographic_context",
+        "_plot_spatial_panel",
+        "_wd_spatial_vmax",
+        "_robust_nonnegative_vmax",
+        "_mask_wd_dry_for_overlay",
+        "_update_spatial_artist",
+    )
+    missing = [name for name in expected if not callable(getattr(eval_render, name, None))]
+    assert not missing, (
+        "Serving's map_rendering.py and products.py call these helpers; "
+        f"missing or non-callable in eval/render.py: {missing}"
+    )
+
+
 def test_forcing_rejects_bad_timestep(tmp_path):
     bundle = _bundle(tmp_path)
     csv = "time_seconds,stage,precipitation\n0,1,0\n900,1,0\n1200,1,0\n"
@@ -106,6 +457,51 @@ def test_run_state_machine_rejects_invalid_transition():
         repo.transition(spec.run_id, RunStatus.COMPLETED)
 
 
+def test_run_repository_records_live_progress_and_runtime():
+    repo = InMemoryRunRepository()
+    spec = RunSpec.new(user_id="u1", bundle_id="b", input_hash="h", forecast_steps=2)
+    repo.create(spec)
+    repo.transition(spec.run_id, RunStatus.VALIDATING)
+    repo.transition(spec.run_id, RunStatus.QUEUED)
+    running = repo.transition(spec.run_id, RunStatus.RUNNING)
+
+    assert running.started_at is not None
+    assert running.progress == pytest.approx(0.40)
+    updated = repo.update_progress(spec.run_id, 0.57, label="GPU rollout model 1/3, lead 2/4")
+    assert updated.progress == pytest.approx(0.57)
+    assert updated.progress_label == "GPU rollout model 1/3, lead 2/4"
+
+    repo.transition(spec.run_id, RunStatus.POSTPROCESSING)
+    completed = repo.transition(spec.run_id, RunStatus.COMPLETED)
+    assert completed.progress == 1.0
+    assert completed.progress_label == "Completed"
+    assert completed.completed_at is not None
+    assert completed.runtime_seconds is not None
+
+
+def test_sql_run_repository_persists_live_progress_and_runtime(tmp_path):
+    pytest.importorskip("sqlalchemy")
+    from neuralop.flood.serving.sql_repository import SqlRunRepository
+
+    repo = SqlRunRepository(f"sqlite:///{tmp_path / 'runs.sqlite'}")
+    spec = RunSpec.new(user_id="u1", bundle_id="b", input_hash="h", forecast_steps=2)
+    repo.create(spec)
+    repo.transition(spec.run_id, RunStatus.VALIDATING)
+    repo.transition(spec.run_id, RunStatus.QUEUED)
+    repo.transition(spec.run_id, RunStatus.RUNNING)
+    repo.update_progress(spec.run_id, 0.63, label="GPU rollout model 2/3, lead 1/2")
+    live = repo.get(spec.run_id)
+
+    assert live.progress == pytest.approx(0.63)
+    assert live.progress_label == "GPU rollout model 2/3, lead 1/2"
+    assert live.started_at is not None
+
+    repo.transition(spec.run_id, RunStatus.POSTPROCESSING)
+    done = repo.transition(spec.run_id, RunStatus.COMPLETED)
+    assert done.progress == 1.0
+    assert done.runtime_seconds is not None
+
+
 def test_run_spec_rejects_unsupported_thresholds():
     with pytest.raises(ValueError, match="Unsupported|threshold"):
         RunSpec.new(
@@ -115,6 +511,79 @@ def test_run_spec_rejects_unsupported_thresholds():
             forecast_steps=2,
             exceedance_thresholds_m=(0.02,),
         )
+
+
+def test_run_spec_records_requested_member_budget():
+    spec = RunSpec.new(
+        user_id="u1",
+        bundle_id="b",
+        input_hash="h",
+        forecast_steps=2,
+        ensemble_count=2,
+        members_per_ensemble=5,
+    )
+
+    assert spec.ensemble_count == 2
+    assert spec.members_per_ensemble == 5
+    assert spec.manifest()["ensemble_count"] == 2
+    assert spec.manifest()["members_per_ensemble"] == 5
+
+
+def test_orchestrator_member_budget_limits_fake_inference_members(tmp_path):
+    bundle = _bundle(tmp_path)
+    coeff = {
+        "lead_time_hours": [0.0, 999.0],
+        "wet_frequency_edges": [0.0, 1.0],
+        "wet_frequency_by_cell": [1.0] * 8,
+        "coefficients": [[[0.0, 1.0, 0.5]]],
+    }
+    orchestrator = RunOrchestrator(
+        bundle=bundle,
+        repository=InMemoryRunRepository(),
+        queue=InMemoryJobQueue(),
+        artifact_store=LocalArtifactStore(tmp_path / "artifacts"),
+        access_policy=AccessPolicy(allowed_emails=["user@example.com"]),
+        inference_service=FakeFGNInferenceService(bundle, n_cells=8),
+        calibration_adapter=CalibrationAdapter(crps_mbm=coeff),
+        product_builder=ForecastProductBuilder(),
+    )
+    user = User(user_id="u1", email="user@example.com", disclaimer_acknowledged=True)
+
+    record = orchestrator.submit(
+        user=user,
+        forcing_csv=_valid_csv(24),
+        forecast_steps=3,
+        ensemble_count=2,
+        members_per_ensemble=5,
+    )
+    orchestrator.execute(record.spec.run_id)
+    summary = json.loads(
+        (tmp_path / "artifacts" / record.spec.run_id / "calibrated_summary.json").read_text()
+    )
+
+    assert record.spec.ensemble_count == 2
+    assert record.spec.members_per_ensemble == 5
+    assert summary["n_members"] == 10
+
+
+def test_orchestrator_rejects_member_budget_above_bundle(tmp_path):
+    bundle = _bundle(tmp_path)
+    orchestrator = RunOrchestrator(
+        bundle=bundle,
+        repository=InMemoryRunRepository(),
+        queue=InMemoryJobQueue(),
+        artifact_store=LocalArtifactStore(tmp_path / "artifacts"),
+        access_policy=AccessPolicy(allowed_emails=["user@example.com"]),
+        inference_service=FakeFGNInferenceService(bundle, n_cells=8),
+        calibration_adapter=CalibrationAdapter(crps_mbm={"method": "identity"}),
+        product_builder=ForecastProductBuilder(),
+    )
+    user = User(user_id="u1", email="user@example.com", disclaimer_acknowledged=True)
+
+    with pytest.raises(ValueError, match="ensemble_count"):
+        orchestrator.submit(user=user, forcing_csv=_valid_csv(24), forecast_steps=2, ensemble_count=4)
+    with pytest.raises(ValueError, match="members_per_ensemble"):
+        orchestrator.submit(user=user, forcing_csv=_valid_csv(24), forecast_steps=2, members_per_ensemble=21)
 
 
 def test_access_policy_requires_allowed_email_and_disclaimer():
@@ -139,18 +608,63 @@ def test_artifact_store_reports_common_content_types(tmp_path):
     store = LocalArtifactStore(tmp_path)
     store.put_bytes("run", "forcing.csv", b"a,b\n", content_type="text/csv")
     store.put_bytes("run", "map.png", b"x", content_type="image/png")
+    store.put_bytes("run", "figure.svg", b"<svg />", content_type="image/svg+xml")
     refs = {ref.artifact_id: ref.content_type for ref in store.list("run")}
     assert refs["forcing.csv"] == "text/csv"
     assert refs["map.png"] == "image/png"
+    assert refs["figure.svg"] == "image/svg+xml"
 
 
 def test_forecast_product_builder_outputs_no_ground_truth_products():
-    members = np.array([[[0.0, 0.2], [0.1, 0.3]], [[0.0, 0.4], [0.2, 0.4]]], dtype=np.float32)
-    forecast = ForecastResult(members_wd=members, lead_time_hours=np.array([1.0, 2.0]), wettable_mask=np.array([False, True]))
+    members = np.array([[[0.0, 0.2], [0.1, 0.29]], [[0.0, 0.4], [0.2, 0.41]]], dtype=np.float32)
+    forecast = ForecastResult(
+        members_wd=members,
+        lead_time_hours=np.array([1.0, 2.0]),
+        wettable_mask=np.array([False, True]),
+        metadata={"cell_area_m2": np.array([10.0, 20.0])},
+    )
     summary = ForecastProductBuilder(thresholds_m=(0.05, 0.3)).build_summary(forecast)
     assert summary["n_members"] == 2
     assert summary["max_mean_wd_m"] == pytest.approx(0.35)
     assert "p_wd_gt_0.3m_mean" in summary
+    assert summary["wettable_area_m2"] == pytest.approx(20.0)
+    assert summary["peak_expected_flooded_area_km2_gt_0.05m"] == pytest.approx(20.0 / 1_000_000.0)
+    assert summary["peak_expected_flooded_area_fraction_wettable_gt_0.05m"] == pytest.approx(1.0)
+    assert summary["peak_expected_flooded_area_lead_hours_gt_0.05m"] == pytest.approx(1.0)
+    assert summary["peak_area_weighted_iqr_wd_m"] >= 0.0
+    assert summary["uncertainty_to_signal_ratio"] >= 0.0
+    assert summary["exceedance_by_threshold_m"]["0.3"]["peak_expected_area_fraction_wettable"] == pytest.approx(0.5)
+
+
+def test_forecast_product_builder_exceedance_area_is_area_weighted():
+    members = np.array([[[0.4, 0.0]], [[0.5, 0.0]]], dtype=np.float32)
+    forecast = ForecastResult(
+        members_wd=members,
+        lead_time_hours=np.array([1.0]),
+        wettable_mask=np.array([True, True]),
+        metadata={"cell_area_m2": np.array([1.0, 9.0])},
+    )
+
+    summary = ForecastProductBuilder(thresholds_m=(0.30,)).build_summary(forecast)
+
+    assert summary["p_wd_gt_0.3m_mean"] == pytest.approx(0.5)  # legacy unweighted probability.
+    assert summary["exceedance_by_threshold_m"]["0.3"]["peak_expected_area_fraction_wettable"] == pytest.approx(0.1)
+    assert summary["exceedance_by_threshold_m"]["0.3"]["peak_expected_area_km2"] == pytest.approx(1.0 / 1_000_000.0)
+
+
+def test_forecast_product_builder_handles_no_flood_onset():
+    forecast = ForecastResult(
+        members_wd=np.zeros((2, 3, 4), dtype=np.float32),
+        lead_time_hours=np.array([1.0, 2.0, 3.0]),
+        wettable_mask=np.ones(4, dtype=bool),
+        metadata={"cell_area_m2": np.ones(4)},
+    )
+
+    summary = ForecastProductBuilder(thresholds_m=(0.30,)).build_summary(forecast)
+
+    assert summary["peak_expected_flooded_area_fraction_wettable_gt_0.05m"] == pytest.approx(0.0)
+    assert summary["onset_lead_hours_expected_flooded_area_fraction_gt_1pct_gt_0.05m"] is None
+    assert summary["peak_expected_flooded_area_lead_hours_gt_0.05m"] is None
 
 
 def test_orchestrator_submit_execute_completes_with_fake_inference(tmp_path):
@@ -173,7 +687,18 @@ def test_orchestrator_submit_execute_completes_with_fake_inference(tmp_path):
     done = orchestrator.repository.get(record.spec.run_id)
     assert done.status == RunStatus.COMPLETED
     artifacts = {a.artifact_id for a in orchestrator.artifact_store.list(record.spec.run_id)}
-    assert {"forcing.csv", "run_manifest.json", "raw_summary.json", "calibrated_summary.json", "comparison_summary.json"}.issubset(artifacts)
+    assert {
+        "forcing.csv",
+        "run_manifest.json",
+        "raw_summary.json",
+        "calibrated_summary.json",
+        "comparison_summary.json",
+        "forcing_hydrograph.svg",
+        "uq_extent_by_time.svg",
+        "uq_exceedance_bars.svg",
+        "uq_uncertainty_width.svg",
+        "calibration_effect.svg",
+    }.issubset(artifacts)
 
 
 def test_quota_policy_rejects_excess_queued_runs(tmp_path):
@@ -439,17 +964,760 @@ def test_orchestrator_submit_with_animation_writes_gif_artifact(tmp_path):
     orchestrator.execute(record.spec.run_id)
     artifacts = {a.artifact_id for a in orchestrator.artifact_store.list(record.spec.run_id)}
     assert "calibrated_mean_wd_animation.gif" in artifacts
+    assert "calibrated_p_gt_0p30m_animation.gif" in artifacts
 
 
-def test_forecast_product_builder_writes_map_pngs(tmp_path):
-    members = np.array([[[0.0, 0.2, 0.4]], [[0.1, 0.3, 0.5]]], dtype=np.float32)
+def test_empirical_crps_matches_brute_force_pairwise_mean():
+    """Order-statistic implementation must agree with the naive O(M^2)
+    pairwise mean to float tolerance. The Uncertainty tab depends on this
+    metric being correctly normalised so cells compare apples-to-apples."""
+    rng = np.random.default_rng(42)
+    ensemble = rng.uniform(0, 1, size=(8, 5)).astype(np.float64)
+    fast = ForecastProductBuilder.empirical_crps_per_cell(ensemble)
+    brute = np.zeros(ensemble.shape[1])
+    m = ensemble.shape[0]
+    for i in range(m):
+        for j in range(m):
+            brute += np.abs(ensemble[i] - ensemble[j])
+    brute /= (m * m)
+    np.testing.assert_allclose(fast, brute.astype(np.float32), rtol=1e-5)
+
+
+def test_empirical_crps_zero_for_identical_members():
+    """All-identical ensemble = zero spread = zero CRPS. Sanity floor."""
+    ensemble = np.tile(np.array([0.4, 0.7, 1.0]), (10, 1))
+    crps = ForecastProductBuilder.empirical_crps_per_cell(ensemble.astype(np.float32))
+    assert np.allclose(crps, 0.0)
+
+
+def test_spread_decomposition_uses_member_model_id_groups():
+    """Between-variance = variance of group means. Within-variance = mean
+    of within-group variances. Validate against hand-computed values."""
+    ensemble = np.array(
+        [
+            [1.0, 0.0],
+            [1.0, 0.0],
+            [1.0, 0.0],
+            [3.0, 0.0],
+            [4.0, 1.0],
+            [5.0, 2.0],
+        ],
+        dtype=np.float64,
+    )
+    member_model_id = ["A", "A", "A", "B", "B", "B"]
+    out = ForecastProductBuilder.spread_decomposition_per_cell(ensemble, member_model_id)
+    assert out is not None
+    between, within, summary = out
+    np.testing.assert_allclose(between, [2.25, 0.25], rtol=1e-5)
+    np.testing.assert_allclose(within, [1.0 / 3.0, 1.0 / 3.0], rtol=1e-5)
+    assert summary["n_groups"] == 2
+    assert summary["groups"] == ["A", "B"]
+    assert summary["between_share"] + summary["within_share"] == pytest.approx(1.0)
+
+
+def test_spread_decomposition_returns_none_without_member_model_id():
+    """No metadata = no decomposition. Caller skips the artifact rather
+    than failing the run."""
+    ensemble = np.zeros((4, 3), dtype=np.float64)
+    assert ForecastProductBuilder.spread_decomposition_per_cell(ensemble, None) is None
+    assert ForecastProductBuilder.spread_decomposition_per_cell(ensemble, ["A"] * 4) is None
+
+
+def test_reliability_curves_payload_shape_without_isotonic():
+    """Without an isotonic adapter the calibrated mean per non-empty bin
+    equals the bin centre (identity mapping); ``applied`` is False."""
+    rng = np.random.default_rng(0)
+    members = rng.uniform(0, 1, size=(20, 2, 50)).astype(np.float32)
+    payload = ForecastProductBuilder.reliability_curves_payload(
+        members=members,
+        wettable_mask=np.ones(50, dtype=bool),
+        lead_time_hours=np.array([0.5, 1.0]),
+        peak_time_idx=1,
+        thresholds_m=(0.30,),
+        calibration_adapter=None,
+    )
+    assert payload["applied"] is False
+    assert payload["n_wettable_cells"] == 50
+    assert "0.3" in payload["curves"]
+    curve = payload["curves"]["0.3"]
+    assert curve["threshold_m"] == 0.30
+    assert len(curve["raw_bin_centers"]) == 20
+    assert len(curve["calibrated_means_per_bin"]) == 20
+    assert len(curve["raw_distribution_counts"]) == 20
+    for raw_x, cal_y in zip(curve["raw_bin_centers"], curve["calibrated_means_per_bin"]):
+        if cal_y is not None:
+            assert abs(cal_y - raw_x) < 0.05
+
+
+def test_orchestrator_writes_uncertainty_diagnostics(tmp_path):
+    """End-to-end: every Phase-4 uncertainty artifact must land on a normal
+    run. Without this contract the Uncertainty tab silently goes empty."""
+    bundle = _bundle(tmp_path)
+    coeff = {
+        "lead_time_hours": [0.0, 999.0],
+        "wet_frequency_edges": [0.0, 1.0],
+        "wet_frequency_by_cell": [1.0] * 8,
+        "coefficients": [[[0.0, 1.0, 0.5]]],
+    }
+    orchestrator = RunOrchestrator(
+        bundle=bundle,
+        repository=InMemoryRunRepository(),
+        queue=InMemoryJobQueue(),
+        artifact_store=LocalArtifactStore(tmp_path / "artifacts"),
+        access_policy=AccessPolicy(allowed_emails=["user@example.com"]),
+        inference_service=FakeFGNInferenceService(bundle, n_cells=8),
+        calibration_adapter=CalibrationAdapter(crps_mbm=coeff),
+        product_builder=ForecastProductBuilder(),
+    )
+    user = User(user_id="u1", email="user@example.com", disclaimer_acknowledged=True)
+    record = orchestrator.submit(user=user, forcing_csv=_valid_csv(24), forecast_steps=4)
+    orchestrator.execute(record.spec.run_id)
+    ids = {a.artifact_id for a in orchestrator.artifact_store.list(record.spec.run_id)}
+    expected = {
+        "empirical_crps_map.npy",
+        "spread_decomposition.npz",
+        "spread_decomposition_summary.json",
+        "reliability_curves.json",
+    }
+    assert expected.issubset(ids), f"missing P4 artifacts: {expected - ids}"
+
+
+def test_geometry_meta_payload_matches_forecast_geometry(tmp_path):
+    """Geometry sidecar must carry all cells with consistent bounds and a
+    wettable flag list of the same length. The web inspector overlays this
+    directly on the map for click hit-testing.
+    """
+    members = np.zeros((2, 2, 3), dtype=np.float32)
+    geometry = np.array([[100.0, 200.0], [110.0, 200.0], [110.0, 210.0]], dtype=np.float32)
+    wettable = np.array([True, True, False])
+    forecast = ForecastResult(
+        members_wd=members,
+        lead_time_hours=np.array([0.5, 1.0], dtype=np.float32),
+        wettable_mask=wettable,
+        metadata={"geometry_xy": geometry},
+    )
+    meta = ForecastProductBuilder().build_geometry_meta(forecast)
+    assert meta is not None
+    assert meta["n_cells"] == 3
+    assert meta["bounds"] == {"x_min": 100.0, "x_max": 110.0, "y_min": 200.0, "y_max": 210.0}
+    assert meta["x"] == [100.0, 110.0, 110.0]
+    assert meta["y"] == [200.0, 200.0, 210.0]
+    assert meta["wettable"] == [True, True, False]
+
+
+def test_geometry_meta_includes_static_context_and_pick_viewport(tmp_path):
+    """The click overlay needs both cell context and the rendered map viewport.
+
+    The PNG includes a title and colorbar, so frontend hit-testing cannot use
+    the full image rectangle as the data plane. ``image_data_viewport`` is the
+    server-provided bridge from image pixels to UTM coordinates.
+    """
+    members = np.zeros((2, 2, 3), dtype=np.float32)
+    geometry = np.array([[100.0, 200.0], [110.0, 200.0], [110.0, 210.0]], dtype=np.float32)
+    forecast = ForecastResult(
+        members_wd=members,
+        lead_time_hours=np.array([0.5, 1.0], dtype=np.float32),
+        wettable_mask=np.array([True, True, True]),
+        metadata={
+            "geometry_xy": geometry,
+            "elevation_raw": np.array([1.25, 2.5, 3.75], dtype=np.float32),
+            "slope_raw": np.array([0.1, 0.2, 0.3], dtype=np.float32),
+            "flow_accumulation_raw": np.array([10.0, 20.0, 30.0], dtype=np.float32),
+        },
+    )
+
+    meta = ForecastProductBuilder().build_geometry_meta(forecast)
+
+    assert meta is not None
+    assert meta["elevation_m"] == [1.25, 2.5, 3.75]
+    assert meta["slope"] == [0.1, 0.2, 0.3]
+    assert meta["flow_accumulation"] == [10.0, 20.0, 30.0]
+    viewport = meta["image_data_viewport"]
+    assert 0.0 <= viewport["left"] < viewport["right"] <= 1.0
+    assert 0.0 <= viewport["top"] < viewport["bottom"] <= 1.0
+    assert viewport["left"] > 0.0 or viewport["right"] < 1.0
+    assert viewport["top"] > 0.0 or viewport["bottom"] < 1.0
+    data_bounds = meta["image_data_bounds"]
+    assert data_bounds["x_min"] <= min(meta["x"]) <= max(meta["x"]) <= data_bounds["x_max"]
+    assert data_bounds["y_min"] <= min(meta["y"]) <= max(meta["y"]) <= data_bounds["y_max"]
+
+
+def test_geometry_meta_returns_none_without_geometry(tmp_path):
+    """No geometry_xy in metadata = no sidecar (and no Phase 2 inspector).
+    Caller treats None as "skip artifact" rather than failing the run.
+    """
+    forecast = ForecastResult(
+        members_wd=np.zeros((1, 1, 2), dtype=np.float32),
+        lead_time_hours=np.array([0.5], dtype=np.float32),
+        wettable_mask=np.array([True, True]),
+    )
+    assert ForecastProductBuilder().build_geometry_meta(forecast) is None
+
+
+def test_summarize_cell_timeseries_round_trips_via_hdf5(tmp_path):
+    """End-to-end: HDF5 written by the orchestrator must be slice-readable by
+    the inspector helper, returning the same per-cell values that come out of
+    the in-memory forecast. This is the contract the API route depends on.
+    """
+    import io
+
+    pytest.importorskip("h5py")
+    import h5py
+
+    members = np.array(
+        [
+            # member 0
+            [[0.00, 0.00, 0.00], [0.10, 0.05, 0.00], [0.40, 0.20, 0.02], [0.20, 0.10, 0.01]],
+            # member 1
+            [[0.00, 0.00, 0.00], [0.30, 0.15, 0.00], [0.60, 0.30, 0.05], [0.40, 0.20, 0.02]],
+        ],
+        dtype=np.float32,
+    )
+    # Shape: [n_members=2, n_time=4, n_cells=3]
+    lead = np.array([0.5, 1.0, 1.5, 2.0], dtype=np.float32)
+    wettable = np.array([True, True, False])
+
+    h5_path = tmp_path / "forecast_members.h5"
+    with h5py.File(h5_path, "w") as h5:
+        h5.create_dataset("raw_members_wd", data=members)
+        h5.create_dataset("calibrated_members_wd", data=members)
+        h5.create_dataset("lead_time_hours", data=lead)
+        h5.create_dataset("wettable_mask", data=wettable.astype(np.uint8))
+
+    h5_bytes = h5_path.read_bytes()
+    payload = ForecastProductBuilder.summarize_cell_timeseries(
+        h5_bytes=h5_bytes,
+        cell_index=0,
+        thresholds_m=(0.05, 0.30),
+    )
+    assert payload["cell_index"] == 0
+    assert payload["n_members"] == 2
+    assert payload["n_time"] == 4
+    assert payload["wettable"] is True
+    assert payload["lead_time_hours"] == [0.5, 1.0, 1.5, 2.0]
+    # 2 members × 4 timesteps
+    assert len(payload["calibrated_members_wd"]) == 2
+    assert len(payload["calibrated_members_wd"][0]) == 4
+    # Peak depth at cell 0 is the mean across members at t=2 (lead=1.5h):
+    # mean([0.40, 0.60]) = 0.50; peak lead = 1.5 h.
+    assert payload["peak_calibrated_mean_wd_m"] == pytest.approx(0.50, abs=1e-5)
+    assert payload["peak_calibrated_lead_hours"] == pytest.approx(1.5, abs=1e-5)
+    # P(WD > 0.05) at t=1 (lead=1.0h) for cell 0: members are [0.10, 0.30],
+    # both above 0.05 → P = 1.0
+    assert payload["calibrated_exceedance_prob"]["0.05"][1] == pytest.approx(1.0)
+    # Threshold key format matches f"{thr:g}" — 0.30 collapses to "0.3".
+    # Documenting this here keeps the wire-format contract visible.
+    assert set(payload["calibrated_exceedance_prob"].keys()) == {"0.05", "0.3"}
+    # P(WD > 0.3) at t=1 for cell 0: members are [0.10, 0.30]. Strict > 0.3
+    # is 0 because both members are <= 0.30 (one is exactly 0.30, but with
+    # the strict inequality used in the helper this is 0/2 = 0).
+    assert payload["calibrated_exceedance_prob"]["0.3"][1] == pytest.approx(0.0)
+    # Per-member arrival at 0.05: both members first cross at t=1 (lead=1.0h).
+    assert payload["calibrated_member_arrival_hours"]["0.05"] == [1.0, 1.0]
+
+
+def test_summarize_cell_timeseries_applies_isotonic_probability_for_cell(tmp_path):
+    """Cell inspector probability traces must match calibrated exceedance products.
+
+    CRPS-MBM calibrates the member depths, but exceedance probabilities have a
+    second isotonic calibration layer. The inspector's P(WD > threshold) trace
+    must apply that layer too; otherwise a clicked cell disagrees with the maps
+    and summary JSON for the same run.
+    """
+    pytest.importorskip("h5py")
+    import h5py
+
+    members = np.array(
+        [
+            [[0.4], [0.4]],
+            [[0.4], [0.4]],
+            [[0.0], [0.0]],
+            [[0.0], [0.0]],
+        ],
+        dtype=np.float32,
+    )
+    h5_path = tmp_path / "forecast_members.h5"
+    with h5py.File(h5_path, "w") as h5:
+        h5.create_dataset("raw_members_wd", data=members)
+        h5.create_dataset("calibrated_members_wd", data=members)
+        h5.create_dataset("lead_time_hours", data=np.array([0.5, 1.0], dtype=np.float32))
+        h5.create_dataset("wettable_mask", data=np.array([True], dtype=np.uint8))
+
+    adapter = CalibrationAdapter(
+        crps_mbm={
+            "lead_time_hours": [0.0, 999.0],
+            "wet_frequency_edges": [0.0, 1.0],
+            "wet_frequency_by_cell": [0.5],
+            "coefficients": [[[0.0, 1.0, 1.0]]],
+        },
+        isotonic={
+            "lead_time_hours": [0.0, 999.0],
+            "wet_frequency_edges": [0.0, 1.0],
+            "curves": {
+                f"{0.30:.6g}": {
+                    "lead_0_wet_0": {"x": [0.0, 0.5, 1.0], "y": [0.0, 0.25, 0.75]},
+                }
+            },
+        },
+    )
+
+    payload = ForecastProductBuilder.summarize_cell_timeseries(
+        h5_bytes=h5_path.read_bytes(),
+        cell_index=0,
+        thresholds_m=(0.30,),
+        calibration_adapter=adapter,
+    )
+
+    # Raw frequency is 2/4 = 0.5 at both times. The isotonic curve maps 0.5
+    # to 0.25, proving the inspector did not merely return raw member counts.
+    assert payload["calibrated_exceedance_prob"]["0.3"] == pytest.approx([0.25, 0.25])
+
+
+def test_summarize_cell_timeseries_marks_dry_cell(tmp_path):
+    """Wettable=False must be preserved through the HDF5 round-trip."""
+    pytest.importorskip("h5py")
+    import h5py
+
+    members = np.zeros((2, 3, 4), dtype=np.float32)
+    h5_path = tmp_path / "forecast_members.h5"
+    with h5py.File(h5_path, "w") as h5:
+        h5.create_dataset("raw_members_wd", data=members)
+        h5.create_dataset("calibrated_members_wd", data=members)
+        h5.create_dataset("lead_time_hours", data=np.array([0.5, 1.0, 1.5], dtype=np.float32))
+        h5.create_dataset("wettable_mask", data=np.array([True, True, True, False], dtype=np.uint8))
+
+    payload = ForecastProductBuilder.summarize_cell_timeseries(
+        h5_bytes=h5_path.read_bytes(),
+        cell_index=3,
+    )
+    assert payload["wettable"] is False
+
+
+def test_summarize_cell_timeseries_rejects_out_of_range(tmp_path):
+    """Defence-in-depth: the API route validates this too, but the helper
+    must refuse on its own so direct callers (tests, scripts) can't smuggle
+    a bad index past h5py's silent slice clamp."""
+    pytest.importorskip("h5py")
+    import h5py
+
+    members = np.zeros((1, 1, 2), dtype=np.float32)
+    h5_path = tmp_path / "forecast_members.h5"
+    with h5py.File(h5_path, "w") as h5:
+        h5.create_dataset("raw_members_wd", data=members)
+        h5.create_dataset("calibrated_members_wd", data=members)
+        h5.create_dataset("lead_time_hours", data=np.array([0.5], dtype=np.float32))
+        h5.create_dataset("wettable_mask", data=np.array([True, True], dtype=np.uint8))
+
+    with pytest.raises(IndexError, match="out of range"):
+        ForecastProductBuilder.summarize_cell_timeseries(
+            h5_bytes=h5_path.read_bytes(), cell_index=2
+        )
+    with pytest.raises(IndexError, match="out of range"):
+        ForecastProductBuilder.summarize_cell_timeseries(
+            h5_bytes=h5_path.read_bytes(), cell_index=-1
+        )
+
+
+def test_spread_to_peak_histogram_handles_no_signal_cells(tmp_path):
+    forecast = ForecastResult(
+        members_wd=np.zeros((4, 3, 5), dtype=np.float32),
+        lead_time_hours=np.array([0.5, 1.0, 1.5], dtype=np.float32),
+        wettable_mask=np.array([True, True, True, True, False]),
+    )
+    written = ForecastProductBuilder().write_spread_to_peak_histogram(forecast, output_dir=tmp_path)
+    assert {"spread_to_peak_histogram.json", "spread_to_peak_histogram.svg"} == set(written)
+    payload = json.loads(written["spread_to_peak_histogram.json"].read_text())
+    assert payload["n_wettable_cells"] == 4
+    assert payload["n_signal_cells"] == 0
+    assert payload["median_ratio"] is None
+    assert sum(payload["counts"]) == 0
+
+
+def test_cell_contribution_leaderboard_is_area_weighted(tmp_path):
+    members = np.array(
+        [
+            [[0.0, 0.0], [0.4, 0.4]],
+            [[0.0, 0.0], [0.0, 0.4]],
+        ],
+        dtype=np.float32,
+    )
+    forecast = ForecastResult(
+        members_wd=members,
+        lead_time_hours=np.array([0.5, 1.0], dtype=np.float32),
+        wettable_mask=np.array([True, True]),
+        metadata={
+            "cell_area_m2": np.array([100.0, 10.0], dtype=np.float32),
+            "geometry_xy": np.array([[1.0, 2.0], [3.0, 4.0]], dtype=np.float32),
+        },
+    )
+    leaderboard = ForecastProductBuilder().build_cell_contribution_leaderboard(
+        forecast,
+        threshold_m=0.30,
+        top_n=2,
+    )
+    assert leaderboard["rows"][0]["cell_index"] == 0
+    assert leaderboard["rows"][0]["peak_probability"] == pytest.approx(0.5)
+    assert leaderboard["rows"][0]["peak_expected_area_m2"] == pytest.approx(50.0)
+    assert leaderboard["rows"][1]["peak_expected_area_m2"] == pytest.approx(10.0)
+
+
+def test_orchestrator_writes_geometry_meta_and_hdf5_by_default(tmp_path):
+    """Per the Phase 2 plan, submitting a run without overriding flags must
+    produce both ``geometry_meta.json`` (for the click overlay) and
+    ``forecast_members.h5`` (for the per-cell endpoint). Either missing
+    breaks the inspector silently."""
+    pytest.importorskip("h5py")
+    bundle = _bundle(tmp_path)
+    coeff = {
+        "lead_time_hours": [0.0, 999.0],
+        "wet_frequency_edges": [0.0, 1.0],
+        "wet_frequency_by_cell": [1.0] * 8,
+        "coefficients": [[[0.0, 1.0, 0.5]]],
+    }
+    orchestrator = RunOrchestrator(
+        bundle=bundle,
+        repository=InMemoryRunRepository(),
+        queue=InMemoryJobQueue(),
+        artifact_store=LocalArtifactStore(tmp_path / "artifacts"),
+        access_policy=AccessPolicy(allowed_emails=["user@example.com"]),
+        inference_service=FakeFGNInferenceService(bundle, n_cells=8),
+        calibration_adapter=CalibrationAdapter(crps_mbm=coeff),
+        product_builder=ForecastProductBuilder(),
+    )
+    user = User(user_id="u1", email="user@example.com", disclaimer_acknowledged=True)
+    # No explicit request_full_hdf5 → relies on the new default.
+    record = orchestrator.submit(user=user, forcing_csv=_valid_csv(24), forecast_steps=4)
+    assert record.spec.request_full_hdf5 is True
+    orchestrator.execute(record.spec.run_id)
+    ids = {a.artifact_id for a in orchestrator.artifact_store.list(record.spec.run_id)}
+    assert "geometry_meta.json" in ids
+    assert "forecast_members.h5" in ids
+
+
+def test_envelope_maps_have_expected_files_and_shape(tmp_path):
+    """Envelope maps must produce exactly four file kinds with [n_cells] shape.
+
+    The Hazard tab discovers these by filename and reads them as float32 .npy
+    arrays. Any drift in the contract here silently empties the small-multiples.
+    """
+    members = np.array(
+        [
+            [[0.00, 0.10, 0.40, 0.20], [0.00, 0.05, 0.20, 0.10], [0.00, 0.02, 0.05, 0.02]],
+            [[0.00, 0.20, 0.60, 0.30], [0.00, 0.10, 0.30, 0.15], [0.00, 0.03, 0.08, 0.03]],
+        ],
+        dtype=np.float32,
+    )
+    # members has shape [n_time=3, n_cells=4]? No: above is [n_members=2, n_time=3, n_cells=4]
+    forecast = ForecastResult(
+        members_wd=members,
+        lead_time_hours=np.array([0.5, 1.0, 1.5], dtype=np.float32),
+        wettable_mask=np.array([True, True, True, False]),
+    )
+    written = ForecastProductBuilder().write_envelope_maps(forecast, output_dir=tmp_path)
+    expected = {
+        "peak_depth_map.npy",
+        "quantile_envelope_at_peak.npy",
+        "arrival_time_map_gt_0p05m.npy",
+        "duration_map_gt_0p05m.npy",
+        "arrival_time_map_gt_0p3m.npy",
+        "duration_map_gt_0p3m.npy",
+    }
+    assert set(written) == expected
+    for name in expected:
+        arr = np.load(written[name])
+        assert arr.shape == (4,), f"{name} shape={arr.shape}"
+        assert arr.dtype == np.float32, f"{name} dtype={arr.dtype}"
+        # Structurally-dry cell (index 3) must be NaN in every map.
+        assert np.isnan(arr[3]), f"{name} expected NaN at structurally-dry cell"
+
+
+def test_envelope_maps_are_nonneg_and_consistent_with_summary(tmp_path):
+    """Sanity: peak_depth_map.max() must equal summary['max_mean_wd_m'] and
+    duration must be a non-negative multiple of dt; arrival NaNs only when the
+    cell never crosses threshold.
+    """
+    members = np.array(
+        [
+            [[0.0, 0.1, 0.5, 0.2], [0.0, 0.0, 0.0, 0.0]],
+            [[0.0, 0.3, 0.7, 0.4], [0.0, 0.0, 0.0, 0.0]],
+        ],
+        dtype=np.float32,
+    )
+    # cells: 0 stays dry, 1 wets then dries, 2 deeply floods, 3 mildly floods.
+    forecast = ForecastResult(
+        members_wd=members,
+        lead_time_hours=np.array([0.5, 1.0, 1.5, 2.0], dtype=np.float32),
+        wettable_mask=np.ones(2, dtype=bool),
+    )
+    # members[:, :, c=0,1,2,3] — wait, dims mismatch. Rebuild properly.
+    # Shape needed: [n_members=2, n_time=4, n_cells=2]
+    members = np.array(
+        [
+            [[0.00, 0.00], [0.10, 0.00], [0.50, 0.20], [0.20, 0.05]],
+            [[0.00, 0.00], [0.30, 0.00], [0.70, 0.40], [0.40, 0.15]],
+        ],
+        dtype=np.float32,
+    )
+    forecast = ForecastResult(
+        members_wd=members,
+        lead_time_hours=np.array([0.5, 1.0, 1.5, 2.0], dtype=np.float32),
+        wettable_mask=np.ones(2, dtype=bool),
+    )
+    builder = ForecastProductBuilder()
+    written = builder.write_envelope_maps(forecast, output_dir=tmp_path)
+    peak = np.load(written["peak_depth_map.npy"])
+    arrival_05 = np.load(written["arrival_time_map_gt_0p05m.npy"])
+    duration_05 = np.load(written["duration_map_gt_0p05m.npy"])
+    summary = builder.build_summary(forecast, label="raw")
+    # max_mean_wd_m is the spatio-temporal max of the ensemble mean.
+    assert float(np.nanmax(peak)) == pytest.approx(summary["max_mean_wd_m"], rel=1e-5)
+    # Cell 0 wets first at t=1.0 h (mean = 0.20 > 0.05), so arrival is 1.0 h.
+    assert arrival_05[0] == pytest.approx(1.0, abs=1e-5)
+    # Cell 1 wets first at t=1.5 h (mean = 0.30 > 0.05), so arrival is 1.5 h.
+    assert arrival_05[1] == pytest.approx(1.5, abs=1e-5)
+    # Cell 0 above 0.05 m at t ∈ {1.0, 1.5, 2.0} → 3 timesteps × dt=0.5 h = 1.5 h.
+    assert duration_05[0] == pytest.approx(1.5, abs=1e-5)
+    # Both durations must be non-negative.
+    assert np.all(duration_05[~np.isnan(duration_05)] >= 0)
+
+
+def test_envelope_maps_arrival_is_nan_when_never_wets(tmp_path):
+    """A cell whose ensemble-mean depth never exceeds the threshold must get
+    NaN for arrival; duration must be zero (not NaN, because the wet-ness
+    integral is well-defined as zero)."""
+    members = np.zeros((2, 3, 2), dtype=np.float32)
+    members[:, :, 0] = 0.01  # below 0.05 m threshold everywhere
+    members[:, 2, 1] = 0.20  # cell 1 wets only at t=3
+    forecast = ForecastResult(
+        members_wd=members,
+        lead_time_hours=np.array([0.5, 1.0, 1.5], dtype=np.float32),
+        wettable_mask=np.ones(2, dtype=bool),
+    )
+    written = ForecastProductBuilder().write_envelope_maps(forecast, output_dir=tmp_path)
+    arrival_05 = np.load(written["arrival_time_map_gt_0p05m.npy"])
+    duration_05 = np.load(written["duration_map_gt_0p05m.npy"])
+    assert np.isnan(arrival_05[0])
+    assert duration_05[0] == pytest.approx(0.0)
+    assert arrival_05[1] == pytest.approx(1.5, abs=1e-5)
+
+
+def test_orchestrator_writes_envelope_maps_to_artifact_store(tmp_path):
+    """Orchestrator.execute() must persist the envelope maps as run artifacts.
+
+    Without this contract the Hazard tab can't discover them.
+    """
+    bundle = _bundle(tmp_path)
+    coeff = {
+        "lead_time_hours": [0.0, 999.0],
+        "wet_frequency_edges": [0.0, 1.0],
+        "wet_frequency_by_cell": [1.0] * 8,
+        "coefficients": [[[0.0, 1.0, 0.5]]],
+    }
+    orchestrator = RunOrchestrator(
+        bundle=bundle,
+        repository=InMemoryRunRepository(),
+        queue=InMemoryJobQueue(),
+        artifact_store=LocalArtifactStore(tmp_path / "artifacts"),
+        access_policy=AccessPolicy(allowed_emails=["user@example.com"]),
+        inference_service=FakeFGNInferenceService(bundle, n_cells=8),
+        calibration_adapter=CalibrationAdapter(crps_mbm=coeff),
+        product_builder=ForecastProductBuilder(),
+    )
+    user = User(user_id="u1", email="user@example.com", disclaimer_acknowledged=True)
+    record = orchestrator.submit(user=user, forcing_csv=_valid_csv(24), forecast_steps=4)
+    orchestrator.execute(record.spec.run_id)
+    ids = {a.artifact_id for a in orchestrator.artifact_store.list(record.spec.run_id)}
+    expected_envelope = {
+        "peak_depth_map.npy",
+        "quantile_envelope_at_peak.npy",
+        "arrival_time_map_gt_0p05m.npy",
+        "duration_map_gt_0p05m.npy",
+        "arrival_time_map_gt_0p3m.npy",
+        "duration_map_gt_0p3m.npy",
+    }
+    assert expected_envelope.issubset(ids), f"missing: {expected_envelope - ids}"
+
+
+def test_forecast_product_builder_writes_scrub_frames(tmp_path):
+    """Scrub frames must be one-per-timestep with deterministic naming.
+
+    The web Time Player relies on the ``{label}_{product}_scrub_t{NNN}.png``
+    naming contract to discover available frames from the artifact list. The
+    default product is ``mean`` (preserves Phase-1/2 backwards compatibility).
+    """
+    members = np.array(
+        [[[0.0, 0.2, 0.4], [0.1, 0.3, 0.5], [0.2, 0.4, 0.6], [0.3, 0.5, 0.7]]],
+        dtype=np.float32,
+    )
     geometry = np.array([[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]], dtype=np.float32)
     forecast = ForecastResult(
         members_wd=members,
-        lead_time_hours=np.array([1.0], dtype=np.float32),
+        lead_time_hours=np.array([0.5, 1.0, 1.5, 2.0], dtype=np.float32),
         wettable_mask=np.ones(3, dtype=bool),
         metadata={"geometry_xy": geometry},
     )
-    paths = ForecastProductBuilder().write_map_pngs(forecast, output_dir=tmp_path, label="calibrated", max_times=1)
+    paths = ForecastProductBuilder().write_scrub_frames(forecast, output_dir=tmp_path, label="calibrated")
     assert len(paths) == 4
+    names = [p.name for p in paths]
+    assert names == [
+        "calibrated_mean_scrub_t001.png",
+        "calibrated_mean_scrub_t002.png",
+        "calibrated_mean_scrub_t003.png",
+        "calibrated_mean_scrub_t004.png",
+    ]
+    for path in paths:
+        assert path.exists() and path.stat().st_size > 0
+
+
+def test_scrub_frames_support_spread_and_exceedance_products(tmp_path):
+    """Phase 3 contract: the Time Player toggles between three product streams.
+
+    Every supported product must produce per-timestep frames with the
+    ``{label}_{product}_scrub_t{NNN}.png`` naming pattern. Adding a product
+    here without updating the frontend matcher leaves orphaned files; the
+    inverse leaves an empty toggle. Either is a P3 regression.
+    """
+    members = np.array(
+        [
+            [[0.00, 0.10, 0.40], [0.10, 0.30, 0.60], [0.20, 0.40, 0.80]],
+            [[0.00, 0.20, 0.50], [0.30, 0.50, 0.70], [0.40, 0.60, 0.90]],
+        ],
+        dtype=np.float32,
+    )
+    geometry = np.array([[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]], dtype=np.float32)
+    forecast = ForecastResult(
+        members_wd=members,
+        lead_time_hours=np.array([0.5, 1.0, 1.5], dtype=np.float32),
+        wettable_mask=np.ones(3, dtype=bool),
+        metadata={"geometry_xy": geometry},
+    )
+    builder = ForecastProductBuilder()
+    for product, expected_prefix in [
+        ("mean", "calibrated_mean_scrub_t"),
+        ("spread", "calibrated_spread_scrub_t"),
+        ("p95", "calibrated_p95_scrub_t"),
+        ("iqr", "calibrated_iqr_scrub_t"),
+        ("p_gt_0p30m", "calibrated_p_gt_0p30m_scrub_t"),
+    ]:
+        paths = builder.write_scrub_frames(
+            forecast, output_dir=tmp_path / product, product=product
+        )
+        assert len(paths) == 3, f"{product}: expected 3 frames, got {len(paths)}"
+        for i, path in enumerate(paths):
+            assert path.name == f"{expected_prefix}{i + 1:03d}.png", path.name
+            assert path.stat().st_size > 0
+
+
+def test_scrub_frames_reject_unknown_product(tmp_path):
+    """Unknown product = explicit ValueError, not silent empty output."""
+    forecast = ForecastResult(
+        members_wd=np.zeros((1, 1, 2), dtype=np.float32),
+        lead_time_hours=np.array([0.5], dtype=np.float32),
+        wettable_mask=np.ones(2, dtype=bool),
+        metadata={"geometry_xy": np.array([[0.0, 0.0], [1.0, 0.0]], dtype=np.float32)},
+    )
+    with pytest.raises(ValueError, match="Unsupported scrub product"):
+        ForecastProductBuilder().write_scrub_frames(
+            forecast, output_dir=tmp_path, product="foo"
+        )
+
+
+def test_orchestrator_emits_all_scrub_product_streams(tmp_path):
+    """End-to-end: requesting an animation must populate scrub frames for
+    every product in SCRUB_PRODUCTS. The Forecast-maps slider and Time
+    Player's toggle both depend on this multi-product artifact set being
+    complete; missing one silently shrinks the toggle."""
+    bundle = _bundle(tmp_path)
+    coeff = {
+        "lead_time_hours": [0.0, 999.0],
+        "wet_frequency_edges": [0.0, 1.0],
+        "wet_frequency_by_cell": [1.0] * 8,
+        "coefficients": [[[0.0, 1.0, 0.5]]],
+    }
+    orchestrator = RunOrchestrator(
+        bundle=bundle,
+        repository=InMemoryRunRepository(),
+        queue=InMemoryJobQueue(),
+        artifact_store=LocalArtifactStore(tmp_path / "artifacts"),
+        access_policy=AccessPolicy(allowed_emails=["user@example.com"]),
+        inference_service=FakeFGNInferenceService(bundle, n_cells=8),
+        calibration_adapter=CalibrationAdapter(crps_mbm=coeff),
+        product_builder=ForecastProductBuilder(),
+    )
+    user = User(user_id="u1", email="user@example.com", disclaimer_acknowledged=True)
+    record = orchestrator.submit(
+        user=user,
+        forcing_csv=_valid_csv(24),
+        forecast_steps=3,
+        request_animation=True,
+    )
+    orchestrator.execute(record.spec.run_id)
+    ids = {a.artifact_id for a in orchestrator.artifact_store.list(record.spec.run_id)}
+    for product in ("mean", "spread", "p95", "iqr", "p_gt_0p30m"):
+        prefix = f"calibrated_{product}_scrub_t"
+        matches = sorted(name for name in ids if name.startswith(prefix) and name.endswith(".png"))
+        assert len(matches) == 3, f"{product}: expected 3 scrub frames, got {len(matches)} ({matches})"
+
+
+def test_orchestrator_submit_with_animation_writes_scrub_frames(tmp_path):
+    """When animation is requested, scrub frames must land alongside the GIF."""
+    bundle = _bundle(tmp_path)
+    coeff = {
+        "lead_time_hours": [0.0, 999.0],
+        "wet_frequency_edges": [0.0, 1.0],
+        "wet_frequency_by_cell": [1.0] * 8,
+        "coefficients": [[[0.0, 1.0, 0.5]]],
+    }
+    orchestrator = RunOrchestrator(
+        bundle=bundle,
+        repository=InMemoryRunRepository(),
+        queue=InMemoryJobQueue(),
+        artifact_store=LocalArtifactStore(tmp_path / "artifacts"),
+        access_policy=AccessPolicy(allowed_emails=["user@example.com"]),
+        inference_service=FakeFGNInferenceService(bundle, n_cells=8),
+        calibration_adapter=CalibrationAdapter(crps_mbm=coeff),
+        product_builder=ForecastProductBuilder(),
+    )
+    user = User(user_id="u1", email="user@example.com", disclaimer_acknowledged=True)
+    record = orchestrator.submit(
+        user=user,
+        forcing_csv=_valid_csv(24),
+        forecast_steps=4,
+        request_animation=True,
+    )
+    orchestrator.execute(record.spec.run_id)
+    artifacts = {a.artifact_id for a in orchestrator.artifact_store.list(record.spec.run_id)}
+    expected_scrub = {f"calibrated_mean_scrub_t{i:03d}.png" for i in range(1, 5)}
+    assert expected_scrub.issubset(artifacts), f"missing scrub frames: {expected_scrub - artifacts}"
+
+
+def test_forecast_product_builder_writes_map_pngs(tmp_path):
+    members = np.array([[[0.0, 0.2, 0.4, 0.6]], [[0.1, 0.3, 0.5, 0.7]]], dtype=np.float32)
+    geometry = np.array(
+        [[0.0, 0.0], [1.0, 0.0], [0.0, 1.0], [1.0, 1.0]],
+        dtype=np.float32,
+    )
+    forecast = ForecastResult(
+        members_wd=members,
+        lead_time_hours=np.array([1.0], dtype=np.float32),
+        wettable_mask=np.ones(4, dtype=bool),
+        metadata={
+            "geometry_xy": geometry,
+            "elevation_raw": np.array([1.0, 2.0, 3.0, 4.0], dtype=np.float32),
+        },
+    )
+    paths = ForecastProductBuilder().write_map_pngs(forecast, output_dir=tmp_path, label="calibrated", max_times=1)
+    assert len(paths) >= 4
+    assert {path.name for path in paths}.issuperset(
+        {
+            "calibrated_p_gt_0p30m_t001.png",
+            "calibrated_iqr_t001.png",
+            "calibrated_p95_t001.png",
+            "calibrated_mean_t001.png",
+            "calibrated_spread_t001.png",
+        }
+    )
     assert all(path.exists() and path.stat().st_size > 0 and path.suffix == ".png" for path in paths)
+    basemap_metadata = tmp_path / "cartographic_context" / "basemap_metadata.json"
+    assert basemap_metadata.exists()
+    assert json.loads(basemap_metadata.read_text())["mode"] == "dem_elevation"

@@ -8,9 +8,10 @@ never imports FastAPI/Celery/Postgres or calls the batch eval application.
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Mapping, Protocol, Sequence
+from typing import Callable, Dict, Mapping, Protocol, Sequence
 
 import numpy as np
 
@@ -23,7 +24,13 @@ _LOG = logging.getLogger(__name__)
 
 
 class FGNInferenceService(Protocol):
-    def run(self, run_spec: RunSpec, forcing_input: ForcingInput) -> ForecastResult: ...
+    def run(
+        self,
+        run_spec: RunSpec,
+        forcing_input: ForcingInput,
+        *,
+        progress_callback: Callable[[float, str], None] | None = None,
+    ) -> ForecastResult: ...
 
 
 @dataclass(frozen=True)
@@ -47,9 +54,15 @@ class FakeFGNInferenceService:
         self.bundle = bundle
         self.n_cells = int(n_cells)
 
-    def run(self, run_spec: RunSpec, forcing_input: ForcingInput) -> ForecastResult:
+    def run(
+        self,
+        run_spec: RunSpec,
+        forcing_input: ForcingInput,
+        *,
+        progress_callback: Callable[[float, str], None] | None = None,
+    ) -> ForecastResult:
         rng = np.random.default_rng(int(run_spec.seed))
-        n_members = int(self.bundle.total_members)
+        n_members = int(run_spec.ensemble_count) * int(run_spec.members_per_ensemble)
         n_time = int(run_spec.forecast_steps)
         n_cells = self.n_cells
         lead_hours = (np.arange(1, n_time + 1, dtype=np.float32) * self.bundle.dt_seconds) / 3600.0
@@ -70,6 +83,15 @@ class FakeFGNInferenceService:
             indexing="xy",
         )
         geometry_xy = np.stack([grid_x.ravel(), grid_y.ravel()], axis=1)[:n_cells]
+        # Mirror the production checkpoint x latent layout in metadata so
+        # downstream consumers (spread decomposition, audit log) see the
+        # same shape they will at runtime. The fake doesn't actually run
+        # multiple checkpoints, but assigning the labels is the contract.
+        members_per_ensemble = int(run_spec.members_per_ensemble)
+        member_model_id = [f"model_{m // members_per_ensemble}" for m in range(n_members)]
+        member_sample_id = [m % members_per_ensemble for m in range(n_members)]
+        if progress_callback is not None:
+            progress_callback(1.0, f"GPU rollout complete ({n_members} members x {n_time} steps)")
         return ForecastResult(
             members_wd=members.astype(np.float32),
             lead_time_hours=lead_hours,
@@ -77,7 +99,12 @@ class FakeFGNInferenceService:
             metadata={
                 "adapter": "fake",
                 "bundle_id": self.bundle.bundle_id,
+                "ensemble_count": int(run_spec.ensemble_count),
+                "members_per_ensemble": members_per_ensemble,
                 "geometry_xy": geometry_xy,
+                "cell_area_m2": np.ones(n_cells, dtype=np.float32),
+                "member_model_id": member_model_id,
+                "member_sample_id": member_sample_id,
             },
         )
 
@@ -113,21 +140,46 @@ class ProductionFGNInferenceService:
 
         return torch
 
+    @staticmethod
+    def _load_trusted_checkpoint_file(path: Path, *, map_location: str = "cpu"):
+        """Load a file from a deployment bundle checkpoint we already trust.
+
+        PyTorch 2.6 changed ``torch.load`` to default to ``weights_only=True``.
+        The legacy checkpoint payloads contain config scalar types, so serving
+        intentionally loads them as trusted files after bundle validation has
+        constrained the checkpoint paths.
+        """
+        import torch
+
+        try:
+            return torch.load(path, map_location=map_location, weights_only=False)
+        except TypeError:  # Older PyTorch releases do not expose weights_only.
+            return torch.load(path, map_location=map_location)
+
     def _device(self):
         torch = self._torch()
         if "cuda" in self.device_name and not torch.cuda.is_available():
-            _LOG.warning("CUDA device %s requested but unavailable; falling back to CPU.", self.device_name)
+            message = f"CUDA device {self.device_name} requested but unavailable."
+            if os.getenv("FGN_INFERENCE_MODE", "").strip().lower() == "production":
+                raise RuntimeError(f"{message} Production serving refuses to fall back to CPU.")
+            _LOG.warning("%s Falling back to CPU.", message)
             return torch.device("cpu")
         return torch.device(self.device_name)
 
-    @staticmethod
-    def _load_array(path: Path):
+    @classmethod
+    def _load_array(cls, path: Path):
+        """Load a domain asset tensor from disk.
+
+        ``.pt``/``.pth`` payloads route through the same trusted loader as
+        checkpoint metadata so PyTorch 2.6+'s ``weights_only=True`` default
+        does not reject pickled tensor containers in validated bundles.
+        """
         torch = __import__("torch")
         suffix = path.suffix.lower()
         if suffix == ".npy":
             return torch.as_tensor(np.load(path), dtype=torch.float32)
         if suffix in {".pt", ".pth"}:
-            value = torch.load(path, map_location="cpu")
+            value = cls._load_trusted_checkpoint_file(path, map_location="cpu")
             if isinstance(value, dict):
                 for key in ("tensor", "data", "array", "geometry", "static", "dry_mask"):
                     if key in value:
@@ -145,7 +197,6 @@ class ProductionFGNInferenceService:
             from neuralop import get_model
             from neuralop.flood.eval.runtime import clone_model_config_for_get_model
             from neuralop.models.base_model import BaseModel
-            from neuralop.training.training_state import load_training_state
 
             def _metadata_candidates(run_dir: Path, alias: str):
                 return [
@@ -153,6 +204,12 @@ class ProductionFGNInferenceService:
                     run_dir / "model_metadata.pkl",
                     run_dir / "best_model_metadata.pkl",
                 ]
+
+            def _state_dict_path(run_dir: Path, alias: str) -> Path:
+                state_path = run_dir / f"{alias}_state_dict.pt"
+                if not state_path.exists():
+                    raise FileNotFoundError(f"Missing checkpoint state dict: {state_path}")
+                return state_path
 
             def _instantiate_from_metadata(metadata: Dict[str, object]):
                 arch_name = str(metadata.get("_name", "")).strip().lower()
@@ -176,7 +233,7 @@ class ProductionFGNInferenceService:
                 for meta_path in _metadata_candidates(Path(run_dir), alias):
                     if not meta_path.exists():
                         continue
-                    metadata = torch.load(meta_path, map_location="cpu")
+                    metadata = self._load_trusted_checkpoint_file(meta_path)
                     if isinstance(metadata, dict):
                         model = _instantiate_from_metadata(metadata)
                         break
@@ -190,7 +247,9 @@ class ProductionFGNInferenceService:
                     with Path(self.bundle.model_config_path).open("r", encoding="utf-8") as handle:
                         cfg = json.load(handle)
                     model = get_model(clone_model_config_for_get_model(cfg))
-                load_training_state(save_dir=run_dir, save_name=alias, model=model)
+                model.load_state_dict(
+                    self._load_trusted_checkpoint_file(_state_dict_path(Path(run_dir), alias), map_location="cpu")
+                )
                 models.append(model)
 
         expected = int(self.bundle.n_checkpoints)
@@ -288,6 +347,16 @@ class ProductionFGNInferenceService:
             "normalizers": normalizers,
             "geometry_norm": geometry_norm,
             "geometry_raw_np": geometry_raw.detach().cpu().numpy().astype(np.float32, copy=False),
+            "elevation_raw_np": static_raw[:, 0].detach().cpu().numpy().astype(np.float32, copy=False),
+            "cell_area_m2_np": static_raw[:, 1].detach().cpu().numpy().astype(np.float32, copy=False)
+            if static_raw.shape[1] > 1
+            else np.ones(int(geometry_raw.shape[0]), dtype=np.float32),
+            "slope_raw_np": static_raw[:, 2].detach().cpu().numpy().astype(np.float32, copy=False)
+            if static_raw.shape[1] > 2
+            else None,
+            "flow_accumulation_raw_np": static_raw[:, 6].detach().cpu().numpy().astype(np.float32, copy=False)
+            if static_raw.shape[1] > 6
+            else None,
             "static_norm": static_norm,
             "query_points": query_points,
             "structural_dry_mask": dry_mask,
@@ -314,7 +383,13 @@ class ProductionFGNInferenceService:
             raise ValueError("Forcing input is shorter than the requested forecast horizon.")
         return boundary_matrix[:, None, :].expand(-1, n_cells, -1).contiguous()
 
-    def run(self, run_spec: RunSpec, forcing_input: ForcingInput) -> ForecastResult:
+    def run(
+        self,
+        run_spec: RunSpec,
+        forcing_input: ForcingInput,
+        *,
+        progress_callback: Callable[[float, str], None] | None = None,
+    ) -> ForecastResult:
         torch = self._torch()
         from neuralop.flood.data.structural_dry import (
             apply_structural_dry_zero_mask,
@@ -352,9 +427,18 @@ class ProductionFGNInferenceService:
         member_model_id: list[str] = []
         member_sample_id: list[int] = []
         dtype = geometry.dtype
-        n_per_model = int(self.bundle.members_per_checkpoint)
+        n_models = int(run_spec.ensemble_count)
+        n_per_model = int(run_spec.members_per_ensemble)
+        if n_models < 1 or n_models > len(models):
+            raise ValueError(f"ensemble_count must be between 1 and {len(models)}.")
+        if n_per_model < 1 or n_per_model > int(self.bundle.members_per_checkpoint):
+            raise ValueError(
+                f"members_per_ensemble must be between 1 and {self.bundle.members_per_checkpoint}."
+            )
+        total_rollout_steps = max(1, n_models * n_time)
+        completed_rollout_steps = 0
         with torch.no_grad():
-            for model_idx, model in enumerate(models):
+            for model_idx, model in enumerate(models[:n_models]):
                 latent_bank = self._latent_bank(
                     n_members=n_per_model,
                     seed=int(run_spec.seed),
@@ -383,9 +467,9 @@ class ProductionFGNInferenceService:
                         x = torch.cat([static.unsqueeze(0).expand(chunk_size, -1, -1), bc_flat, dyn_flat], dim=2)
                         z = latent_bank[start_idx:end_idx, 0, :]
                         pred = model(
-                            input_geom=geometry.unsqueeze(0).expand(chunk_size, -1, -1),
-                            latent_queries=query_points.unsqueeze(0).expand(chunk_size, -1, -1, -1),
-                            output_queries=geometry.unsqueeze(0).expand(chunk_size, -1, -1),
+                            input_geom=geometry.unsqueeze(0),
+                            latent_queries=query_points.unsqueeze(0),
+                            output_queries=geometry.unsqueeze(0),
                             x=x,
                             ada_in=z,
                         )
@@ -410,6 +494,16 @@ class ProductionFGNInferenceService:
                             dim=0,
                         )
                     current_boundary = torch.cat([current_boundary[1:], boundary_future[t].unsqueeze(0)], dim=0)
+                    completed_rollout_steps += 1
+                    if progress_callback is not None:
+                        fraction = completed_rollout_steps / total_rollout_steps
+                        progress_callback(
+                            fraction,
+                            (
+                                f"GPU rollout model {model_idx + 1}/{n_models}, "
+                                f"lead {t + 1}/{n_time}"
+                            ),
+                        )
                 outputs.append(torch.stack(model_members, dim=1))  # [M,T,N]
                 member_model_id.extend([f"model_{model_idx}"] * n_per_model)
                 member_sample_id.extend(list(range(n_per_model)))
@@ -430,8 +524,14 @@ class ProductionFGNInferenceService:
                 "bundle_id": self.bundle.bundle_id,
                 "member_model_id": member_model_id,
                 "member_sample_id": member_sample_id,
+                "ensemble_count": n_models,
+                "members_per_ensemble": n_per_model,
                 "seed": int(run_spec.seed),
                 "geometry_xy": prepared.get("geometry_raw_np"),
+                "elevation_raw": prepared.get("elevation_raw_np"),
+                "cell_area_m2": prepared.get("cell_area_m2_np"),
+                "slope_raw": prepared.get("slope_raw_np"),
+                "flow_accumulation_raw": prepared.get("flow_accumulation_raw_np"),
                 "fgn_latent_temporal_mode": "persistent",
                 "fgn_ar_state_update": "member_feedback",
             },
