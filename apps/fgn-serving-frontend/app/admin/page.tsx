@@ -4,21 +4,33 @@ import { useCallback, useEffect, useState } from "react";
 
 type UserRow = { email: string; is_admin: boolean; disclaimer_acknowledged?: boolean };
 type RunRow = { run_id: string; label?: string; status: string; pinned: boolean; created_at: string };
+type CandidateRow = {
+  candidate_id: string;
+  run_id: string;
+  owner_email: string;
+  candidate_score: number;
+  reason: string;
+  status: string;
+  created_at: string;
+};
 
 export default function AdminPage() {
   const [users, setUsers] = useState<UserRow[]>([]);
   const [runs, setRuns] = useState<RunRow[]>([]);
+  const [candidates, setCandidates] = useState<CandidateRow[]>([]);
   const [email, setEmail] = useState("");
   const [admin, setAdmin] = useState(false);
   const [message, setMessage] = useState("");
 
   const refresh = useCallback(async () => {
-    const [usersRes, runsRes] = await Promise.all([
+    const [usersRes, runsRes, candidatesRes] = await Promise.all([
       fetch("/api/admin/users", { cache: "no-store" }),
       fetch("/api/admin/runs", { cache: "no-store" }),
+      fetch("/api/admin/retraining-candidates", { cache: "no-store" }),
     ]);
     if (usersRes.ok) setUsers(await usersRes.json());
     if (runsRes.ok) setRuns(await runsRes.json());
+    if (candidatesRes.ok) setCandidates(await candidatesRes.json());
   }, []);
 
   useEffect(() => { refresh().catch(() => undefined); }, [refresh]);
@@ -47,10 +59,21 @@ export default function AdminPage() {
     await refresh();
   }
 
+  async function candidateAction(candidateId: string, status: string) {
+    const res = await fetch(`/api/admin/retraining-candidates/${encodeURIComponent(candidateId)}/status`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ status }),
+    });
+    setMessage(res.ok ? `Candidate marked ${status}.` : `Candidate update failed: ${await res.text()}`);
+    await refresh();
+  }
+
   return (
     <main className="shell">
       <a href="/">Back to console</a>
       <h1>FGN Serving Admin</h1>
+      <a href="/admin/monitoring" style={{marginLeft: 12}}>Monitoring Dashboard →</a>
       {message && <p className="message">{message}</p>}
       <section className="panel">
         <h2>Allowlist</h2>
@@ -70,6 +93,32 @@ export default function AdminPage() {
                 <td><button onClick={() => removeUser(user.email)}>Remove</button></td>
               </tr>
             ))}
+          </tbody>
+        </table>
+      </section>
+      <section className="panel">
+        <h2>Retraining Candidates</h2>
+        <table>
+          <thead><tr><th>Candidate</th><th>Owner</th><th>Score</th><th>Status</th><th>Reason</th><th>Actions</th></tr></thead>
+          <tbody>
+            {candidates.map((candidate) => (
+              <tr key={candidate.candidate_id}>
+                <td><a href={`/runs/${candidate.run_id}`}>{candidate.run_id.slice(0, 10)}</a></td>
+                <td>{candidate.owner_email}</td>
+                <td>{candidate.candidate_score.toFixed(2)}</td>
+                <td>{candidate.status}</td>
+                <td>{candidate.reason}</td>
+                <td>
+                  <button onClick={() => candidateAction(candidate.candidate_id, "REVIEWED")}>Review</button>
+                  <button onClick={() => candidateAction(candidate.candidate_id, "SELECTED_FOR_HECRAS")}>Select HEC-RAS</button>
+                  <button onClick={() => candidateAction(candidate.candidate_id, "REJECTED")}>Reject</button>
+                  <button onClick={() => candidateAction(candidate.candidate_id, "SIMULATED")}>Simulated</button>
+                </td>
+              </tr>
+            ))}
+            {candidates.length === 0 && (
+              <tr><td colSpan={6}>No retraining candidates yet.</td></tr>
+            )}
           </tbody>
         </table>
       </section>
