@@ -5,6 +5,8 @@ on:
     branches: [main]
     paths:
       - ".github/workflows/fgn-serving-ci.yml"
+      - ".github/workflows/fgn-serving-images.yml"
+      - ".github/workflows/fgn-serving-deploy-lab.yml"
       - "apps/fgn-serving-frontend/**"
       - "deployment/fgn-serving/**"
       - "neuralop/flood/serving/**"
@@ -17,6 +19,8 @@ on:
   pull_request:
     paths:
       - ".github/workflows/fgn-serving-ci.yml"
+      - ".github/workflows/fgn-serving-images.yml"
+      - ".github/workflows/fgn-serving-deploy-lab.yml"
       - "apps/fgn-serving-frontend/**"
       - "deployment/fgn-serving/**"
       - "neuralop/flood/serving/**"
