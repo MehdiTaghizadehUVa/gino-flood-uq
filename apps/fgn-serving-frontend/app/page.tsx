@@ -20,6 +20,12 @@ type Bundle = {
   members_per_checkpoint: number;
   total_members: number;
   research_disclaimer: string;
+  initial_condition?: {
+    default_mode?: string;
+    reference_scope?: string | null;
+    k_neighbors?: number | null;
+    has_library?: boolean;
+  };
 };
 
 type RunTiming = {
@@ -97,6 +103,45 @@ type RunStatus =
   | "CANCELED"
   | "EXPIRED"
   | "DELETED";
+
+const DESCRIPTOR_LABELS: Record<string, string> = {
+  stage_max: "Peak coastal stage",
+  stage_min: "Minimum coastal stage",
+  stage_range: "Coastal-stage range",
+  precipitation_total: "Total precipitation",
+  precipitation_mean: "Mean precipitation",
+  precipitation_max: "Peak precipitation",
+  precipitation_active_hours: "Precipitation duration",
+  precipitation_peak_lead_hours: "Lead time to peak precipitation",
+};
+
+function formatDescriptorLabel(descriptor?: string | null): string {
+  if (!descriptor) return "Monitored scenario pattern";
+  if (DESCRIPTOR_LABELS[descriptor]) return DESCRIPTOR_LABELS[descriptor];
+  return descriptor
+    .replace(/wd/g, "water depth")
+    .replace(/iqr/g, "IQR")
+    .replace(/_/g, " ")
+    .replace(/\b\w/g, (char) => char.toUpperCase());
+}
+
+function formatScreeningFlag(flag: { code: string; message: string; descriptor?: string | null }): string {
+  const label = formatDescriptorLabel(flag.descriptor);
+  switch (flag.code) {
+    case "above_candidate_reference":
+      return `${label} is above the historical reference envelope.`;
+    case "below_candidate_reference":
+      return `${label} is below the historical reference envelope.`;
+    case "above_reference_warning":
+      return `${label} is near the upper edge of the reference envelope.`;
+    case "below_reference_warning":
+      return `${label} is near the lower edge of the reference envelope.`;
+    case "multivariate_outlier":
+      return "The combined input pattern is unusual relative to the reference population.";
+    default:
+      return flag.message.replace(/_/g, " ");
+  }
+}
 
 const RUN_STAGES: RunStatus[] = ["SUBMITTED", "VALIDATING", "QUEUED", "RUNNING", "POSTPROCESSING", "COMPLETED"];
 const ACTIVE_STATUSES: ReadonlySet<RunStatus> = new Set([
@@ -536,10 +581,6 @@ function ForcingPreviewPanel({
   const stageY0 = padT;
   const precipY0 = padT + panelH + gap;
   const innerW = width - padL - padR;
-  const xValues = points.map((point) => point.timeHours);
-  const xMin = Math.min(...xValues);
-  const xMax = Math.max(...xValues);
-  const xSpan = Math.max(xMax - xMin, 1e-9);
   const spinupRows = scenarioSpinupRows(bundle);
   const requestedSteps = Number.parseInt(forecastStepsText, 10);
   const availableForecastSteps = Math.max(1, points.length - spinupRows);
@@ -548,58 +589,86 @@ function ForcingPreviewPanel({
     : availableForecastSteps;
   const forecastStartIndex = Math.min(spinupRows, points.length - 1);
   const forecastEndIndex = Math.min(spinupRows + forecastSteps - 1, points.length - 1);
-  const forecastStartH = points[forecastStartIndex]?.timeHours ?? xMin;
-  const forecastEndH = points[forecastEndIndex]?.timeHours ?? xMax;
+  const forecastStartH = points[forecastStartIndex]?.timeHours ?? points[0]?.timeHours ?? 0;
+  const plottedPoints = points
+    .slice(forecastStartIndex, forecastEndIndex + 1)
+    .map((point) => ({ ...point, leadHours: Math.max(0, point.timeHours - forecastStartH) }));
+  if (plottedPoints.length < 2) return null;
+  const xValues = plottedPoints.map((point) => point.leadHours);
+  const xMin = Math.min(...xValues);
+  const xMax = Math.max(...xValues);
+  const xSpan = Math.max(xMax - xMin, 1e-9);
   const xFor = (t: number) => padL + ((t - xMin) / xSpan) * innerW;
 
-  const stageMinRaw = Math.min(...points.map((point) => point.stage));
-  const stageMaxRaw = Math.max(...points.map((point) => point.stage));
+  const stageMinRaw = Math.min(...plottedPoints.map((point) => point.stage));
+  const stageMaxRaw = Math.max(...plottedPoints.map((point) => point.stage));
   const stagePad = Math.max((stageMaxRaw - stageMinRaw) * 0.08, 0.01);
   const stageTicks = niceTicks(stageMinRaw - stagePad, stageMaxRaw + stagePad, 4);
   const stageMin = stageTicks[0];
   const stageMax = stageTicks[stageTicks.length - 1];
   const stageSpan = Math.max(stageMax - stageMin, 1e-9);
   const stageYFor = (value: number) => stageY0 + (1 - (value - stageMin) / stageSpan) * panelH;
-  const stagePath = points
-    .map((point, index) => `${index === 0 ? "M" : "L"} ${xFor(point.timeHours).toFixed(2)} ${stageYFor(point.stage).toFixed(2)}`)
+  const stagePath = plottedPoints
+    .map((point, index) => `${index === 0 ? "M" : "L"} ${xFor(point.leadHours).toFixed(2)} ${stageYFor(point.stage).toFixed(2)}`)
     .join(" ");
 
-  const precipMaxRaw = Math.max(...points.map((point) => point.precipitation), 1e-3);
+  const precipMaxRaw = Math.max(...plottedPoints.map((point) => point.precipitation), 1e-3);
   const precipTicks = niceTicks(0, precipMaxRaw * 1.08, 4).filter((tick) => tick >= -1e-9);
   const precipMax = Math.max(precipTicks[precipTicks.length - 1] ?? precipMaxRaw, precipMaxRaw);
   const precipYFor = (value: number) => precipY0 + (1 - value / Math.max(precipMax, 1e-9)) * panelH;
   const xTicks = Array.from(new Set([xMin, ...niceTicks(xMin, xMax, 6), xMax]))
     .filter((tick) => tick >= xMin - 1e-9 && tick <= xMax + 1e-9)
     .sort((a, b) => a - b);
-  const barW = Math.max(2, (innerW / Math.max(points.length, 1)) * 0.68);
-  const totalPrecip = sumFinite(points.map((point) => point.precipitation));
+  const barW = Math.max(2, (innerW / Math.max(plottedPoints.length, 1)) * 0.68);
+  const totalPrecip = sumFinite(plottedPoints.map((point) => point.precipitation));
+  const hiddenRows = Math.max(0, forecastStartIndex);
 
   return (
     <div className="forcing-preview">
       <div className="preview-head">
         <div>
           <p className="eyebrow">Input preview</p>
-          <h3>Complete forcing time series</h3>
+          <h3>Forecast-window forcing</h3>
+          <p className="preview-subtitle">Spin-up/history rows are hidden from this preview.</p>
         </div>
         <span className="chart-pill calibrated">
-          {forecastSteps} forecast steps
+          {plottedPoints.length} steps
         </span>
       </div>
-      <div className="preview-stats" aria-label="Forcing summary">
-        <span><strong>{points.length}</strong> rows</span>
-        <span><strong>{(xMax - xMin).toFixed(1)}</strong> h duration</span>
-        <span><strong>{stageMinRaw.toFixed(2)}-{stageMaxRaw.toFixed(2)}</strong> m stage</span>
-        <span><strong>{precipMaxRaw.toFixed(2)}</strong> mm/step peak rain</span>
-        <span><strong>{totalPrecip.toFixed(1)}</strong> mm rain sum</span>
-      </div>
+      <table className="preview-stats" aria-label="Forcing summary">
+        <tbody>
+          <tr>
+            <th scope="row">Forecast rows</th>
+            <td><strong>{plottedPoints.length}</strong></td>
+          </tr>
+          <tr>
+            <th scope="row">Forecast window</th>
+            <td><strong>{(xMax - xMin).toFixed(1)} h</strong></td>
+          </tr>
+          <tr>
+            <th scope="row">Stage range</th>
+            <td><strong>{stageMinRaw.toFixed(2)}-{stageMaxRaw.toFixed(2)} m</strong></td>
+          </tr>
+          <tr>
+            <th scope="row">Peak rain</th>
+            <td><strong>{precipMaxRaw.toFixed(2)} mm/step</strong></td>
+          </tr>
+          <tr>
+            <th scope="row">Rain sum</th>
+            <td><strong>{totalPrecip.toFixed(1)} mm</strong></td>
+          </tr>
+          {hiddenRows > 0 && (
+            <tr>
+              <th scope="row">Hidden setup rows</th>
+              <td><strong>{hiddenRows}</strong></td>
+            </tr>
+          )}
+        </tbody>
+      </table>
       <svg className="forcing-preview-chart" viewBox={`0 0 ${width} ${height}`} role="img" aria-label="Stage and precipitation forcing preview">
         <rect x={0} y={0} width={width} height={height} fill="#ffffff" />
         <rect x={padL} y={stageY0} width={innerW} height={panelH} fill="#ffffff" stroke="#cbd5e1" />
         <rect x={padL} y={precipY0} width={innerW} height={panelH} fill="#ffffff" stroke="#cbd5e1" />
-        <rect x={padL} y={stageY0} width={Math.max(0, xFor(forecastStartH) - padL)} height={panelH} fill="#f8fafc" />
-        <rect x={padL} y={precipY0} width={Math.max(0, xFor(forecastStartH) - padL)} height={panelH} fill="#f8fafc" />
-        <rect x={xFor(forecastStartH)} y={stageY0} width={Math.max(0, xFor(forecastEndH) - xFor(forecastStartH))} height={panelH} fill="rgba(15,118,110,0.06)" />
-        <rect x={xFor(forecastStartH)} y={precipY0} width={Math.max(0, xFor(forecastEndH) - xFor(forecastStartH))} height={panelH} fill="rgba(15,118,110,0.06)" />
         {xTicks.map((tick) => (
           <g key={`x-preview-${tick}`}>
             <line x1={xFor(tick)} x2={xFor(tick)} y1={stageY0} y2={stageY0 + panelH} stroke="#eef2f4" />
@@ -625,9 +694,9 @@ function ForcingPreviewPanel({
             </text>
           </g>
         ))}
-        {points.map((point, index) => {
+        {plottedPoints.map((point, index) => {
           if (!Number.isFinite(point.precipitation) || point.precipitation <= 0) return null;
-          const x = xFor(point.timeHours) - barW / 2;
+          const x = xFor(point.leadHours) - barW / 2;
           const y = precipYFor(point.precipitation);
           const h = precipY0 + panelH - y;
           return (
@@ -635,10 +704,6 @@ function ForcingPreviewPanel({
           );
         })}
         <path d={stagePath} fill="none" stroke="#0f766e" strokeWidth={2.6} strokeLinecap="round" strokeLinejoin="round" />
-        <line x1={xFor(forecastStartH)} x2={xFor(forecastStartH)} y1={stageY0 - 6} y2={precipY0 + panelH} stroke="#b45309" strokeDasharray="5 4" strokeWidth={1.4} />
-        <text x={xFor(forecastStartH) + 6} y={stageY0 - 10} fontSize="11" fill="#92400e" fontWeight={700}>
-          forecast window
-        </text>
         <text x={padL} y={stageY0 - 12} fontSize="12" fontWeight={700} fill="#0f172a">
           Coastal stage (m)
         </text>
@@ -646,7 +711,7 @@ function ForcingPreviewPanel({
           Precipitation (mm/step)
         </text>
         <text x={padL + innerW / 2} y={height - 2} fontSize="11" textAnchor="middle" fill="#0f172a">
-          Time since forcing start (h)
+          Lead time in forecast window (h)
         </text>
       </svg>
     </div>
@@ -1584,7 +1649,7 @@ export default function Page() {
     setSelectedForDelete(new Set());
   }
 
-  const deletableRuns = runs.filter((run) => TERMINAL_STATUSES.has(run.status));
+  const deletableRuns = runs.filter((run) => TERMINAL_STATUSES.has(run.status) && run.status !== "DELETED");
   const selectableIds = new Set(deletableRuns.map((run) => run.run_id));
   // Trim selection if any of its members are no longer terminal (rare; keeps
   // state coherent if a stale selection survives a state transition).
@@ -1663,6 +1728,14 @@ export default function Page() {
                 ? `${bundle.domain_name} · up to ${bundle.total_members} members · ${bundle.max_forecast_steps}-step horizon`
                 : "Loading model bundle…"}
             </h1>
+            {bundle?.initial_condition && (
+              <p className="muted" style={{ margin: 0 }}>
+                Initial history:{" "}
+                {bundle.initial_condition.default_mode === "forcing_conditioned_baseline"
+                  ? `matched train/calibration baseline (${bundle.initial_condition.k_neighbors ?? 5} neighbors)`
+                  : "dry diagnostic baseline"}
+              </p>
+            )}
           </div>
         </div>
         <div className="identity">
@@ -1818,18 +1891,20 @@ export default function Page() {
                   <strong>
                     Reference screening:{" "}
                     {validation.screening.candidate_recommended
-                      ? "preserve as retraining candidate"
-                      : "inside monitored reference envelope"}
+                      ? "selected for retraining review"
+                      : (validation.screening.flags?.length ?? 0) > 0
+                        ? "diagnostics only"
+                        : "within monitored reference range"}
                   </strong>
                   <small>
-                    Novelty score{" "}
+                    Reference diagnostic score{" "}
                     {typeof validation.screening.input_novelty_score === "number"
                       ? validation.screening.input_novelty_score.toFixed(2)
                       : "—"}{" "}
                     · {validation.screening.monitoring_bundle_id}
                   </small>
                   {(validation.screening.flags ?? []).slice(0, 3).map((flag) => (
-                    <small key={`${flag.code}-${flag.descriptor ?? ""}`}>{flag.message}</small>
+                    <small key={`${flag.code}-${flag.descriptor ?? ""}`}>{formatScreeningFlag(flag)}</small>
                   ))}
                 </div>
               )}
@@ -2066,8 +2141,9 @@ export default function Page() {
             <header className="modal-head">
               <h2 id="delete-modal-title">Delete {selectedForDelete.size} run{selectedForDelete.size === 1 ? "" : "s"}?</h2>
               <p>
-                This permanently removes the selected runs and every artifact they produced (maps,
-                animations, summaries, raw ensemble files). This action cannot be undone.
+                This permanently removes the selected runs from your history and deletes every
+                artifact they produced (maps, animations, summaries, raw ensemble files). This
+                action cannot be undone.
               </p>
             </header>
             <ul className="modal-list">
@@ -2150,6 +2226,11 @@ export default function Page() {
           font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
           font-feature-settings: "ss01", "cv11", "tnum";
           -webkit-font-smoothing: antialiased;
+        }
+        :global(*),
+        :global(*::before),
+        :global(*::after) {
+          box-sizing: border-box;
         }
         .shell {
           max-width: 1480px;
@@ -2301,7 +2382,8 @@ export default function Page() {
           font-weight: 700;
           letter-spacing: 0.02em;
         }
-        .form-grid { display: grid; grid-template-columns: 1fr 130px; gap: 12px; margin-top: 14px; }
+        .form-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(120px, 130px); gap: 12px; margin-top: 14px; }
+        .form-grid > label { min-width: 0; }
         .wide { grid-column: 1 / -1; }
         .member-budget-note {
           margin: -2px 0 0;
@@ -2314,13 +2396,14 @@ export default function Page() {
           line-height: 1.45;
         }
         label { display: grid; gap: 6px; color: var(--text-secondary); font-weight: 600; font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; }
-        input, select { border: 1px solid var(--border-strong); border-radius: 6px; padding: 9px 11px; background: var(--surface); color: var(--text); font: inherit; font-size: 13px; transition: border-color 120ms ease, box-shadow 120ms ease; }
+        input, select { width: 100%; min-width: 0; border: 1px solid var(--border-strong); border-radius: 6px; padding: 9px 11px; background: var(--surface); color: var(--text); font: inherit; font-size: 13px; transition: border-color 120ms ease, box-shadow 120ms ease; }
         input:focus, select:focus { outline: none; border-color: var(--brand); box-shadow: 0 0 0 3px rgba(15, 118, 110, 0.12); }
         input[type="file"] { padding: 8px; }
         .file-picker { margin-top: 12px; }
         .file-name { color: var(--text-secondary); font-size: 12.5px; margin-top: 6px; }
-        .checks { display: flex; gap: 18px; flex-wrap: wrap; margin: 14px 0 12px; }
-        .checks label { display: flex; flex-direction: row; align-items: center; gap: 6px; font-weight: 500; text-transform: none; letter-spacing: 0; color: var(--text); font-size: 13px; }
+        .checks { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px 16px; margin: 14px 0 12px; align-items: start; }
+        .checks label { display: grid; grid-template-columns: 18px minmax(0, 1fr); align-items: start; column-gap: 8px; font-weight: 500; text-transform: none; letter-spacing: 0; color: var(--text); font-size: 13px; line-height: 1.35; }
+        .checks input[type="checkbox"] { width: 14px; min-width: 14px; height: 14px; margin: 2px 0 0; justify-self: center; padding: 0; }
         .forcing-preview {
           margin-top: 14px;
           padding: 14px;
@@ -2349,27 +2432,46 @@ export default function Page() {
           font-weight: 750;
           color: var(--text);
         }
-        .preview-stats {
-          display: grid;
-          grid-template-columns: repeat(5, minmax(0, 1fr));
-          gap: 6px;
-          margin-bottom: 10px;
+        .preview-subtitle {
+          margin: 4px 0 0;
+          color: var(--text-secondary);
+          font-size: 12px;
+          line-height: 1.35;
         }
-        .preview-stats span {
-          min-width: 0;
-          padding: 7px 8px;
+        .preview-stats {
+          width: 100%;
+          border-collapse: collapse;
+          table-layout: fixed;
+          margin-bottom: 10px;
           border: 1px solid var(--border);
           border-radius: 7px;
           background: var(--surface-muted);
-          color: var(--text-secondary);
-          font-size: 11px;
-          line-height: 1.25;
+          overflow: hidden;
         }
-        .preview-stats strong {
-          display: block;
+        .preview-stats th,
+        .preview-stats td {
+          padding: 7px 9px;
+          border-bottom: 1px solid var(--border);
+          vertical-align: top;
+          font-size: 12px;
+          line-height: 1.3;
+        }
+        .preview-stats tr:last-child th,
+        .preview-stats tr:last-child td {
+          border-bottom: 0;
+        }
+        .preview-stats th {
+          width: 54%;
+          text-align: left;
+          color: var(--text-secondary);
+          font-weight: 700;
+          letter-spacing: 0.03em;
+          text-transform: uppercase;
+        }
+        .preview-stats td {
           color: var(--text);
-          font-size: 12.5px;
           font-variant-numeric: tabular-nums;
+          overflow-wrap: anywhere;
         }
         .forcing-preview-chart {
           display: block;
@@ -3064,7 +3166,7 @@ export default function Page() {
           box-shadow: var(--shadow-sm);
         }
         .form-grid {
-          grid-template-columns: 1fr 150px;
+          grid-template-columns: minmax(0, 1fr) minmax(140px, 150px);
         }
         label {
           color: #334950;

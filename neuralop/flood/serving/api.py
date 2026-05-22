@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import math
+import os
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
@@ -28,6 +30,49 @@ def _count_by(items, key_fn):
         k = key_fn(item)
         counts[k] = counts.get(k, 0) + 1
     return counts
+
+
+def _finite_number(value) -> float | None:
+    if isinstance(value, (int, float)) and math.isfinite(float(value)):
+        return float(value)
+    return None
+
+
+def _summary(values: list[float]) -> dict[str, float | int | None]:
+    if not values:
+        return {"count": 0, "min": None, "mean": None, "max": None}
+    ordered = sorted(values)
+    return {
+        "count": len(values),
+        "min": ordered[0],
+        "mean": sum(ordered) / len(ordered),
+        "max": ordered[-1],
+        "p50": ordered[len(ordered) // 2],
+        "p95": ordered[min(len(ordered) - 1, int(0.95 * (len(ordered) - 1)))],
+    }
+
+
+def _week_key(value: datetime) -> str:
+    iso = value.isocalendar()
+    return f"{iso.year}-W{iso.week:02d}"
+
+
+def _compute_error_descriptors(
+    fgn_descriptors: dict[str, object],
+    hecras_descriptors: dict[str, object],
+) -> dict[str, float | None]:
+    errors: dict[str, float | None] = {}
+    for key in sorted(set(fgn_descriptors) | set(hecras_descriptors)):
+        fgn_val = _finite_number(fgn_descriptors.get(key))
+        hec_val = _finite_number(hecras_descriptors.get(key))
+        if fgn_val is None or hec_val is None:
+            continue
+        signed = fgn_val - hec_val
+        errors[f"{key}_signed"] = signed
+        errors[f"{key}_absolute"] = abs(signed)
+        if abs(hec_val) > 1e-9:
+            errors[f"{key}_relative"] = signed / hec_val
+    return errors
 
 
 def create_app(orchestrator: RunOrchestrator, *, current_user: Callable[[], User] | None = None):
@@ -372,7 +417,11 @@ def create_app(orchestrator: RunOrchestrator, *, current_user: Callable[[], User
     @app.get("/api/runs")
     def list_runs(user: User = Depends(_current_user)):
         user = _require_allowed(user)
-        return [_run_payload(record) for record in orchestrator.repository.list_for_user(user.user_id)]
+        return [
+            _run_payload(record)
+            for record in orchestrator.repository.list_for_user(user.user_id)
+            if record.status != RunStatus.DELETED
+        ]
 
     @app.get("/api/runs/{run_id}")
     def get_run(run_id: str, user: User = Depends(_current_user)):
@@ -613,7 +662,7 @@ def create_app(orchestrator: RunOrchestrator, *, current_user: Callable[[], User
             body = await request.json()
         except Exception as exc:
             raise HTTPException(status_code=400, detail=f"Invalid JSON body: {exc}") from exc
-        from neuralop.flood.serving.monitoring import HecrasErrorRecord
+        from neuralop.flood.serving.monitoring import HecrasErrorRecord, MonitoringPhase
         try:
             candidate = orchestrator.monitoring_orchestrator.repository.get_candidate(candidate_id)
         except KeyError as exc:
@@ -625,34 +674,42 @@ def create_app(orchestrator: RunOrchestrator, *, current_user: Callable[[], User
 
         if hecras_hdf_path:
             from neuralop.flood.serving.monitoring import validate_hecras_path
+            from neuralop.flood.serving.monitoring_build_bundle import hecras_descriptor_for_hdf
             try:
-                validate_hecras_path(hecras_hdf_path)
+                hdf_path = validate_hecras_path(hecras_hdf_path)
             except ValueError as exc:
                 raise HTTPException(status_code=501, detail=str(exc)) from exc
             except PermissionError as exc:
                 raise HTTPException(status_code=403, detail=str(exc)) from exc
             except FileNotFoundError as exc:
                 raise HTTPException(status_code=404, detail=str(exc)) from exc
+            try:
+                run_record = orchestrator.repository.get(candidate.run_id)
+                hecras_descriptors = hecras_descriptor_for_hdf(
+                    hdf_path,
+                    start_timestep=int(orchestrator.bundle.skip_before_timestep) + int(orchestrator.bundle.n_history),
+                    forecast_steps=int(run_record.spec.forecast_steps),
+                    dt_seconds=int(orchestrator.bundle.dt_seconds),
+                    thresholds_m=tuple(float(x) for x in run_record.spec.exceedance_thresholds_m),
+                )
+            except Exception as exc:
+                raise HTTPException(status_code=422, detail=f"Could not extract HEC-RAS descriptors: {exc}") from exc
+        elif not isinstance(hecras_descriptors, dict):
+            raise HTTPException(status_code=400, detail="Body must include hecras_hdf_path or hecras_descriptors object.")
 
         fgn_logs = orchestrator.monitoring_orchestrator.repository.list_descriptor_logs(
-            phase=orchestrator.monitoring_orchestrator.bundle.bundle_id and None,
+            phase=MonitoringPhase.POST_RUN,
         )
         fgn_post = [
-            e for e in fgn_logs if e.run_id == candidate.run_id and e.phase.value == "POST_RUN"
+            e for e in fgn_logs if e.run_id == candidate.run_id
         ]
+        fgn_post.sort(key=lambda e: e.created_at, reverse=True)
         fgn_descriptors = fgn_post[0].descriptors if fgn_post else {}
 
         if error_descriptors_input is not None:
             error_descriptors = error_descriptors_input
         else:
-            error_descriptors: dict[str, float | None] = {}
-            for key in set(fgn_descriptors) | set(hecras_descriptors):
-                fgn_val = fgn_descriptors.get(key)
-                hec_val = hecras_descriptors.get(key)
-                if isinstance(fgn_val, (int, float)) and isinstance(hec_val, (int, float)):
-                    error_descriptors[f"{key}_signed"] = float(fgn_val) - float(hec_val)
-                    if abs(float(hec_val)) > 1e-9:
-                        error_descriptors[f"{key}_relative"] = (float(fgn_val) - float(hec_val)) / float(hec_val)
+            error_descriptors = _compute_error_descriptors(fgn_descriptors, hecras_descriptors)
 
         record = HecrasErrorRecord(
             error_record_id=f"error_{candidate_id}",
@@ -677,17 +734,97 @@ def create_app(orchestrator: RunOrchestrator, *, current_user: Callable[[], User
         _require_admin(user)
         if orchestrator.monitoring_orchestrator is None:
             return {"candidates": [], "descriptor_stats": {}}
-        candidates = orchestrator.monitoring_orchestrator.list_candidates()
+        monitor = orchestrator.monitoring_orchestrator
+        candidates = monitor.list_candidates()
+        descriptor_logs = monitor.repository.list_descriptor_logs(limit=500)
+        score_values: list[float] = []
+        descriptor_values: dict[str, list[float]] = {}
+        weekly_descriptor_means: dict[str, dict[str, list[float]]] = {}
+        for entry in descriptor_logs:
+            for value in entry.scores.values():
+                numeric = _finite_number(value)
+                if numeric is not None:
+                    score_values.append(numeric)
+            week = _week_key(entry.created_at)
+            weekly_descriptor_means.setdefault(week, {})
+            for key, value in entry.descriptors.items():
+                numeric = _finite_number(value)
+                if numeric is None:
+                    continue
+                descriptor_values.setdefault(key, []).append(numeric)
+                weekly_descriptor_means[week].setdefault(key, []).append(numeric)
+        top_flagged: dict[str, int] = {}
+        for candidate in candidates[:100]:
+            for report in monitor.repository.list_reports_for_run(str(candidate["run_id"])):
+                for flag in report.flags:
+                    key = flag.descriptor or flag.code
+                    top_flagged[key] = top_flagged.get(key, 0) + 1
         return {
             "total_candidates": len(candidates),
-            "candidates_by_status": _count_by(candidates, lambda c: c.status.value),
-            "recent_candidates": [c.public_payload() for c in candidates[:20]],
+            "candidates_by_status": _count_by(candidates, lambda c: c["status"]),
+            "recent_candidates": candidates[:20],
+            "candidate_counts_by_week": _count_by(candidates, lambda c: _week_key(datetime.fromisoformat(c["created_at"]))),
+            "score_distribution": _summary(score_values),
+            "descriptor_stats": {key: _summary(values) for key, values in sorted(descriptor_values.items())},
+            "descriptor_means_by_week": {
+                week: {key: _summary(values)["mean"] for key, values in sorted(raw.items())}
+                for week, raw in sorted(weekly_descriptor_means.items())
+            },
+            "top_flagged_descriptors": [
+                {"descriptor": key, "count": count}
+                for key, count in sorted(top_flagged.items(), key=lambda item: item[1], reverse=True)[:20]
+            ],
         }
 
     @app.get("/api/admin/drift-status")
     def admin_drift_status(user: User = Depends(_current_user)):
         _require_admin(user)
-        return {"message": "Drift status available after first drift runner execution."}
+        if orchestrator.monitoring_orchestrator is None:
+            return {"available": False, "results": [], "drift_detected": False}
+        monitor = orchestrator.monitoring_orchestrator
+        results = monitor.repository.latest_drift_tests()
+        history = monitor.repository.list_drift_test_results(limit=500)
+        from neuralop.flood.serving.drift import DriftDetector
+
+        by_day: dict[str, list] = {}
+        for result in sorted(history, key=lambda r: r.created_at):
+            by_day.setdefault(result.created_at.date().isoformat(), []).append(result)
+        persistent = DriftDetector().apply_persistence_filter(list(by_day.values()))
+        persistent_keys = {(r.test_type, r.descriptor_name) for r in persistent}
+        payload = [
+            {
+                "test_id": r.test_id,
+                "test_type": r.test_type,
+                "descriptor_name": r.descriptor_name,
+                "monitoring_bundle_id": r.monitoring_bundle_id,
+                "window_start": r.window_start.isoformat() if r.window_start else None,
+                "window_end": r.window_end.isoformat() if r.window_end else None,
+                "n_observations": r.n_observations,
+                "drift_detected": r.drift_detected,
+                "persistent_drift_detected": (r.test_type, r.descriptor_name) in persistent_keys,
+                "test_statistic": r.test_statistic,
+                "threshold": r.threshold,
+                "details": r.details or {},
+                "created_at": r.created_at.isoformat(),
+            }
+            for r in results
+        ]
+        detected = [item for item in payload if item["drift_detected"]]
+        persistent_detected = [item for item in payload if item["persistent_drift_detected"]]
+        return {
+            "available": True,
+            "drift_detected": bool(detected),
+            "persistent_drift_detected": bool(persistent_detected),
+            "n_results": len(payload),
+            "n_detected": len(detected),
+            "n_persistent_detected": len(persistent_detected),
+            "results": payload,
+            "message": (
+                "No persistent drift signals detected."
+                if not persistent_detected
+                else f"{len(persistent_detected)} persistent drift signal(s) detected."
+            ),
+        }
 
     @app.get("/api/admin/hecras-errors")
     def admin_hecras_errors(user: User = Depends(_current_user)):
@@ -695,8 +832,51 @@ def create_app(orchestrator: RunOrchestrator, *, current_user: Callable[[], User
         if orchestrator.monitoring_orchestrator is None:
             return {"errors": []}
         records = orchestrator.monitoring_orchestrator.repository.list_hecras_error_records(limit=50)
+        all_errors = orchestrator.monitoring_orchestrator.repository.list_hecras_error_records(limit=None)
+        signed_by_descriptor: dict[str, list[float]] = {}
+        absolute_by_descriptor: dict[str, list[float]] = {}
+        for record in all_errors:
+            for key, value in record.error_descriptors.items():
+                numeric = _finite_number(value)
+                if numeric is None:
+                    continue
+                if key.endswith("_signed"):
+                    signed_by_descriptor.setdefault(key.removesuffix("_signed"), []).append(numeric)
+                elif key.endswith("_absolute"):
+                    absolute_by_descriptor.setdefault(key.removesuffix("_absolute"), []).append(numeric)
+        threshold = float(os.environ.get("FGN_HECRAS_AREA_FRACTION_ERROR_THRESHOLD", "0.1"))
+        degradation_flags = []
+        for descriptor, values in signed_by_descriptor.items():
+            if len(values) < 10 or "area_fraction" not in descriptor:
+                continue
+            mean_signed = sum(values) / len(values)
+            if abs(mean_signed) >= threshold:
+                degradation_flags.append(
+                    {
+                        "descriptor": descriptor,
+                        "mean_signed_error": mean_signed,
+                        "n": len(values),
+                        "threshold": threshold,
+                    }
+                )
         return {
             "total": len(records),
+            "aggregate": {
+                descriptor: {
+                    "mean_signed_error": sum(values) / len(values),
+                    "rmse": math.sqrt(
+                        sum(v * v for v in signed_by_descriptor.get(descriptor, []))
+                        / max(1, len(signed_by_descriptor.get(descriptor, [])))
+                    ),
+                    "mean_absolute_error": (
+                        sum(absolute_by_descriptor.get(descriptor, []))
+                        / max(1, len(absolute_by_descriptor.get(descriptor, [])))
+                    ),
+                    "n": len(values),
+                }
+                for descriptor, values in sorted(signed_by_descriptor.items())
+            },
+            "degradation_flags": degradation_flags,
             "records": [
                 {
                     "error_record_id": r.error_record_id,

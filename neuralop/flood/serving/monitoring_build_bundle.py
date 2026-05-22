@@ -7,6 +7,7 @@ import glob
 import hashlib
 import json
 import math
+import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable, Mapping, Sequence
@@ -16,7 +17,7 @@ import numpy as np
 from neuralop.flood.serving.forcing import ForcingInput
 from neuralop.flood.serving.forcing import parse_forcing_csv
 from neuralop.flood.serving.model_bundle import load_model_bundle
-from neuralop.flood.serving.monitoring import build_monitoring_bundle_from_forcings
+from neuralop.flood.serving.monitoring import _compute_covariance_block, build_monitoring_bundle_from_forcings
 
 
 HECRAS_DEPTH_DATASET = (
@@ -130,6 +131,8 @@ def build_hecras_forecast_reference(
     dt_seconds: int,
     thresholds_m: Sequence[float] = (0.05, 0.30),
     rows_out: Path | None = None,
+    transform_spec: Mapping[str, str] | None = None,
+    covariance_exclude_descriptors: Sequence[str] | None = None,
 ) -> dict[str, object]:
     """Stream HEC-RAS HDF outputs into compact post-run monitoring percentiles.
 
@@ -179,7 +182,23 @@ def build_hecras_forecast_reference(
             for row in rows:
                 handle.write(json.dumps(row, sort_keys=True) + "\n")
 
-    return {
+    default_forecast_exclude = [
+        "calibrated_max_mean_wd_m",
+        "hecras_mean_wd_overall_m",
+        "n_time",
+        "n_cells",
+        "wettable_area_m2",
+        "wettable_area_km2",
+    ]
+    exclude = list(dict.fromkeys([*(covariance_exclude_descriptors or []), *default_forecast_exclude]))
+    covariance = _compute_covariance_block(
+        rows=[{k: v for k, v in row.items() if isinstance(v, (int, float))} for row in rows],
+        keys=keys,
+        transform_spec=dict(transform_spec or {}),
+        exclude=exclude,
+    )
+
+    payload: dict[str, object] = {
         "created_at": datetime.now(timezone.utc).isoformat(),
         "n_hdf_paths": len(hdf_paths),
         "n_descriptors": len(rows),
@@ -197,6 +216,9 @@ def build_hecras_forecast_reference(
             ),
         },
     }
+    if covariance is not None:
+        payload["forecast_covariance"] = covariance
+    return payload
 
 
 def hecras_descriptor_for_hdf(
@@ -313,6 +335,15 @@ def _build_heuristic_reference_percentiles(
         cal_shift = summary.get("max_abs_calibration_shift_percentage_points_by_threshold")
         if cal_shift is not None:
             row["max_abs_calibration_shift_pp"] = float(cal_shift)
+        for key in (
+            "peak_area_weighted_total_ensemble_spread_wd_m",
+            "peak_area_weighted_between_checkpoint_spread_wd_m",
+            "peak_area_weighted_between_checkpoint_variance_share",
+            "peak_high_checkpoint_disagreement_area_fraction_wettable",
+        ):
+            value = summary.get(key)
+            if value is not None:
+                row[key] = float(value)
         if row:
             heuristic_rows.append(row)
     if not heuristic_rows:
@@ -324,6 +355,20 @@ def _build_heuristic_reference_percentiles(
         if vals.size:
             result[key] = _percentile_payload(vals)
     return result or None
+
+
+def _current_git_commit() -> str | None:
+    try:
+        completed = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except Exception:
+        return None
+    sha = completed.stdout.strip()
+    return sha or None
 
 
 def main(argv: Sequence[str] | None = None) -> None:
@@ -425,6 +470,7 @@ def main(argv: Sequence[str] | None = None) -> None:
 
     heuristic_ref_pcts = _build_heuristic_reference_percentiles(args.heuristic_reference_runs)
 
+    covariance_exclude = list(dict.fromkeys([*args.covariance_exclude, "calibrated_max_mean_wd_m"]))
     payload = build_monitoring_bundle_from_forcings(
         bundle_id=args.bundle_id,
         forcings=forcings,
@@ -439,8 +485,9 @@ def main(argv: Sequence[str] | None = None) -> None:
             "hecras_hdf_lists": list(args.hecras_hdf_list),
         },
         transform_spec=transform_spec,
-        covariance_exclude_descriptors=args.covariance_exclude or None,
+        covariance_exclude_descriptors=covariance_exclude,
         heuristic_reference_percentiles=heuristic_ref_pcts,
+        created_from_commit=_current_git_commit(),
     )
     if hdf_paths:
         hecras_reference = build_hecras_forecast_reference(
@@ -458,8 +505,18 @@ def main(argv: Sequence[str] | None = None) -> None:
             dt_seconds=int(model_bundle.dt_seconds),
             thresholds_m=args.hecras_threshold_m,
             rows_out=Path(args.hecras_rows_out) if args.hecras_rows_out else None,
+            transform_spec=transform_spec,
+            covariance_exclude_descriptors=covariance_exclude,
         )
         payload["forecast_descriptor_percentiles"] = hecras_reference["forecast_descriptor_percentiles"]
+        if "forecast_covariance" in hecras_reference:
+            payload["forecast_covariance"] = hecras_reference["forecast_covariance"]
+            payload["monitoring_bundle_schema_version"] = 2
+        reference_population = payload.get("reference_population")
+        if not isinstance(reference_population, dict):
+            reference_population = {}
+            payload["reference_population"] = reference_population
+        reference_population["n_reference_forecast"] = int(hecras_reference["n_descriptors"])
         provenance = payload.get("provenance")
         if not isinstance(provenance, Mapping):
             provenance = {}

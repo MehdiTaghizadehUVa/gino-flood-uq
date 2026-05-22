@@ -332,6 +332,7 @@ def test_owner_delete_tombstones_completed_run_and_removes_artifacts(env):
     assert body["run_id"] == run_id
     assert body["status"] == "DELETED"
     assert env["repository"].get(run_id).status.value == "DELETED"
+    assert run_id not in {row["run_id"] for row in env["client"].get("/api/runs").json()}
     assert env["client"].get(f"/api/runs/{run_id}").json()["spec"]["input_hash"]
     assert env["client"].get(f"/api/runs/{run_id}/artifacts").json() == []
 

@@ -25,7 +25,13 @@ from neuralop.flood.data.hec_ras import (
     h5py,
     read_hec_ras_hdf_static,
 )
+from neuralop.flood.serving.initial_conditions import (
+    DEFAULT_INITIAL_CONDITION_LIBRARY,
+    build_initial_condition_features,
+    initial_condition_feature_names,
+)
 from neuralop.flood.serving.model_bundle import load_model_bundle
+from neuralop.flood.serving.monitoring_build_bundle import load_clean_boundary_table_forcings
 
 
 DEFAULT_STATIC_FILES = [
@@ -214,6 +220,142 @@ def _export_domain_assets(
     }
 
 
+def _clean_boundary_table_paths(boundary_spec: Sequence[Mapping[str, Any]]) -> tuple[Path, Path]:
+    by_name = {str(item.get("name")): item for item in boundary_spec if isinstance(item, Mapping)}
+    stage = by_name.get("stage")
+    precip = by_name.get("precipitation")
+    if not stage or not precip:
+        raise ValueError("Initial-condition library requires clean-family stage and precipitation boundary channels.")
+    paths = []
+    for channel in (stage, precip):
+        if channel.get("mode") != "clean_family":
+            raise ValueError(
+                "Initial-condition library currently supports clean_family boundary channels only. "
+                f"Got {channel.get('name')!r} mode={channel.get('mode')!r}."
+            )
+        root = Path(str(channel["clean_boundary_root"])).expanduser()
+        paths.append(root / str(channel["clean_boundary_file"]))
+    return paths[0], paths[1]
+
+
+def _reference_distance_p95(features: np.ndarray, median: np.ndarray, iqr: np.ndarray) -> float:
+    safe_iqr = np.where(np.abs(iqr) > 1.0e-6, iqr, 1.0).astype(np.float32)
+    scaled = (features.astype(np.float32) - median.astype(np.float32)) / safe_iqr
+    if scaled.shape[0] < 2:
+        return 1.0
+    nearest = []
+    for idx in range(scaled.shape[0]):
+        diff = scaled - scaled[idx : idx + 1]
+        distances = np.linalg.norm(diff, axis=1) / max(1.0, np.sqrt(scaled.shape[1]))
+        distances[idx] = np.inf
+        nearest.append(float(np.min(distances)))
+    value = float(np.percentile(np.asarray(nearest, dtype=np.float32), 95))
+    return value if value > 0.0 and np.isfinite(value) else 1.0
+
+
+def _build_initial_condition_library(
+    *,
+    reference_root: Path,
+    reference_split_txt: str | Path,
+    boundary_spec: Sequence[Mapping[str, Any]],
+    hdf_paths: Mapping[str, str],
+    output_dir: Path,
+    dt_seconds: int,
+    skip_before_timestep: int,
+    n_history: int,
+    reference_scope: str,
+    bundle_id: str,
+) -> dict[str, Any]:
+    if h5py is None:
+        raise ImportError("h5py is required to build an initial-condition library.")
+    run_ids = _read_run_ids(reference_root, reference_split_txt)
+    if not run_ids:
+        raise ValueError("Initial-condition reference split is empty.")
+    stage_table, precipitation_table = _clean_boundary_table_paths(boundary_spec)
+    forcings = load_clean_boundary_table_forcings(
+        stage_table=stage_table,
+        precipitation_table=precipitation_table,
+        dt_seconds=int(dt_seconds),
+        skip_before_timestep=int(skip_before_timestep),
+        n_history=int(n_history),
+        max_forecast_steps=1,
+    )
+    forcing_by_id = {item.source_name.split(".")[0]: item for item in forcings}
+    first_hdf = _first_existing_hdf(reference_root, run_ids)
+    cell_point_index = build_cell_point_index(first_hdf, dict(hdf_paths))
+    history_rows = int(skip_before_timestep) + int(n_history)
+    features: list[np.ndarray] = []
+    wd_histories: list[np.ndarray] = []
+    selected_ids: list[str] = []
+    for run_id in run_ids:
+        forcing = forcing_by_id.get(run_id)
+        if forcing is None:
+            raise ValueError(f"Boundary forcing table is missing reference event {run_id}.")
+        hdf_path = reference_root / f"{run_id}.hdf"
+        if not hdf_path.exists():
+            raise FileNotFoundError(f"Initial-condition reference HDF not found: {hdf_path}")
+        if forcing.n_rows < history_rows:
+            raise ValueError(f"Reference forcing {run_id} has too few rows for initial history.")
+        with h5py.File(hdf_path, "r") as handle:
+            wd_full = np.asarray(
+                handle[hdf_paths["wd"]][
+                    int(skip_before_timestep) : int(skip_before_timestep) + int(n_history),
+                    :,
+                ],
+                dtype=np.float32,
+            )
+        wd = np.clip(wd_full[:, cell_point_index], 0.0, None).astype(np.float32, copy=False)
+        wd_histories.append(wd[..., None])
+        features.append(
+            build_initial_condition_features(
+                forcing.stage[:history_rows],
+                forcing.precipitation[:history_rows],
+                history_rows=history_rows,
+            )
+        )
+        selected_ids.append(str(run_id))
+    feature_matrix = np.stack(features, axis=0).astype(np.float32, copy=False)
+    wd_history = np.stack(wd_histories, axis=0).astype(np.float32, copy=False)
+    median = np.median(feature_matrix, axis=0).astype(np.float32)
+    iqr = (np.percentile(feature_matrix, 75, axis=0) - np.percentile(feature_matrix, 25, axis=0)).astype(np.float32)
+    relative_path = Path(DEFAULT_INITIAL_CONDITION_LIBRARY)
+    out_path = output_dir / relative_path
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    metadata = {
+        "library_id": f"{bundle_id}-initial-condition-{reference_scope}",
+        "bundle_id": bundle_id,
+        "reference_scope": reference_scope,
+        "source_root": str(reference_root),
+        "source_split_txt": str(_split_path(reference_root, reference_split_txt)),
+        "stage_table": str(stage_table),
+        "precipitation_table": str(precipitation_table),
+        "dt_seconds": int(dt_seconds),
+        "skip_before_timestep": int(skip_before_timestep),
+        "n_history": int(n_history),
+        "history_rows": history_rows,
+        "n_reference": int(len(selected_ids)),
+        "mesh_hash": _stable_arrays_hash([cell_point_index.astype(np.int64)]),
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    np.savez_compressed(
+        out_path,
+        reference_ids=np.asarray(selected_ids),
+        features=feature_matrix,
+        feature_median=median,
+        feature_iqr=iqr,
+        feature_names=np.asarray(initial_condition_feature_names(history_rows=history_rows)),
+        wd_history_m=wd_history,
+        reference_distance_p95=np.asarray(_reference_distance_p95(feature_matrix, median, iqr), dtype=np.float32),
+        metadata_json=np.asarray(json.dumps(metadata, sort_keys=True)),
+    )
+    return {
+        "library_path": str(relative_path),
+        "reference_scope": reference_scope,
+        "n_reference": int(len(selected_ids)),
+        "metadata": metadata,
+    }
+
+
 def build_bundle(args: argparse.Namespace) -> Path:
     config_path = Path(args.config_path).expanduser().resolve()
     config = _read_mapping(config_path)
@@ -256,6 +398,39 @@ def build_bundle(args: argparse.Namespace) -> Path:
     max_steps = int(args.max_forecast_steps or domain["max_forecast_steps"])
     if max_steps > int(domain["max_forecast_steps"]):
         raise ValueError(f"Requested max_forecast_steps={max_steps} exceeds domain support {domain['max_forecast_steps']}.")
+    dt_seconds = int(args.dt_seconds or train_data.get("dt", 900))
+    initial_condition_library = None
+    if args.build_initial_condition_library:
+        reference_root = Path(
+            args.initial_condition_root
+            or _get(flood, ["rollout_calibration", "reference", "calibration_root"])
+            or data_root
+        ).expanduser().resolve()
+        reference_split_txt = (
+            args.initial_condition_split_txt
+            or _get(flood, ["rollout_calibration", "reference", "calibration_txt"])
+            or split_txt
+        )
+        boundary_spec = (
+            _get(flood, ["rollout_data", "boundary"], None)
+            or _get(flood, ["data", "boundary"], None)
+            or data.get("boundary")
+            or train_data.get("boundary")
+        )
+        if not isinstance(boundary_spec, Sequence):
+            raise ValueError("Could not find a clean-family boundary spec for initial-condition library build.")
+        initial_condition_library = _build_initial_condition_library(
+            reference_root=reference_root,
+            reference_split_txt=reference_split_txt,
+            boundary_spec=boundary_spec,
+            hdf_paths=hdf_paths,
+            output_dir=output_dir,
+            dt_seconds=dt_seconds,
+            skip_before_timestep=skip_before_timestep,
+            n_history=n_history,
+            reference_scope=args.initial_condition_reference_scope,
+            bundle_id=args.bundle_id,
+        )
     manifest = {
         "bundle_id": args.bundle_id,
         "domain_name": "coastal",
@@ -267,7 +442,7 @@ def build_bundle(args: argparse.Namespace) -> Path:
         "calibration_coefficients_path": coeff_path,
         "isotonic_curves_path": isotonic_path,
         "boundary_channels": ["stage", "precipitation"],
-        "dt_seconds": int(args.dt_seconds or train_data.get("dt", 1200)),
+        "dt_seconds": dt_seconds,
         "n_history": n_history,
         "skip_before_timestep": skip_before_timestep,
         "max_forecast_steps": max_steps,
@@ -299,6 +474,17 @@ def build_bundle(args: argparse.Namespace) -> Path:
             "structural_dry_policy": _get(flood, ["structural_dry", "policy"], "unknown"),
         },
     }
+    if initial_condition_library is not None:
+        manifest["initial_condition"] = {
+            "default_mode": "forcing_conditioned_baseline",
+            "library_path": initial_condition_library["library_path"],
+            "reference_scope": initial_condition_library["reference_scope"],
+            "k_neighbors": int(args.initial_condition_k_neighbors),
+            "metadata": {
+                "n_reference": int(initial_condition_library["n_reference"]),
+                "library_id": initial_condition_library["metadata"]["library_id"],
+            },
+        }
     if args.structural_dry_mask_path:
         manifest["structural_dry_mask_path"] = str(Path(args.structural_dry_mask_path).expanduser().resolve())
     manifest_path = output_dir / "coastal_fgn_bundle.json"
@@ -331,6 +517,15 @@ def main(argv: Sequence[str] | None = None) -> None:
     parser.add_argument("--expected-checkpoints", type=int, default=3)
     parser.add_argument("--query-res", nargs=2, type=int)
     parser.add_argument("--crs", default="EPSG:32618")
+    parser.add_argument(
+        "--build-initial-condition-library",
+        action="store_true",
+        help="Build a forcing-conditioned initial WD library and make it the bundle default.",
+    )
+    parser.add_argument("--initial-condition-root")
+    parser.add_argument("--initial-condition-split-txt")
+    parser.add_argument("--initial-condition-reference-scope", default="train_calibration")
+    parser.add_argument("--initial-condition-k-neighbors", type=int, default=5)
     args = parser.parse_args(argv)
     print(str(build_bundle(args)))
 

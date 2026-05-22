@@ -87,7 +87,7 @@ def demonstrate_physics_loss():
     
     # Basic physics loss
     basic_physics_loss = FloodPhysicsLoss(
-        delta_t=1200.0,
+        delta_t=900.0,
         physics_weight=1.0,
         enforce_continuity=True,
         enforce_momentum=True,
@@ -96,7 +96,7 @@ def demonstrate_physics_loss():
     
     # Continuity loss (similar to hydrograph example)
     continuity_loss = FloodContinuityLoss(
-        delta_t=1200.0,
+        delta_t=900.0,
         physics_weight=1.0
     )
     
@@ -182,7 +182,7 @@ def demonstrate_physics_loss():
     
     # Only continuity
     continuity_only = FloodPhysicsLoss(
-        delta_t=1200.0,
+        delta_t=900.0,
         physics_weight=1.0,
         enforce_continuity=True,
         enforce_momentum=False,
@@ -193,7 +193,7 @@ def demonstrate_physics_loss():
     
     # Only momentum
     momentum_only = FloodPhysicsLoss(
-        delta_t=1200.0,
+        delta_t=900.0,
         physics_weight=1.0,
         enforce_continuity=False,
         enforce_momentum=True,
@@ -204,7 +204,7 @@ def demonstrate_physics_loss():
     
     # Only bounds
     bounds_only = FloodPhysicsLoss(
-        delta_t=1200.0,
+        delta_t=900.0,
         physics_weight=1.0,
         enforce_continuity=False,
         enforce_momentum=False,
@@ -248,7 +248,7 @@ def demonstrate_training_step():
     # Create model and losses
     model = SimpleModel()
     data_loss = LpLoss(d=2, p=2)
-    physics_loss = FloodContinuityLoss(delta_t=1200.0, physics_weight=0.5)
+    physics_loss = FloodContinuityLoss(delta_t=900.0, physics_weight=0.5)
     
     # Create optimizer
     optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
@@ -293,4 +293,4 @@ if __name__ == "__main__":
     print("2. Different physics components can be enabled/disabled")
     print("3. Physics loss weight controls the importance of physics constraints")
     print("4. Continuity loss requires physics_data dictionary with specific keys")
-    print("5. Physics loss helps enforce physical constraints during training") 
+    print("5. Physics loss helps enforce physical constraints during training")

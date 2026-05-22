@@ -30,7 +30,7 @@ def build_forcing_template_csv(bundle: FGNModelBundle, *, forecast_steps: int = 
     lines = ["time_seconds,stage,precipitation"]
     for idx in range(rows):
         # Mild synthetic forcing values keep the template within validation ranges
-        # while making the required 20-minute cadence visible to users.
+        # while making the required 15-minute cadence visible to users.
         stage = 0.10 + 0.01 * idx
         precipitation = 0.0
         lines.append(f"{idx * int(bundle.dt_seconds)},{stage:.4f},{precipitation:.4f}")

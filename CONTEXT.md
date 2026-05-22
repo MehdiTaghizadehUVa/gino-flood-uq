@@ -10,7 +10,7 @@ A Model Bundle is the versioned scientific contract for one deployed coastal FGN
 
 ## Forcing CSV
 
-A Forcing CSV is the user-uploaded stage and precipitation time series. V1 requires a regular 20-minute cadence, finite values, enough spin-up/history rows, and forecast horizon within the Model Bundle limit.
+A Forcing CSV is the user-uploaded stage and precipitation time series. V1 requires a regular 15-minute cadence, finite values, enough spin-up/history rows, and forecast horizon within the Model Bundle limit.
 
 ## Run
 
@@ -30,7 +30,7 @@ The Lab PC Server is the Windows 11 RTX 4090 machine that hosts V1 through WSL2 
 
 ## Monitoring Bundle
 
-A Monitoring Bundle is the versioned reference distribution used by Phase 1 drift screening. It stores descriptor percentiles from reference train/test events, provenance for the reference data, and transparent candidate-scoring thresholds.
+A Monitoring Bundle is the versioned reference distribution used by drift screening. It stores descriptor percentiles, covariance blocks, descriptor transforms, provenance for the reference data, and transparent candidate-scoring thresholds.
 
 ## Monitoring Report
 
@@ -48,6 +48,14 @@ The Candidate Event Store is the durable storage area for Retraining Candidate p
 
 A Reference Event is a train or test scenario with known forcing descriptors and, when available, HEC-RAS output descriptors. Reference Events define the comparison envelope for drift screening.
 
+## Initial Condition Library
+
+An Initial Condition Library is a versioned collection of reference forcing histories and HEC-RAS water-depth history frames aligned to the deployed coastal mesh. Serving uses it to choose reproducible baseline dynamic-state histories without asking users to upload a full water-depth field.
+
+## Forcing-Conditioned Baseline
+
+A Forcing-Conditioned Baseline is the default initial water-depth history policy for web serving. It compares the first spin-up/history forcing rows against train/calibration reference events, blends the nearest eligible HEC-RAS WD histories, records selection provenance, and keeps dry start available only as a diagnostic mode.
+
 ## Descriptor Transform
 
 A Descriptor Transform is a monotone function (log1p, logit_bounded, identity) applied to a descriptor value before covariance computation. Transforms handle skewed hydrologic distributions (precipitation totals, area fractions) so that Mahalanobis distance is meaningful. Raw descriptor values are always stored in reports for interpretability; transforms are internal to the scoring pipeline.
@@ -63,3 +71,7 @@ A Drift Test is a periodic statistical check for distributional shift across rec
 ## HEC-RAS Error Record
 
 A HEC-RAS Error Record captures the signed and relative prediction errors between FGN forecast descriptors and HEC-RAS simulation descriptors for a SIMULATED Retraining Candidate. Accumulated error records enable systematic model degradation detection.
+
+## Checkpoint Disagreement
+
+Checkpoint Disagreement is the between-checkpoint share of ensemble variance in the 3-checkpoint × latent-member serving ensemble. It separates disagreement among trained checkpoints from within-checkpoint latent variability and helps identify forecasts where structural uncertainty is unusually high.

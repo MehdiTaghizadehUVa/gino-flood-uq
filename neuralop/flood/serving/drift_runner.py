@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+from dataclasses import replace
 from datetime import datetime, timezone
 
 from neuralop.flood.serving.drift import DriftDetector, DriftTestConfig, DriftTestResult
@@ -50,6 +51,10 @@ def run_drift_tests(
         sa.Column("test_id", sa.String, primary_key=True),
         sa.Column("test_type", sa.String, nullable=False, index=True),
         sa.Column("descriptor_name", sa.String, nullable=True),
+        sa.Column("monitoring_bundle_id", sa.String, nullable=True),
+        sa.Column("window_start", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("window_end", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("n_observations", sa.Integer, nullable=True),
         sa.Column("drift_detected", sa.Boolean, nullable=False),
         sa.Column("test_statistic", sa.Float, nullable=False),
         sa.Column("threshold", sa.Float, nullable=False),
@@ -58,14 +63,16 @@ def run_drift_tests(
         extend_existing=True,
     )
     metadata.create_all(engine, tables=[drift_results_table])
+    _ensure_drift_columns(sa, engine)
 
     with engine.begin() as conn:
         rows = conn.execute(
             sa.select(descriptor_logs)
             .where(descriptor_logs.c.phase == MonitoringPhase.PRE_RUN.value)
-            .order_by(descriptor_logs.c.created_at.asc())
+            .order_by(descriptor_logs.c.created_at.desc())
             .limit(config.window_size)
         ).all()
+    rows = list(reversed(rows))
 
     if len(rows) < 10:
         logger.info("Not enough descriptor log entries (%d) for drift testing.", len(rows))
@@ -79,6 +86,8 @@ def run_drift_tests(
         stream.append(numeric)
 
     all_results: list[DriftTestResult] = []
+    window_start = _row_datetime(rows[0], "created_at") if rows else None
+    window_end = _row_datetime(rows[-1], "created_at") if rows else None
 
     target: dict[str, float] = {}
     scale: dict[str, float] = {}
@@ -97,30 +106,65 @@ def run_drift_tests(
 
     if bundle and bundle.forcing_covariance:
         ref_names = bundle.forcing_covariance.get("descriptor_names", [])
-        ref_mean = bundle.forcing_covariance.get("mean_vector", [])
-        if ref_names and len(stream) >= 20:
-            reference_vecs = [{n: m for n, m in zip(ref_names, ref_mean)}] * 30
+        raw_reference_vecs = bundle.forcing_covariance.get("reference_vectors", [])
+        if ref_names and isinstance(raw_reference_vecs, list) and raw_reference_vecs and len(stream) >= 20:
+            reference_vecs = [
+                {n: float(v) for n, v in zip(ref_names, row)}
+                for row in raw_reference_vecs
+                if isinstance(row, list) and len(row) == len(ref_names)
+            ]
             recent_vecs = stream[-30:]
-            filtered_recent = [{k: v for k, v in e.items() if k in ref_names} for e in recent_vecs]
-            if all(len(e) == len(ref_names) for e in filtered_recent):
+            from neuralop.flood.serving.monitoring import _apply_transforms
+
+            filtered_recent = [
+                _apply_transforms({k: float(e[k]) for k in ref_names}, bundle.transform_spec)
+                for e in recent_vecs
+                if all(k in e for k in ref_names)
+            ]
+            if reference_vecs and filtered_recent and all(len(e) == len(ref_names) for e in filtered_recent):
                 energy_result = detector.energy_distance_test(reference_vecs, filtered_recent)
                 all_results.append(energy_result)
 
     now = datetime.now(timezone.utc)
+    bundle_id = bundle.bundle_id if bundle else None
+    all_results = [
+        replace(
+            result,
+            monitoring_bundle_id=bundle_id,
+            window_start=window_start,
+            window_end=window_end,
+            n_observations=len(stream),
+        )
+        for result in all_results
+    ]
     with engine.begin() as conn:
         for r in all_results:
-            conn.execute(
-                drift_results_table.insert().values(
-                    test_id=f"{r.test_id}_{now.strftime('%Y%m%d')}",
-                    test_type=r.test_type,
-                    descriptor_name=r.descriptor_name,
-                    drift_detected=r.drift_detected,
-                    test_statistic=r.test_statistic,
-                    threshold=r.threshold,
-                    details_json=json.dumps(r.details) if r.details else None,
-                    created_at=now,
+            test_id = f"{r.test_id}_{now.strftime('%Y%m%d')}"
+            values = {
+                "test_id": test_id,
+                "test_type": r.test_type,
+                "descriptor_name": r.descriptor_name,
+                "monitoring_bundle_id": r.monitoring_bundle_id,
+                "window_start": r.window_start,
+                "window_end": r.window_end,
+                "n_observations": r.n_observations,
+                "drift_detected": r.drift_detected,
+                "test_statistic": r.test_statistic,
+                "threshold": r.threshold,
+                "details_json": json.dumps(r.details) if r.details else None,
+                "created_at": now,
+            }
+            existing = conn.execute(
+                sa.select(drift_results_table.c.test_id).where(drift_results_table.c.test_id == test_id)
+            ).first()
+            if existing is None:
+                conn.execute(drift_results_table.insert().values(**values))
+            else:
+                conn.execute(
+                    drift_results_table.update()
+                    .where(drift_results_table.c.test_id == test_id)
+                    .values(**values)
                 )
-            )
 
     detected = [r for r in all_results if r.drift_detected]
     if detected:
@@ -131,6 +175,26 @@ def run_drift_tests(
         )
 
     return all_results
+
+
+def _row_datetime(row, column: str):
+    row_map = getattr(row, "_mapping", row)
+    return row_map[column]
+
+
+def _ensure_drift_columns(sa, engine) -> None:
+    inspector = sa.inspect(engine)
+    existing = {col["name"] for col in inspector.get_columns("fgn_drift_test_results")}
+    additions = {
+        "monitoring_bundle_id": "VARCHAR",
+        "window_start": "TIMESTAMP",
+        "window_end": "TIMESTAMP",
+        "n_observations": "INTEGER",
+    }
+    with engine.begin() as conn:
+        for name, ddl_type in additions.items():
+            if name not in existing:
+                conn.execute(sa.text(f"ALTER TABLE fgn_drift_test_results ADD COLUMN {name} {ddl_type}"))
 
 
 def main() -> None:

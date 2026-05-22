@@ -9,6 +9,7 @@ import { useParams } from "next/navigation";
 // fetch has consistently failed so users don't see a flash of red on every
 // freshly submitted run.
 const TRANSIENT_404_TOLERATED = 3;
+const DEFAULT_FORCING_DT_SECONDS = 900;
 
 type RunTiming = {
   started_at?: string | null;
@@ -59,6 +60,7 @@ type MonitoringFlag = {
   severity?: string;
   descriptor?: string | null;
   value?: number | null;
+  details?: Record<string, unknown> | null;
 };
 
 type MonitoringReport = {
@@ -83,6 +85,17 @@ type MonitoringPayload = {
     status: string;
     updated_at?: string;
   } | null;
+};
+
+type InitialConditionSelection = {
+  mode?: string;
+  library_id?: string | null;
+  reference_scope?: string | null;
+  selected_reference_ids?: string[];
+  weights?: number[];
+  distances?: number[];
+  low_confidence?: boolean;
+  confidence_label?: string;
 };
 
 type Summary = {
@@ -110,6 +123,9 @@ type Summary = {
   "onset_lead_hours_expected_flooded_area_fraction_gt_1pct_gt_0.05m"?: number | null;
   peak_area_weighted_iqr_wd_m?: number;
   peak_area_weighted_central_90_wd_m?: number;
+  peak_area_weighted_between_checkpoint_spread_wd_m?: number | null;
+  peak_area_weighted_between_checkpoint_variance_share?: number | null;
+  peak_high_checkpoint_disagreement_area_fraction_wettable?: number | null;
   uncertainty_to_signal_ratio?: number | null;
   isotonic_calibration_applied: boolean;
   [key: string]: unknown;
@@ -123,6 +139,29 @@ const PRODUCT_LABELS: Record<ProductKey, string> = {
   p95: "WD p95 (m)",
   mean: "Mean WD (m)",
   spread: "Ensemble spread (m)",
+};
+
+const PRODUCT_CAPTIONS: Record<ProductKey, { caption: string; insight: string }> = {
+  p_gt_0p30m: {
+    caption: "Calibrated exceedance-probability map at the selected lead time.",
+    insight: "Values are probabilities for WD above 0.30 m, so this map foregrounds risk of crossing a meaningful depth threshold rather than expected depth.",
+  },
+  iqr: {
+    caption: "Interquartile depth spread at the selected lead time.",
+    insight: "Large IQR means the middle 50% of ensemble members disagree locally, which is a robust uncertainty-width diagnostic.",
+  },
+  p95: {
+    caption: "Upper-tail calibrated depth at the selected lead time.",
+    insight: "p95 highlights plausible high-end response under the ensemble, not a deterministic worst case.",
+  },
+  mean: {
+    caption: "Calibrated ensemble-mean water depth at the selected lead time.",
+    insight: "Mean depth is useful for expected response, but should be read with spread and probability maps for UQ context.",
+  },
+  spread: {
+    caption: "Ensemble standard-deviation map at the selected lead time.",
+    insight: "Spread shows where members disagree; high spread over low mean depth can be as important as high spread over deep regions.",
+  },
 };
 
 const TERMINAL_STATUSES = new Set(["COMPLETED", "FAILED", "CANCELED", "EXPIRED", "DELETED"]);
@@ -151,6 +190,235 @@ function formatDuration(seconds: unknown): string {
 function formatRunLabel(run: RunData | null | undefined): string {
   if (!run) return "Select run";
   return `${run.label || run.run_id.slice(0, 10)} · ${run.status}`;
+}
+
+function InfoTip({ text }: { text: string }) {
+  return (
+    <span
+      aria-label={text}
+      title={text}
+      style={{
+        display: "inline-grid",
+        placeItems: "center",
+        width: 17,
+        height: 17,
+        marginLeft: 6,
+        borderRadius: 999,
+        border: "1px solid #99b8b5",
+        color: "#0f766e",
+        fontSize: 11,
+        fontWeight: 800,
+        lineHeight: 1,
+        cursor: "help",
+        background: "#f0fdfa",
+        verticalAlign: "text-bottom",
+      }}
+    >
+      i
+    </span>
+  );
+}
+
+function FigureCaption({
+  title,
+  caption,
+  insight,
+}: {
+  title: string;
+  caption: string;
+  insight: string;
+}) {
+  return (
+    <figcaption
+      style={{
+        display: "grid",
+        gap: 4,
+        padding: "10px 14px 12px",
+        color: "#475569",
+        fontSize: 12,
+        lineHeight: 1.45,
+      }}
+    >
+      <strong style={{ color: "#0f172a", fontSize: 13, fontWeight: 700 }}>{title}</strong>
+      <span>
+        {caption}
+        <InfoTip text={insight} />
+      </span>
+    </figcaption>
+  );
+}
+
+function FigureNote({ caption, insight }: { caption: string; insight: string }) {
+  return (
+    <p
+      style={{
+        margin: "10px 0 0",
+        color: "#475569",
+        fontSize: 12.5,
+        lineHeight: 1.5,
+      }}
+    >
+      {caption}
+      <InfoTip text={insight} />
+    </p>
+  );
+}
+
+const REFERENCE_DIAGNOSTIC_CODES = new Set([
+  "below_candidate_reference",
+  "above_candidate_reference",
+  "below_reference_warning",
+  "above_reference_warning",
+]);
+
+const DECISION_ELIGIBLE_CODES = new Set([
+  "multivariate_outlier",
+  "high_uncertainty_to_signal",
+  "high_impact_high_uncertainty",
+  "large_calibration_shift",
+  "population_reinforced_candidate",
+  "deterministic_control_sample",
+]);
+
+function isDecisionEligibleFlag(flag: MonitoringFlag): boolean {
+  if (flag.details?.decision_eligible === true) return true;
+  if (flag.details?.decision_eligible === false) return false;
+  return DECISION_ELIGIBLE_CODES.has(flag.code) && flag.severity === "candidate";
+}
+
+function isReferenceDiagnosticFlag(flag: MonitoringFlag): boolean {
+  return flag.details?.decision_eligible === false || REFERENCE_DIAGNOSTIC_CODES.has(flag.code);
+}
+
+const DESCRIPTOR_LABELS: Record<string, string> = {
+  calibrated_max_mean_wd_m: "Peak calibrated water depth",
+  raw_max_mean_wd_m: "Peak raw water depth",
+  max_mean_wd_m: "Peak mean water depth",
+  stage_max: "Peak coastal stage",
+  stage_min: "Minimum coastal stage",
+  stage_range: "Coastal-stage range",
+  stage_mean: "Mean coastal stage",
+  stage_peak_lead_hours: "Lead time to peak coastal stage",
+  stage_max_rise_rate_per_hour: "Fastest coastal-stage rise",
+  stage_max_fall_rate_per_hour: "Fastest coastal-stage fall",
+  precipitation_total: "Total precipitation",
+  precipitation_mean: "Mean precipitation",
+  precipitation_max: "Peak precipitation",
+  precipitation_active_hours: "Precipitation duration",
+  precipitation_peak_lead_hours: "Lead time to peak precipitation",
+  peak_precip_to_peak_stage_lag_hours: "Rainfall-to-stage timing offset",
+  "peak_expected_flooded_area_fraction_wettable_gt_0.05m": "Peak expected flooded fraction above 0.05 m",
+  "peak_expected_flooded_area_km2_gt_0.05m": "Peak expected flooded area above 0.05 m",
+  "peak_expected_flooded_area_lead_hours_gt_0.05m": "Lead time to peak expected flooded area",
+  peak_area_weighted_iqr_wd_m: "Area-weighted uncertainty width",
+  peak_area_weighted_central_90_wd_m: "Area-weighted central 90% width",
+  peak_area_weighted_total_ensemble_spread_wd_m: "Peak total ensemble spread",
+  peak_area_weighted_between_checkpoint_spread_wd_m: "Peak checkpoint disagreement",
+  peak_area_weighted_between_checkpoint_variance_share: "Checkpoint-disagreement share",
+  peak_high_checkpoint_disagreement_area_fraction_wettable: "High-disagreement footprint",
+  peak_between_checkpoint_disagreement_lead_hours: "Lead time to peak checkpoint disagreement",
+  uncertainty_to_signal_ratio: "Uncertainty-to-signal ratio",
+  "calibration_peak_area_shift_percentage_points_gt_0.05m": "Calibration shift in flooded area",
+  max_abs_calibration_shift_percentage_points_by_threshold: "Largest calibration shift",
+};
+
+const CANDIDATE_REASON_LABELS: Record<string, string> = {
+  multivariate_outlier: "Joint input or forecast pattern is outside the reference population",
+  high_uncertainty_to_signal: "Uncertainty is high relative to predicted signal",
+  high_impact_high_uncertainty: "Broad affected area coincides with elevated uncertainty",
+  high_checkpoint_disagreement_spread: "Trained checkpoints disagree more than expected",
+  high_checkpoint_disagreement_share: "Checkpoint disagreement dominates ensemble spread",
+  broad_checkpoint_disagreement_footprint: "Checkpoint disagreement covers a broad area",
+  large_calibration_shift: "Calibration substantially changed the exceedance footprint",
+  population_reinforced_candidate: "Individual signal aligns with persistent population drift",
+  deterministic_control_sample: "Selected by deterministic sampling for review-set balance",
+  below_candidate_reference: "Historical reference-envelope-only selection",
+  above_candidate_reference: "Historical reference-envelope-only selection",
+  monitoring_recommended: "Monitoring recommended retraining review",
+};
+
+const CANDIDATE_STATUS_LABELS: Record<string, string> = {
+  NEW: "New review item",
+  REVIEWED: "Reviewed",
+  SELECTED_FOR_HECRAS: "Selected for HEC-RAS simulation",
+  REJECTED: "Rejected after review",
+  SIMULATED: "HEC-RAS simulated",
+};
+
+function formatDescriptorLabel(descriptor?: string | null): string {
+  if (!descriptor) return "Joint monitored pattern";
+  if (DESCRIPTOR_LABELS[descriptor]) return DESCRIPTOR_LABELS[descriptor];
+  const threshold = descriptor.match(/_gt_([0-9.]+)m/);
+  const thresholdText = threshold ? ` above ${threshold[1]} m` : "";
+  return descriptor
+    .replace(/_gt_[0-9.]+m/g, "")
+    .replace(/wd/g, "water depth")
+    .replace(/iqr/g, "IQR")
+    .replace(/p95/g, "95th percentile")
+    .replace(/p05/g, "5th percentile")
+    .replace(/km2/g, "km²")
+    .replace(/m2/g, "m²")
+    .replace(/_/g, " ")
+    .replace(/\b\w/g, (char) => char.toUpperCase())
+    .concat(thresholdText);
+}
+
+function formatCandidateReason(reason?: string | null): string {
+  if (!reason) return "Monitoring recommended retraining review";
+  return CANDIDATE_REASON_LABELS[reason] ?? formatDescriptorLabel(reason);
+}
+
+function formatCandidateStatus(status?: string | null): string {
+  if (!status) return "Not selected";
+  return CANDIDATE_STATUS_LABELS[status] ?? status.replace(/_/g, " ").toLowerCase();
+}
+
+function formatInitialConditionMode(mode?: string | null): string {
+  if (mode === "forcing_conditioned_baseline") return "Forcing-conditioned baseline history";
+  if (mode === "dry") return "Dry diagnostic history";
+  return "Initial water-depth history";
+}
+
+function formatMonitoringFlag(flag: MonitoringFlag): string {
+  const label = formatDescriptorLabel(flag.descriptor);
+  switch (flag.code) {
+    case "above_candidate_reference":
+      return `${label} is above the historical reference envelope.`;
+    case "below_candidate_reference":
+      return `${label} is below the historical reference envelope.`;
+    case "above_reference_warning":
+      return `${label} is near the upper edge of the reference envelope.`;
+    case "below_reference_warning":
+      return `${label} is near the lower edge of the reference envelope.`;
+    case "multivariate_outlier":
+      return "The combined scenario pattern is unusual relative to the reference population.";
+    case "high_uncertainty_to_signal":
+      return "Ensemble uncertainty is high relative to the predicted flood signal.";
+    case "high_impact_high_uncertainty":
+      return "A broad affected area coincides with elevated ensemble uncertainty.";
+    case "high_checkpoint_disagreement_spread":
+      return "Trained checkpoints disagree more strongly than expected.";
+    case "high_checkpoint_disagreement_share":
+      return "Checkpoint-to-checkpoint disagreement explains an unusually large share of ensemble spread.";
+    case "broad_checkpoint_disagreement_footprint":
+      return "Checkpoint-driven disagreement covers an unusually large part of the wettable domain.";
+    case "large_calibration_shift":
+      return "Calibration materially changed the exceedance footprint.";
+    case "population_reinforced_candidate":
+      return "This run aligns with a persistent monitoring signal in recent submissions.";
+    case "deterministic_control_sample":
+      return "Selected by deterministic sampling to keep the review set balanced.";
+    default:
+      return flag.message
+        .replace(/calibrated_max_mean_wd_m/g, "peak calibrated water depth")
+        .replace(/raw_max_mean_wd_m/g, "peak raw water depth")
+        .replace(/peak_area_weighted_iqr_wd_m/g, "area-weighted uncertainty width")
+        .replace(/peak_area_weighted_between_checkpoint_spread_wd_m/g, "peak checkpoint disagreement")
+        .replace(/peak_area_weighted_between_checkpoint_variance_share/g, "checkpoint-disagreement share")
+        .replace(/peak_high_checkpoint_disagreement_area_fraction_wettable/g, "high-disagreement footprint")
+        .replace(/max_abs_calibration_shift_percentage_points_by_threshold/g, "largest calibration shift")
+        .replace(/_/g, " ");
+  }
 }
 
 function clamp(value: number, min: number, max: number): number {
@@ -214,7 +482,7 @@ function parseHydrograph(csvText: string): { t_h: number[]; stage: number[]; pre
     const stageVal = Number(cols[stageIdx]);
     const precipVal = Number(cols[precipIdx]);
     if (!Number.isFinite(stageVal) || !Number.isFinite(precipVal)) return;
-    let t = idx * (1200 / 3600);
+    let t = idx * (DEFAULT_FORCING_DT_SECONDS / 3600);
     if (timeIdx >= 0) {
       const rawT = Number(cols[timeIdx]);
       if (Number.isFinite(rawT)) {
@@ -1141,6 +1409,7 @@ export default function RunDetails() {
   const [compareError, setCompareError] = useState<string | null>(null);
   const [compareTimeSlot, setCompareTimeSlot] = useState(0);
   const [monitoring, setMonitoring] = useState<MonitoringPayload | null>(null);
+  const [initialConditionSelection, setInitialConditionSelection] = useState<InitialConditionSelection | null>(null);
 
   const transient404Ref = useRef(0);
 
@@ -1192,6 +1461,11 @@ export default function RunDetails() {
       }
       if (ids.has("raw_summary.json")) {
         loadJson("raw_summary.json").then(setRawSummary).catch(() => undefined);
+      }
+      if (ids.has("initial_condition_selection.json")) {
+        loadJson("initial_condition_selection.json")
+          .then((payload) => setInitialConditionSelection(payload as InitialConditionSelection | null))
+          .catch(() => undefined);
       }
       if (ids.has("forcing.csv") && forcing === null) {
         fetch(artifactUrl("forcing.csv"), { cache: "no-store" })
@@ -1484,10 +1758,30 @@ export default function RunDetails() {
   const figureArtifacts = [
     // forcing_hydrograph.svg deliberately omitted — superseded by the
     // Drivers tab's stage + rainfall + response stacked chart.
-    { id: "uq_extent_by_time.svg", title: "Expected Flooded-Area Fraction" },
-    { id: "uq_exceedance_bars.svg", title: "Peak Exceedance Footprint" },
-    { id: "uq_uncertainty_width.svg", title: "Uncertainty Width" },
-    { id: "calibration_effect.svg", title: "Calibration Shift" },
+    {
+      id: "uq_extent_by_time.svg",
+      title: "Expected Flooded-Area Fraction",
+      caption: "Expected flooded-area fraction through lead time for each configured threshold.",
+      insight: "Use this to separate timing-driven risk from depth-driven risk: curves that peak late or stay broad indicate persistent spatial exposure.",
+    },
+    {
+      id: "uq_exceedance_bars.svg",
+      title: "Peak Exceedance Footprint",
+      caption: "Peak expected wettable-domain footprint at each water-depth threshold.",
+      insight: "A steep drop between thresholds points to broad shallow flooding; persistent footprint at high thresholds points to deeper inundation.",
+    },
+    {
+      id: "uq_uncertainty_width.svg",
+      title: "Uncertainty Width",
+      caption: "Area-weighted ensemble interval width over time.",
+      insight: "Peaks mark lead times where the 60-member ensemble disagrees most, independent of any ground-truth observation.",
+    },
+    {
+      id: "calibration_effect.svg",
+      title: "Calibration Shift",
+      caption: "Raw-to-calibrated changes in exceedance footprint and uncertainty summaries.",
+      insight: "Large shifts show where calibration materially changed the UQ story; they are adjustment diagnostics, not validation accuracy.",
+    },
   ].filter((figure) => artifacts.some((artifact) => artifact.artifact_id === figure.id));
 
   // Envelope tiles for the Hazard tab. Each entry is a temporal-summary map
@@ -1499,21 +1793,25 @@ export default function RunDetails() {
       id: "peak_depth_map.png",
       title: "Peak depth",
       caption: "Per-cell maximum of the ensemble-mean depth.",
+      insight: "This map collapses time to each cell's maximum response, so it is best for locating peak hazard rather than judging event timing.",
     },
     {
       id: "arrival_time_map_gt_0p05m.png",
       title: "Arrival time @ 0.05 m",
       caption: "Lead hour at which each cell first exceeds 5 cm.",
+      insight: "Use arrival time to see propagation of the wetting front. Cells that never exceed the threshold are masked.",
     },
     {
       id: "duration_map_gt_0p05m.png",
       title: "Wet duration @ 0.05 m",
       caption: "Total hours each cell stays above 5 cm.",
+      insight: "Duration highlights persistence, which can differ from peak-depth hot spots when water arrives early or drains slowly.",
     },
     {
       id: "quantile_envelope_at_peak.png",
       title: "Spread at peak",
       caption: "p95 − p05 envelope width at each cell's peak time.",
+      insight: "This is a spatial uncertainty-width map: large values indicate cells where ensemble members disagree on depth near peak response.",
     },
   ].filter((tile) => artifacts.some((artifact) => artifact.artifact_id === tile.id));
 
@@ -1525,16 +1823,19 @@ export default function RunDetails() {
       id: "empirical_crps_map.png",
       title: "Empirical CRPS (peak time)",
       caption: "Mean pairwise absolute difference across the 60 members. No ground truth needed — a self-consistent measure of where the ensemble disagrees most.",
+      insight: "Treat this as a ground-truth-free spread proxy. It identifies model disagreement, not measured forecast error.",
     },
     {
       id: "between_var_map.png",
       title: "Between-checkpoint variance",
       caption: "Variance across the three checkpoint means. Reflects structural / epistemic disagreement between models.",
+      insight: "High values mean the three trained checkpoints disagree with each other, which is the model-structure part of the ensemble uncertainty.",
     },
     {
       id: "within_var_map.png",
       title: "Within-checkpoint variance",
       caption: "Mean of per-checkpoint variances. Reflects latent / aleatoric variability inside each model.",
+      insight: "High values mean latent samples inside the same checkpoint spread out, even when checkpoint means are similar.",
     },
   ].filter((tile) => artifacts.some((artifact) => artifact.artifact_id === tile.id));
 
@@ -1561,7 +1862,7 @@ export default function RunDetails() {
             )}
             {TERMINAL_STATUSES.has(run.status) && (
               <button type="button" className="action-button danger" onClick={deleteRun} disabled={actionBusy}>
-                Delete
+                Delete from history
               </button>
             )}
             {me?.is_admin && (
@@ -1619,55 +1920,93 @@ export default function RunDetails() {
           </section>
         );
       })()}
-      {monitoring?.available && (
-        <section className="panel monitoring-panel" aria-label="Drift monitoring">
+      {initialConditionSelection && (
+        <section className="panel" aria-label="Initial water-depth history">
           <header className="envelope-head">
             <div>
-              <p className="eyebrow">Drift monitoring</p>
-              <h2>Reference screening and retraining capture</h2>
+              <p className="eyebrow">Initial condition</p>
+              <h2>{formatInitialConditionMode(initialConditionSelection.mode)}</h2>
+            </div>
+            <span className="envelope-sub">
+              {initialConditionSelection.reference_scope || "diagnostic"}
+            </span>
+          </header>
+          <p className="tab-intro" style={{ margin: 0 }}>
+            {initialConditionSelection.mode === "forcing_conditioned_baseline"
+              ? `Initial water-depth history selected from ${initialConditionSelection.selected_reference_ids?.length ?? 0} similar train/calibration reference event(s).`
+              : "Dry zero water-depth history was used for this diagnostic or compatibility run."}
+            {initialConditionSelection.low_confidence
+              ? " The uploaded forcing is far from the reference library, so the selection is marked low confidence."
+              : ""}
+          </p>
+          {initialConditionSelection.selected_reference_ids?.length ? (
+            <p className="muted" style={{ marginBottom: 0 }}>
+              References: {initialConditionSelection.selected_reference_ids.join(", ")}
+            </p>
+          ) : null}
+        </section>
+      )}
+      {monitoring?.available && (
+        <section className="panel monitoring-panel" aria-label="Model monitoring">
+          <header className="envelope-head">
+            <div>
+              <p className="eyebrow">Model monitoring</p>
+              <h2>Reference screening and retraining review</h2>
             </div>
             <span className="envelope-sub">{monitoring.monitoring_bundle_id}</span>
           </header>
           <div className="monitoring-grid">
             {([monitoring.pre_run, monitoring.post_run] as (MonitoringReport | null | undefined)[]).map((report) => {
               if (!report) return null;
-              const score =
+              const referenceScore =
                 report.phase === "PRE_RUN"
                   ? report.scores?.input_novelty_score
                   : report.scores?.forecast_monitoring_score;
-              const mvFlag = (report.flags ?? []).find((f) => f.code === "multivariate_outlier");
+              const decisionScore = report.scores?.candidate_decision_score ?? report.scores?.candidate_score ?? 0;
+              const decisionFlags = (report.flags ?? []).filter(isDecisionEligibleFlag);
+              const diagnosticFlags = (report.flags ?? []).filter(isReferenceDiagnosticFlag);
               return (
                 <article key={report.phase} className="monitoring-card">
-                  <span>{report.phase === "PRE_RUN" ? "Uploaded forcing" : "Completed forecast"}</span>
-                  <strong>{typeof score === "number" ? score.toFixed(2) : "—"}</strong>
+                  <span>{report.phase === "PRE_RUN" ? "Input scenario" : "Completed forecast"}</span>
+                  <strong>{typeof decisionScore === "number" ? decisionScore.toFixed(2) : "—"}</strong>
                   <small>
                     {report.candidate_recommended
-                      ? `Candidate signal: ${report.candidate_reason ?? "monitoring recommended"}`
-                      : "No candidate signal at this stage"}
+                      ? `Selected for review: ${formatCandidateReason(report.candidate_reason)}`
+                      : "Not selected for retraining review"}
                   </small>
-                  {mvFlag && (
-                    <small key={`${report.phase}-mv`} style={{color: "#b45309", fontWeight: 600}}>
-                      {mvFlag.message}
+                  <small>
+                    Reference diagnostic score {typeof referenceScore === "number" ? referenceScore.toFixed(2) : "—"}
+                  </small>
+                  {decisionFlags.slice(0, 2).map((flag) => (
+                    <small key={`${report.phase}-decision-${flag.code}`} style={{ color: "#0f766e", fontWeight: 700 }}>
+                      {formatMonitoringFlag(flag)}
+                    </small>
+                  ))}
+                  {diagnosticFlags.length > 0 && (
+                    <small style={{ color: "#64748b", fontWeight: 700 }}>
+                      Reference diagnostics
                     </small>
                   )}
-                  {(report.flags ?? []).filter((f) => f.code !== "multivariate_outlier").slice(0, 2).map((flag) => (
-                    <small key={`${report.phase}-${flag.code}`}>{flag.message}</small>
+                  {diagnosticFlags.slice(0, 3).map((flag) => (
+                    <small key={`${report.phase}-diagnostic-${flag.code}-${flag.descriptor ?? "unknown"}`}>
+                      {formatMonitoringFlag(flag)}
+                    </small>
                   ))}
                 </article>
               );
             })}
             <article className="monitoring-card">
-              <span>Candidate status</span>
-              <strong>{monitoring.candidate?.status ?? "Not selected"}</strong>
+              <span>Retraining review status</span>
+              <strong>{formatCandidateStatus(monitoring.candidate?.status)}</strong>
               <small>
                 {monitoring.candidate
-                  ? `Score ${monitoring.candidate.candidate_score.toFixed(2)} · ${monitoring.candidate.reason}`
+                  ? `Selection score ${monitoring.candidate.candidate_score.toFixed(2)} · ${formatCandidateReason(monitoring.candidate.reason)}`
                   : "This run has not been preserved for retraining review."}
               </small>
             </article>
           </div>
           <p className="muted">
-            Monitoring is a research guardrail for future HEC-RAS labeling and retraining-set review. It is not proof of model error or operational flood guidance.
+            Monitoring is a research guardrail for future HEC-RAS labeling and retraining review. It is not proof of model error or operational flood guidance.
           </p>
         </section>
       )}
@@ -1754,10 +2093,7 @@ export default function RunDetails() {
                 {uncertaintyTiles.map((tile) => (
                   <figure key={tile.id} className="envelope-tile">
                     <img src={artifactUrl(tile.id)} alt={`${tile.title} — ${tile.caption}`} />
-                    <figcaption>
-                      <strong>{tile.title}</strong>
-                      <span>{tile.caption}</span>
-                    </figcaption>
+                    <FigureCaption title={tile.title} caption={tile.caption} insight={tile.insight} />
                   </figure>
                 ))}
               </div>
@@ -1773,6 +2109,10 @@ export default function RunDetails() {
                 </span>
               </header>
               <ReliabilityCurveCard data={reliability} />
+              <FigureNote
+                caption="Isotonic reliability curves compare raw ensemble probabilities with calibrated probabilities over wettable cells at peak time."
+                insight="Use the curve shape to understand probability adjustment. A curve above identity increases exceedance probabilities; below identity decreases them."
+              />
               {!reliability.applied && (
                 <p className="muted" style={{ marginTop: 8 }}>
                   Calibration was a no-op for this run (no isotonic curves). The
@@ -1855,10 +2195,38 @@ export default function RunDetails() {
               <span className="envelope-sub">forcing and response on one lead-time axis</span>
             </header>
             <div className="driver-stack">
-              <MultiLineChart series={[{ label: "Stage", color: "#0f766e", points: stageSeries }]} yLabel="Coastal stage" />
-              <BarSeriesChart points={rainSeries} color="#1d4ed8" yLabel="Precipitation" />
-              <MultiLineChart series={[{ label: "Peak depth", color: "#b45309", points: responseDepthSeries }]} yLabel="Peak-depth response (m)" />
-              <MultiLineChart series={[{ label: "Flooded area", color: "#7c3aed", points: floodedAreaSeries }]} yLabel="Expected wettable flooded-area fraction (%)" />
+              <figure className="chart-figure">
+                <MultiLineChart series={[{ label: "Stage", color: "#0f766e", points: stageSeries }]} yLabel="Coastal stage" />
+                <FigureCaption
+                  title="Coastal stage"
+                  caption="Uploaded boundary stage after removing the flat warm-up lead-in."
+                  insight="This is the dominant coastal forcing signal; compare peaks and rise rates against the response panels below."
+                />
+              </figure>
+              <figure className="chart-figure">
+                <BarSeriesChart points={rainSeries} color="#1d4ed8" yLabel="Precipitation" />
+                <FigureCaption
+                  title="Precipitation"
+                  caption="Uploaded rainfall intensity by lead time."
+                  insight="Bars show timing and concentration of rainfall forcing. Compact high bars imply intense pulses; broad bars imply sustained rainfall."
+                />
+              </figure>
+              <figure className="chart-figure">
+                <MultiLineChart series={[{ label: "Peak depth", color: "#b45309", points: responseDepthSeries }]} yLabel="Peak-depth response (m)" />
+                <FigureCaption
+                  title="Peak-depth response"
+                  caption="Maximum calibrated ensemble-mean depth across the domain at each lead time."
+                  insight="This links forcing to peak water-depth response. It is depth focused, not an area metric."
+                />
+              </figure>
+              <figure className="chart-figure">
+                <MultiLineChart series={[{ label: "Flooded area", color: "#7c3aed", points: floodedAreaSeries }]} yLabel="Expected wettable flooded-area fraction (%)" />
+                <FigureCaption
+                  title="Expected flooded-area response"
+                  caption="Expected wettable-domain area fraction above 0.05 m through lead time."
+                  insight="This converts cell-level exceedance into physical extent, making it easier to compare scenarios with different spatial footprints."
+                />
+              </figure>
             </div>
           </section>
 
@@ -1866,17 +2234,26 @@ export default function RunDetails() {
             <article className="card">
               <span className="card-label">Cumulative stage signal</span>
               <span className="card-value">{formatNumber(cumulative(stageSeries).at(-1)?.y, 2)}</span>
-              <span className="card-note">stage-hours over uploaded forcing</span>
+              <span className="card-note">
+                stage-hours over uploaded forcing
+                <InfoTip text="Integrated stage signal summarizes how long and how strongly the coastal boundary stayed elevated." />
+              </span>
             </article>
             <article className="card">
               <span className="card-label">Cumulative rainfall</span>
               <span className="card-value">{formatNumber(cumulative(rainSeries).at(-1)?.y, 2)}</span>
-              <span className="card-note">precipitation-hours over uploaded forcing</span>
+              <span className="card-note">
+                precipitation-hours over uploaded forcing
+                <InfoTip text="Integrated rainfall summarizes event volume on the uploaded time grid; it complements the peak-intensity bar chart." />
+              </span>
             </article>
             <article className="card">
               <span className="card-label">Cumulative flooded-area response</span>
               <span className="card-value">{formatNumber(cumulative(floodedAreaSeries).at(-1)?.y, 2)}</span>
-              <span className="card-note">percent-wettable-hours at &gt; 0.05 m</span>
+              <span className="card-note">
+                percent-wettable-hours at &gt; 0.05 m
+                <InfoTip text="This integrates spatial extent through time, so short intense flooding and long persistent flooding can be distinguished." />
+              </span>
             </article>
           </section>
 
@@ -1889,6 +2266,7 @@ export default function RunDetails() {
             </header>
             {!leaderboard && <p className="muted">Leaderboard artifact is generated during postprocessing for new completed runs.</p>}
             {leaderboard && (
+              <>
               <div className="leaderboard-table">
                 <table className="summary-table">
                   <thead>
@@ -1925,6 +2303,11 @@ export default function RunDetails() {
                   </tbody>
                 </table>
               </div>
+              <FigureNote
+                caption="Rows rank cells by expected contribution to the configured exceedance footprint."
+                insight="Clicking a row selects that cell in the Hazard inspector so you can connect aggregate extent to a local 60-member trace."
+              />
+              </>
             )}
           </section>
         </>
@@ -1997,19 +2380,31 @@ export default function RunDetails() {
                   {compareAFrames[compareSafeSlot] && (
                     <figure className="envelope-tile">
                       <img src={artifactUrlFor(runId, compareAFrames[compareSafeSlot].artifactId)} alt="Run A map" />
-                      <figcaption><strong>Run A</strong><span>{formatRunLabel(comparePayload.run_a)}</span></figcaption>
+                      <FigureCaption
+                        title="Run A"
+                        caption={formatRunLabel(comparePayload.run_a)}
+                        insight="Run A is the baseline scenario for the synchronized comparison. The same product and lead slot are used for both runs."
+                      />
                     </figure>
                   )}
                   {compareBFrames[compareSafeSlot] && (
                     <figure className="envelope-tile">
                       <img src={artifactUrlFor(comparePayload.run_b.run_id, compareBFrames[compareSafeSlot].artifactId)} alt="Run B map" />
-                      <figcaption><strong>Run B</strong><span>{formatRunLabel(comparePayload.run_b)}</span></figcaption>
+                      <FigureCaption
+                        title="Run B"
+                        caption={formatRunLabel(comparePayload.run_b)}
+                        insight="Run B is compared against Run A with matched product and lead slot so differences are attributable to scenario changes."
+                      />
                     </figure>
                   )}
                   {compareDeltaFrames[compareSafeSlot] && (
                     <figure className="envelope-tile">
                       <img src={artifactUrl(compareDeltaFrames[compareSafeSlot])} alt="B minus A delta map" />
-                      <figcaption><strong>Delta</strong><span>Run B minus Run A</span></figcaption>
+                      <FigureCaption
+                        title="Delta"
+                        caption="Run B minus Run A at the synchronized lead slot."
+                        insight="Positive values mean Run B is deeper, more uncertain, or has higher exceedance probability depending on the selected product."
+                      />
                     </figure>
                   )}
                 </div>
@@ -2038,6 +2433,10 @@ export default function RunDetails() {
                     },
                   ]}
                 />
+                <FigureNote
+                  caption="Overlay of expected wettable flooded-area fraction for the two runs."
+                  insight="This shows whether the scenario change alters spatial footprint, timing, or persistence rather than only pointwise map values."
+                />
                 <MultiLineChart
                   yLabel="Peak-depth response (m)"
                   series={[
@@ -2058,6 +2457,10 @@ export default function RunDetails() {
                       })),
                     },
                   ]}
+                />
+                <FigureNote
+                  caption="Overlay of domain peak-depth response for Run A and Run B."
+                  insight="Use this with the flooded-area overlay: a scenario can increase peak depth without greatly changing spatial footprint, or the reverse."
                 />
               </section>
 
@@ -2085,6 +2488,10 @@ export default function RunDetails() {
                     ))}
                   </tbody>
                 </table>
+                <FigureNote
+                  caption="A/B deltas are reported for physical area, probability, depth, timing, and uncertainty metrics."
+                  insight="Raw cell counts are intentionally not primary metrics because they are less interpretable than area, fraction, and physical depth."
+                />
               </section>
             </>
           )}
@@ -2103,10 +2510,7 @@ export default function RunDetails() {
             {envelopeTiles.map((tile) => (
               <figure key={tile.id} className="envelope-tile">
                 <img src={artifactUrl(tile.id)} alt={`${tile.title} — ${tile.caption}`} />
-                <figcaption>
-                  <strong>{tile.title}</strong>
-                  <span>{tile.caption}</span>
-                </figcaption>
+                <FigureCaption title={tile.title} caption={tile.caption} insight={tile.insight} />
               </figure>
             ))}
           </div>
@@ -2145,6 +2549,19 @@ export default function RunDetails() {
             <span className="card-label">Area-weighted uncertainty width</span>
             <span className="card-value">{formatNumber(summary.peak_area_weighted_iqr_wd_m, 3)} m</span>
             <span className="card-note">IQR; p95-p05 {formatNumber(summary.peak_area_weighted_central_90_wd_m, 3)} m</span>
+          </article>
+          <article className="card">
+            <span className="card-label">Checkpoint disagreement</span>
+            <span className="card-value">
+              {summary.peak_area_weighted_between_checkpoint_variance_share == null
+                ? "—"
+                : `${formatNumber(summary.peak_area_weighted_between_checkpoint_variance_share * 100, 1)}%`}
+            </span>
+            <span className="card-note">
+              {summary.peak_area_weighted_between_checkpoint_spread_wd_m == null
+                ? "available after new runs"
+                : `${formatNumber(summary.peak_area_weighted_between_checkpoint_spread_wd_m, 3)} m between-checkpoint spread`}
+            </span>
           </article>
         </section>
       )}
@@ -2193,6 +2610,10 @@ export default function RunDetails() {
               geometry={geometryMeta}
               onPick={setSelectedCell}
               selectedCellIndex={selectedCell}
+            />
+            <FigureNote
+              caption={PRODUCT_CAPTIONS[product].caption}
+              insight={PRODUCT_CAPTIONS[product].insight}
             />
             {pngSlots.length > 1 && (
               <div className="forecast-scrubber">
@@ -2291,7 +2712,7 @@ export default function RunDetails() {
         )}
       </section>
 
-      {/* P2 flagship: per-cell inspector. Hidden until a cell is picked. */}
+      {/* Per-cell inspector. Hidden until a cell is picked. */}
       {selectedCell !== null && (
         <section className="panel poi-panel" aria-label="Per-cell ensemble inspector">
           <header className="poi-head">
@@ -2336,9 +2757,30 @@ export default function RunDetails() {
           )}
           {cellSeries && (
             <div className="poi-grid">
-              <PoiHydrograph series={cellSeries} />
-              <PoiExceedanceTrace series={cellSeries} />
-              <PoiArrivalHistogram series={cellSeries} />
+              <figure className="chart-figure">
+                <PoiHydrograph series={cellSeries} />
+                <FigureCaption
+                  title="Depth fan"
+                  caption="All member traces with p05-p95 ribbon and p50 median at the selected cell."
+                  insight="This is the local UQ story: member clustering, outliers, and spread through time are visible at one physical point."
+                />
+              </figure>
+              <figure className="chart-figure">
+                <PoiExceedanceTrace series={cellSeries} />
+                <FigureCaption
+                  title="Local exceedance probability"
+                  caption="Calibrated probability of exceeding configured water-depth thresholds through lead time."
+                  insight="Use this to see whether the selected point has a brief probability spike, sustained risk, or no threshold crossing."
+                />
+              </figure>
+              <figure className="chart-figure">
+                <PoiArrivalHistogram series={cellSeries} />
+                <FigureCaption
+                  title="Arrival-time distribution"
+                  caption="Member-wise first-wet timing distribution at the selected cell."
+                  insight="A tight histogram means members agree on onset timing; a broad histogram means local arrival timing is uncertain."
+                />
+              </figure>
             </div>
           )}
         </section>
@@ -2352,6 +2794,7 @@ export default function RunDetails() {
               <article className="figure-card" key={figure.id}>
                 <h3>{figure.title}</h3>
                 <img src={artifactUrl(figure.id)} alt={`${figure.title} for run ${runId}`} />
+                <FigureNote caption={figure.caption} insight={figure.insight} />
               </article>
             ))}
           </div>
@@ -2651,6 +3094,7 @@ export default function RunDetails() {
         .poi-clear:hover { background: #fee2e2; }
         .poi-grid { display: grid; gap: 14px; margin-top: 16px; }
         .poi-chart { display: block; width: 100%; height: auto; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 10px; padding: 6px; }
+        .chart-figure { margin: 0; display: grid; gap: 8px; }
         .back { color: #0f766e; font-weight: 700; text-decoration: none; }
         .back:hover { text-decoration: underline; }
         .hero { display: flex; align-items: flex-start; justify-content: space-between; gap: 18px; margin-top: 12px; }

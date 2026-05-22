@@ -93,6 +93,10 @@ class SqlMonitoringRepository:
             sa.Column("test_id", sa.String, primary_key=True),
             sa.Column("test_type", sa.String, nullable=False, index=True),
             sa.Column("descriptor_name", sa.String, nullable=True),
+            sa.Column("monitoring_bundle_id", sa.String, nullable=True, index=True),
+            sa.Column("window_start", sa.DateTime(timezone=True), nullable=True),
+            sa.Column("window_end", sa.DateTime(timezone=True), nullable=True),
+            sa.Column("n_observations", sa.Integer, nullable=True),
             sa.Column("drift_detected", sa.Boolean, nullable=False),
             sa.Column("test_statistic", sa.Float, nullable=False),
             sa.Column("threshold", sa.Float, nullable=False),
@@ -100,6 +104,7 @@ class SqlMonitoringRepository:
             sa.Column("created_at", sa.DateTime(timezone=True), nullable=False, index=True),
         )
         metadata.create_all(self.engine)
+        self._ensure_phase2_columns()
 
     def create_report(self, report: MonitoringReport) -> MonitoringReport:
         payload = {
@@ -289,7 +294,18 @@ class SqlMonitoringRepository:
             "created_at": record.created_at,
         }
         with self.engine.begin() as conn:
-            conn.execute(self.hecras_errors.insert().values(**payload))
+            existing = conn.execute(
+                self.sa.select(self.hecras_errors)
+                .where(self.hecras_errors.c.candidate_id == record.candidate_id)
+            ).first()
+            if existing is None:
+                conn.execute(self.hecras_errors.insert().values(**payload))
+            else:
+                conn.execute(
+                    self.hecras_errors.update()
+                    .where(self.hecras_errors.c.candidate_id == record.candidate_id)
+                    .values(**payload)
+                )
         return record
 
     def get_hecras_error_record(self, candidate_id: str) -> HecrasErrorRecord | None:
@@ -313,6 +329,10 @@ class SqlMonitoringRepository:
             "test_id": result.test_id,
             "test_type": result.test_type,
             "descriptor_name": result.descriptor_name,
+            "monitoring_bundle_id": result.monitoring_bundle_id,
+            "window_start": result.window_start,
+            "window_end": result.window_end,
+            "n_observations": result.n_observations,
             "drift_detected": result.drift_detected,
             "test_statistic": result.test_statistic,
             "threshold": result.threshold,
@@ -320,7 +340,18 @@ class SqlMonitoringRepository:
             "created_at": result.created_at,
         }
         with self.engine.begin() as conn:
-            conn.execute(self.drift_results.insert().values(**payload))
+            existing = conn.execute(
+                self.sa.select(self.drift_results)
+                .where(self.drift_results.c.test_id == result.test_id)
+            ).first()
+            if existing is None:
+                conn.execute(self.drift_results.insert().values(**payload))
+            else:
+                conn.execute(
+                    self.drift_results.update()
+                    .where(self.drift_results.c.test_id == result.test_id)
+                    .values(**payload)
+                )
         return result
 
     def list_drift_test_results(
@@ -359,12 +390,30 @@ class SqlMonitoringRepository:
             test_id=row["test_id"],
             test_type=row["test_type"],
             descriptor_name=row["descriptor_name"],
+            monitoring_bundle_id=row["monitoring_bundle_id"] if "monitoring_bundle_id" in row else None,
+            window_start=_parse_datetime(row["window_start"]) if "window_start" in row and row["window_start"] else None,
+            window_end=_parse_datetime(row["window_end"]) if "window_end" in row and row["window_end"] else None,
+            n_observations=int(row["n_observations"]) if "n_observations" in row and row["n_observations"] is not None else None,
             drift_detected=bool(row["drift_detected"]),
             test_statistic=float(row["test_statistic"]),
             threshold=float(row["threshold"]),
             details=details,
             created_at=_parse_datetime(row["created_at"]),
         )
+
+    def _ensure_phase2_columns(self) -> None:
+        inspector = self.sa.inspect(self.engine)
+        existing = {col["name"] for col in inspector.get_columns("fgn_drift_test_results")}
+        additions = {
+            "monitoring_bundle_id": "VARCHAR",
+            "window_start": "TIMESTAMP",
+            "window_end": "TIMESTAMP",
+            "n_observations": "INTEGER",
+        }
+        with self.engine.begin() as conn:
+            for name, ddl_type in additions.items():
+                if name not in existing:
+                    conn.execute(self.sa.text(f"ALTER TABLE fgn_drift_test_results ADD COLUMN {name} {ddl_type}"))
 
     def _row_to_hecras_error(self, row) -> HecrasErrorRecord:
         row = getattr(row, "_mapping", row)
@@ -399,6 +448,7 @@ class SqlMonitoringRepository:
                     value=raw.get("value"),
                     reference_low=raw.get("reference_low"),
                     reference_high=raw.get("reference_high"),
+                    details=raw.get("details") if isinstance(raw.get("details"), dict) else None,
                 )
             )
         return MonitoringReport(

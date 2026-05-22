@@ -29,6 +29,10 @@ class DriftTestResult:
     drift_detected: bool
     test_statistic: float
     threshold: float
+    monitoring_bundle_id: str | None = None
+    window_start: datetime | None = None
+    window_end: datetime | None = None
+    n_observations: int | None = None
     details: dict[str, object] | None = None
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 

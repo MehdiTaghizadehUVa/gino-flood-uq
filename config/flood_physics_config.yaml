@@ -70,7 +70,7 @@ opt:
   
   # Physics loss configuration
   physics_loss_weight: 1.0  # Weight for physics loss component
-  delta_t: 1200.0  # Time step size in seconds
+  delta_t: 900.0  # Time step size in seconds
   
   # Save configuration
   save_every: 10
@@ -101,4 +101,4 @@ wandb:
 
 # Device configuration
 device: "cuda"  # "cuda", "cpu"
-mixed_precision: false 
+mixed_precision: false

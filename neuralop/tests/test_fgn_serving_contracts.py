@@ -46,7 +46,7 @@ def _bundle(tmp_path: Path, *, paths: bool = True) -> FGNModelBundle:
         calibration_coefficients_path=coeff if paths else tmp_path / "missing_crps.json",
         isotonic_curves_path=iso,
         boundary_channels=["stage", "precipitation"],
-        dt_seconds=1200,
+        dt_seconds=900,
         n_history=3,
         skip_before_timestep=12,
         max_forecast_steps=94,
@@ -60,7 +60,7 @@ def _bundle(tmp_path: Path, *, paths: bool = True) -> FGNModelBundle:
 def _valid_csv(n=24):
     lines = ["time_seconds,stage,precipitation"]
     for i in range(n):
-        lines.append(f"{i*1200},{1.0 + i*0.01},{0.2}")
+        lines.append(f"{i*900},{1.0 + i*0.01},{0.2}")
     return "\n".join(lines) + "\n"
 
 
@@ -444,7 +444,7 @@ def test_serving_renderer_depends_on_eval_render_private_helpers():
 
 def test_forcing_rejects_bad_timestep(tmp_path):
     bundle = _bundle(tmp_path)
-    csv = "time_seconds,stage,precipitation\n0,1,0\n900,1,0\n1200,1,0\n"
+    csv = "time_seconds,stage,precipitation\n0,1,0\n900,1,0\n1700,1,0\n"
     with pytest.raises(ForcingValidationError, match="timestep"):
         parse_forcing_csv(csv, bundle=bundle)
 
@@ -698,7 +698,12 @@ def test_orchestrator_submit_execute_completes_with_fake_inference(tmp_path):
         "uq_exceedance_bars.svg",
         "uq_uncertainty_width.svg",
         "calibration_effect.svg",
+        "initial_condition_selection.json",
     }.issubset(artifacts)
+    initial_selection = json.loads(orchestrator.artifact_store.read_bytes(record.spec.run_id, "initial_condition_selection.json"))
+    assert initial_selection["mode"] == "dry"
+    manifest = json.loads(orchestrator.artifact_store.read_bytes(record.spec.run_id, "run_manifest.json"))
+    assert manifest["initial_condition"]["mode"] == "dry"
 
 
 def test_quota_policy_rejects_excess_queued_runs(tmp_path):
@@ -1021,6 +1026,38 @@ def test_spread_decomposition_returns_none_without_member_model_id():
     ensemble = np.zeros((4, 3), dtype=np.float64)
     assert ForecastProductBuilder.spread_decomposition_per_cell(ensemble, None) is None
     assert ForecastProductBuilder.spread_decomposition_per_cell(ensemble, ["A"] * 4) is None
+
+
+def test_build_summary_includes_checkpoint_disagreement_metrics():
+    """Run summaries carry checkpoint-vs-latent disagreement metrics so
+    monitoring can flag high structural disagreement without reading HDF5."""
+    members = np.array(
+        [
+            [[0.0, 0.0, 0.0], [0.1, 0.1, 0.1]],
+            [[0.0, 0.0, 0.0], [0.1, 0.1, 0.1]],
+            [[0.0, 0.0, 0.0], [0.7, 0.1, 0.7]],
+            [[0.0, 0.0, 0.0], [0.7, 0.1, 0.7]],
+        ],
+        dtype=np.float64,
+    )
+    forecast = ForecastResult(
+        members_wd=members,
+        lead_time_hours=np.array([0.0, 1.0]),
+        wettable_mask=np.array([True, True, True]),
+        metadata={
+            "cell_area_m2": np.array([1.0, 3.0, 2.0]),
+            "member_model_id": ["A", "A", "B", "B"],
+        },
+    )
+
+    summary = ForecastProductBuilder().build_summary(forecast)
+
+    assert summary["checkpoint_disagreement_available"] is True
+    assert summary["checkpoint_disagreement_groups"] == ["A", "B"]
+    assert summary["peak_area_weighted_between_checkpoint_variance_share"] == pytest.approx(0.5)
+    assert summary["peak_high_checkpoint_disagreement_area_fraction_wettable"] == pytest.approx(0.5)
+    assert summary["peak_between_checkpoint_disagreement_lead_hours"] == pytest.approx(1.0)
+    assert summary["peak_area_weighted_between_checkpoint_spread_wd_m"] == pytest.approx(np.sqrt(0.045))
 
 
 def test_reliability_curves_payload_shape_without_isotonic():

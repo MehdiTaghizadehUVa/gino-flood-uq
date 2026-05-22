@@ -17,7 +17,7 @@ export const SAMPLE_SCENARIOS: SampleScenario[] = [
     description: "Complete held-out test forcing with lower coastal stage envelope and persistent light precipitation.",
     testCaseId: "TE000026",
     source: "calibration_production/coast_fgn3x20_calib_m100_prod_20260508_015758/TE000026",
-    dtSeconds: 1200,
+    dtSeconds: 900,
     forecastSteps: 94,
     stage: [
     1.092, 1.092, 1.092, 1.092, 1.092, 1.092, 1.092, 1.092, 1.092, 1.092,
@@ -52,7 +52,7 @@ export const SAMPLE_SCENARIOS: SampleScenario[] = [
     description: "Complete held-out test forcing with the highest stage peak among the bundled representative cases.",
     testCaseId: "TE000033",
     source: "calibration_production/coast_fgn3x20_calib_m100_prod_20260508_015758/TE000033",
-    dtSeconds: 1200,
+    dtSeconds: 900,
     forecastSteps: 94,
     stage: [
     1.092, 1.092, 1.092, 1.092, 1.092, 1.092, 1.092, 1.092, 1.092, 1.092,
@@ -87,7 +87,7 @@ export const SAMPLE_SCENARIOS: SampleScenario[] = [
     description: "Complete held-out test forcing with the largest cumulative precipitation and rising late-stage boundary.",
     testCaseId: "TE000050",
     source: "calibration_production/coast_fgn3x20_calib_m100_prod_20260508_015758/TE000050",
-    dtSeconds: 1200,
+    dtSeconds: 900,
     forecastSteps: 94,
     stage: [
     1.092, 1.092, 1.092, 1.092, 1.092, 1.092, 1.092, 1.092, 1.092, 1.092,

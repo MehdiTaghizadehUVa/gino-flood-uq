@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -141,6 +142,7 @@ class RunOrchestrator:
                 forcing,
                 progress_callback=_on_inference_progress,
             )
+            self._write_initial_condition_selection(run_id, raw=raw)
             if self._is_terminal(run_id):
                 return
             self._set_progress(run_id, 0.78, "GPU rollout complete; applying calibration")
@@ -529,6 +531,18 @@ class RunOrchestrator:
         except Exception:  # pragma: no cover - non-fatal supporting product
             pass
 
+    def _write_initial_condition_selection(self, run_id: str, *, raw: ForecastResult) -> None:
+        selection = raw.metadata.get("initial_condition")
+        if not isinstance(selection, dict):
+            return
+        self.artifact_store.put_json(run_id, "initial_condition_selection", selection)
+        try:
+            manifest = json.loads(self.artifact_store.read_bytes(run_id, "run_manifest.json").decode("utf-8"))
+            manifest["initial_condition"] = selection
+            self.artifact_store.put_json(run_id, "run_manifest", manifest)
+        except Exception:  # pragma: no cover - supporting provenance only
+            pass
+
     def _write_forecast_hdf5(self, run_id: str, *, raw: ForecastResult, calibrated: ForecastResult) -> None:
         try:
             import h5py
@@ -545,6 +559,11 @@ class RunOrchestrator:
                     h5.create_dataset("wettable_mask", data=calibrated.wettable_mask.astype("uint8"))
                 h5.attrs["bundle_id"] = self.bundle.bundle_id
                 h5.attrs["calibration"] = "crps_member_by_member"
+                if isinstance(raw.metadata.get("initial_condition"), dict):
+                    h5.attrs["initial_condition"] = json.dumps(
+                        raw.metadata["initial_condition"],
+                        sort_keys=True,
+                    )
             self.artifact_store.put_bytes(
                 run_id,
                 "forecast_members.h5",

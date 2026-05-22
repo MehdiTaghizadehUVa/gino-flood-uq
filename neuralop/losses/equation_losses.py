@@ -98,7 +98,7 @@ class FloodPhysicsLoss(object):
         Whether to enforce physical bounds
     """
     
-    def __init__(self, delta_t=1200.0, g=9.81, rho=1000.0, physics_weight=1.0,
+    def __init__(self, delta_t=900.0, g=9.81, rho=1000.0, physics_weight=1.0,
                  enforce_continuity=True, enforce_momentum=True, enforce_bounds=True):
         super().__init__()
         self.delta_t = delta_t
@@ -254,7 +254,7 @@ class FloodContinuityLoss(object):
         Weight for the physics loss
     """
     
-    def __init__(self, delta_t=1200.0, physics_weight=1.0):
+    def __init__(self, delta_t=900.0, physics_weight=1.0):
         super().__init__()
         self.delta_t = delta_t
         self.physics_weight = physics_weight

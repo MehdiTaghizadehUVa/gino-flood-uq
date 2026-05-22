@@ -14,6 +14,33 @@ type CandidateRow = {
   created_at: string;
 };
 
+const CANDIDATE_REASON_LABELS: Record<string, string> = {
+  multivariate_outlier: "Joint pattern outside the reference population",
+  high_uncertainty_to_signal: "High uncertainty relative to predicted signal",
+  high_impact_high_uncertainty: "Broad affected area with elevated uncertainty",
+  large_calibration_shift: "Large calibration shift",
+  population_reinforced_candidate: "Persistent monitoring signal",
+  deterministic_control_sample: "Selected for review-set balance",
+  below_candidate_reference: "Historical reference-envelope-only selection",
+  above_candidate_reference: "Historical reference-envelope-only selection",
+};
+
+const CANDIDATE_STATUS_LABELS: Record<string, string> = {
+  NEW: "New review item",
+  REVIEWED: "Reviewed",
+  SELECTED_FOR_HECRAS: "Selected for HEC-RAS",
+  REJECTED: "Rejected",
+  SIMULATED: "HEC-RAS simulated",
+};
+
+function formatCandidateReason(reason: string): string {
+  return CANDIDATE_REASON_LABELS[reason] ?? reason.replace(/_/g, " ").toLowerCase();
+}
+
+function formatCandidateStatus(status: string): string {
+  return CANDIDATE_STATUS_LABELS[status] ?? status.replace(/_/g, " ").toLowerCase();
+}
+
 export default function AdminPage() {
   const [users, setUsers] = useState<UserRow[]>([]);
   const [runs, setRuns] = useState<RunRow[]>([]);
@@ -65,7 +92,7 @@ export default function AdminPage() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ status }),
     });
-    setMessage(res.ok ? `Candidate marked ${status}.` : `Candidate update failed: ${await res.text()}`);
+    setMessage(res.ok ? `Review item marked ${formatCandidateStatus(status)}.` : `Review-item update failed: ${await res.text()}`);
     await refresh();
   }
 
@@ -97,17 +124,17 @@ export default function AdminPage() {
         </table>
       </section>
       <section className="panel">
-        <h2>Retraining Candidates</h2>
+        <h2>Retraining Review Items</h2>
         <table>
-          <thead><tr><th>Candidate</th><th>Owner</th><th>Score</th><th>Status</th><th>Reason</th><th>Actions</th></tr></thead>
+          <thead><tr><th>Run</th><th>Owner</th><th>Selection score</th><th>Status</th><th>Reason</th><th>Actions</th></tr></thead>
           <tbody>
             {candidates.map((candidate) => (
               <tr key={candidate.candidate_id}>
                 <td><a href={`/runs/${candidate.run_id}`}>{candidate.run_id.slice(0, 10)}</a></td>
                 <td>{candidate.owner_email}</td>
                 <td>{candidate.candidate_score.toFixed(2)}</td>
-                <td>{candidate.status}</td>
-                <td>{candidate.reason}</td>
+                <td>{formatCandidateStatus(candidate.status)}</td>
+                <td>{formatCandidateReason(candidate.reason)}</td>
                 <td>
                   <button onClick={() => candidateAction(candidate.candidate_id, "REVIEWED")}>Review</button>
                   <button onClick={() => candidateAction(candidate.candidate_id, "SELECTED_FOR_HECRAS")}>Select HEC-RAS</button>
@@ -117,7 +144,7 @@ export default function AdminPage() {
               </tr>
             ))}
             {candidates.length === 0 && (
-              <tr><td colSpan={6}>No retraining candidates yet.</td></tr>
+              <tr><td colSpan={6}>No retraining-review items yet.</td></tr>
             )}
           </tbody>
         </table>

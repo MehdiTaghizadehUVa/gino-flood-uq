@@ -66,7 +66,7 @@ flood: &FLOOD
     noise_std: [0.01]
     rollout_length: -1
     skip_before_timestep: 12
-    dt : 1200
+    dt : 900
 
   rollout_data:
     root: "C:/Users/jrj6wm/Desktop/Data_Generation_UQ/Results/M40"

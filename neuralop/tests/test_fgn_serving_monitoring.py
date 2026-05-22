@@ -85,16 +85,21 @@ def _monitoring_bundle(*, candidate_stage_max: float = 1.10, control_modulus: in
     ).validate()
 
 
-def _monitoring_orchestrator(tmp_path: Path, run_artifacts: LocalArtifactStore) -> MonitoringOrchestrator:
+def _monitoring_orchestrator(
+    tmp_path: Path,
+    run_artifacts: LocalArtifactStore,
+    *,
+    bundle: MonitoringBundle | None = None,
+) -> MonitoringOrchestrator:
     return MonitoringOrchestrator(
-        bundle=_monitoring_bundle(),
+        bundle=bundle or _monitoring_bundle(),
         repository=InMemoryMonitoringRepository(),
         run_artifact_store=run_artifacts,
         candidate_artifact_store=LocalArtifactStore(tmp_path / "candidates"),
     )
 
 
-def _orchestrator(tmp_path: Path) -> RunOrchestrator:
+def _orchestrator(tmp_path: Path, *, monitoring_bundle: MonitoringBundle | None = None) -> RunOrchestrator:
     bundle = _bundle(tmp_path)
     coeff = {
         "lead_time_hours": [0.0, 999.0],
@@ -103,7 +108,7 @@ def _orchestrator(tmp_path: Path) -> RunOrchestrator:
         "coefficients": [[[0.0, 1.0, 0.5]]],
     }
     run_artifacts = LocalArtifactStore(tmp_path / "artifacts")
-    monitoring = _monitoring_orchestrator(tmp_path, run_artifacts)
+    monitoring = _monitoring_orchestrator(tmp_path, run_artifacts, bundle=monitoring_bundle)
     return RunOrchestrator(
         bundle=bundle,
         repository=InMemoryRunRepository(),
@@ -120,13 +125,13 @@ def _orchestrator(tmp_path: Path) -> RunOrchestrator:
     )
 
 
-def _client(tmp_path: Path):
+def _client(tmp_path: Path, *, monitoring_bundle: MonitoringBundle | None = None):
     pytest.importorskip("fastapi")
     pytest.importorskip("httpx")
     from fastapi.testclient import TestClient
 
     provider = _UserProvider()
-    orchestrator = _orchestrator(tmp_path)
+    orchestrator = _orchestrator(tmp_path, monitoring_bundle=monitoring_bundle)
     return TestClient(create_app(orchestrator, current_user=provider)), provider, orchestrator
 
 
@@ -251,6 +256,7 @@ def _make_covariance_bundle(tmp_path):
             "descriptor_names": descriptors,
             "mean_vector": mean,
             "inv_covariance_matrix": inv_cov,
+            "covariance_diagonal": [cov_reg[0][0], cov_reg[1][1]],
             "n_reference": 200,
             "regularization_alpha": alpha,
             "empirical_distance_percentiles": {
@@ -338,6 +344,172 @@ def test_build_report_integrates_multivariate_score(tmp_path):
     assert any(f.code == "multivariate_outlier" for f in report.flags)
     forcing_score = report.scores.get("forcing_novelty_score", 0.0)
     assert forcing_score >= 0.6
+
+
+def test_phase1_reference_envelope_candidate_flag_is_diagnostic_only(tmp_path):
+    """An extreme univariate envelope flag remains visible but does not create a candidate."""
+    from neuralop.flood.serving.monitoring import MonitoringPhase, _build_report
+    from neuralop.flood.serving.run_spec import RunSpec
+
+    bundle = _monitoring_bundle(candidate_stage_max=1.10)
+    run_spec = RunSpec(
+        run_id="phase1-only",
+        user_id="u1",
+        bundle_id=bundle.bundle_id,
+        input_hash="hash1",
+        forecast_steps=5,
+    )
+
+    report = _build_report(
+        run_spec=run_spec,
+        phase=MonitoringPhase.PRE_RUN,
+        monitoring_bundle=bundle,
+        descriptors={"stage_max": 1.23, "precipitation_total": 4.0},
+        score_prefix="input",
+    )
+
+    ref_flags = [flag for flag in report.flags if flag.code == "above_candidate_reference"]
+    assert ref_flags
+    assert ref_flags[0].details["decision_eligible"] is False
+    assert report.scores["reference_envelope_score"] == pytest.approx(1.0)
+    assert report.scores["candidate_decision_score"] == pytest.approx(0.0)
+    assert report.candidate_recommended is False
+    assert report.candidate_reason is None
+
+
+def test_phase2_multivariate_outlier_creates_candidate(tmp_path):
+    """A candidate-level Mahalanobis outlier owns the retraining-candidate decision."""
+    from neuralop.flood.serving.monitoring import MonitoringPhase, _build_report
+    from neuralop.flood.serving.run_spec import RunSpec
+
+    bundle, _ = _make_covariance_bundle(tmp_path)
+    run_spec = RunSpec(
+        run_id="phase2-mv",
+        user_id="u1",
+        bundle_id=bundle.bundle_id,
+        input_hash="hash2",
+        forecast_steps=5,
+    )
+
+    report = _build_report(
+        run_spec=run_spec,
+        phase=MonitoringPhase.PRE_RUN,
+        monitoring_bundle=bundle,
+        descriptors={"stage_max": 2.0, "precipitation_total": 20.0},
+        score_prefix="input",
+    )
+
+    assert any(flag.code == "multivariate_outlier" for flag in report.flags)
+    assert report.scores["multivariate_score"] >= bundle.candidate_score_threshold
+    assert report.scores["candidate_decision_score"] >= bundle.candidate_score_threshold
+    assert report.candidate_recommended is True
+    assert report.candidate_reason == "multivariate_outlier"
+
+
+def test_phase2_reference_heuristic_creates_post_run_candidate(tmp_path):
+    """Reference-derived post-run heuristics can create candidates without Phase 1 escalation."""
+    from neuralop.flood.serving.monitoring import MonitoringPhase, _build_report
+    from neuralop.flood.serving.run_spec import RunSpec
+
+    payload = {
+        "bundle_id": "heuristic-candidate",
+        "descriptor_percentiles": {
+            "stage_max": {"min": 0.3, "p01": 0.4, "p05": 0.5, "p50": 0.8, "p95": 1.0, "p99": 1.1, "max": 1.2},
+        },
+        "forecast_descriptor_percentiles": {
+            "calibrated_max_mean_wd_m": {"min": 0.1, "p01": 0.2, "p05": 0.3, "p50": 0.8, "p95": 2.0, "p99": 2.5, "max": 3.0},
+        },
+        "heuristic_reference_percentiles": {
+            "uncertainty_to_signal_ratio": {"p01": 0.05, "p05": 0.1, "p50": 0.25, "p95": 0.42, "p99": 0.55},
+            "iqr_area_product": {"p01": 0.001, "p05": 0.005, "p50": 0.02, "p95": 0.08, "p99": 0.12},
+            "max_abs_calibration_shift_pp": {"p01": 0.1, "p05": 0.5, "p50": 1.5, "p95": 4.0, "p99": 6.0},
+        },
+    }
+    path = tmp_path / "heuristic_candidate_bundle.json"
+    path.write_text(json.dumps(payload))
+    bundle = MonitoringBundle.load(path)
+    run_spec = RunSpec(
+        run_id="phase2-heur",
+        user_id="u1",
+        bundle_id=bundle.bundle_id,
+        input_hash="hash3",
+        forecast_steps=5,
+    )
+
+    report = _build_report(
+        run_spec=run_spec,
+        phase=MonitoringPhase.POST_RUN,
+        monitoring_bundle=bundle,
+        descriptors={
+            "calibrated_max_mean_wd_m": 0.85,
+            "uncertainty_to_signal_ratio": 0.70,
+            "peak_area_weighted_iqr_wd_m": 0.15,
+            "peak_expected_flooded_area_fraction_wettable_gt_0.05m": 0.30,
+            "max_abs_calibration_shift_percentage_points_by_threshold": 2.0,
+        },
+        score_prefix="forecast",
+    )
+
+    assert report.scores["post_run_heuristic_score"] >= bundle.candidate_score_threshold
+    assert report.candidate_recommended is True
+    assert report.candidate_reason == "high_uncertainty_to_signal"
+
+
+def test_population_drift_reinforces_matching_reference_diagnostic(tmp_path):
+    """Persistent population drift plus a matching individual diagnostic can create a candidate."""
+    from neuralop.flood.serving.monitoring import MonitoringPhase, _build_report
+    from neuralop.flood.serving.run_spec import RunSpec
+
+    bundle = _monitoring_bundle(candidate_stage_max=1.10)
+    run_spec = RunSpec(
+        run_id="population-reinforced",
+        user_id="u1",
+        bundle_id=bundle.bundle_id,
+        input_hash="hash4",
+        forecast_steps=5,
+    )
+
+    report = _build_report(
+        run_spec=run_spec,
+        phase=MonitoringPhase.PRE_RUN,
+        monitoring_bundle=bundle,
+        descriptors={"stage_max": 1.23, "precipitation_total": 4.0},
+        score_prefix="input",
+        population_drift_descriptors={"stage_max"},
+    )
+
+    assert any(flag.code == "population_reinforced_candidate" for flag in report.flags)
+    assert report.scores["population_reinforced_score"] >= bundle.candidate_score_threshold
+    assert report.candidate_recommended is True
+    assert report.candidate_reason == "population_reinforced_candidate"
+
+
+def test_population_drift_alone_does_not_create_candidate(tmp_path):
+    """Population drift without an individually suspicious descriptor is admin context only."""
+    from neuralop.flood.serving.monitoring import MonitoringPhase, _build_report
+    from neuralop.flood.serving.run_spec import RunSpec
+
+    bundle = _monitoring_bundle(candidate_stage_max=1.10)
+    run_spec = RunSpec(
+        run_id="population-only",
+        user_id="u1",
+        bundle_id=bundle.bundle_id,
+        input_hash="hash5",
+        forecast_steps=5,
+    )
+
+    report = _build_report(
+        run_spec=run_spec,
+        phase=MonitoringPhase.PRE_RUN,
+        monitoring_bundle=bundle,
+        descriptors={"stage_max": 0.80, "precipitation_total": 4.0},
+        score_prefix="input",
+        population_drift_descriptors={"stage_max"},
+    )
+
+    assert not any(flag.code == "population_reinforced_candidate" for flag in report.flags)
+    assert report.scores["population_reinforced_score"] == pytest.approx(0.0)
+    assert report.candidate_recommended is False
 
 
 def test_descriptor_logging_is_idempotent():
@@ -462,6 +634,55 @@ def test_reference_derived_heuristics_replace_hardcoded(tmp_path):
 
     assert score >= 0.6
     assert any(f.code == "high_uncertainty_to_signal" for f in flags)
+
+
+def test_reference_derived_checkpoint_disagreement_can_drive_candidate(tmp_path):
+    from neuralop.flood.serving.monitoring import _post_run_reference_score
+
+    payload = {
+        "bundle_id": "ref-disagreement",
+        "descriptor_percentiles": {
+            "stage_max": {"min": 0.3, "p01": 0.4, "p05": 0.5, "p50": 0.8, "p95": 1.0, "p99": 1.1, "max": 1.2},
+        },
+        "heuristic_reference_percentiles": {
+            "peak_area_weighted_between_checkpoint_spread_wd_m": {
+                "p01": 0.01,
+                "p05": 0.02,
+                "p50": 0.05,
+                "p95": 0.10,
+                "p99": 0.15,
+            },
+            "peak_area_weighted_between_checkpoint_variance_share": {
+                "p01": 0.01,
+                "p05": 0.02,
+                "p50": 0.20,
+                "p95": 0.50,
+                "p99": 0.75,
+            },
+            "peak_high_checkpoint_disagreement_area_fraction_wettable": {
+                "p01": 0.0,
+                "p05": 0.0,
+                "p50": 0.05,
+                "p95": 0.20,
+                "p99": 0.35,
+            },
+        },
+    }
+    path = tmp_path / "ref_disagreement_bundle.json"
+    path.write_text(json.dumps(payload))
+    bundle = MonitoringBundle.load(path)
+
+    score, flags = _post_run_reference_score(
+        {
+            "peak_area_weighted_between_checkpoint_spread_wd_m": 0.16,
+            "peak_area_weighted_between_checkpoint_variance_share": 0.30,
+            "peak_high_checkpoint_disagreement_area_fraction_wettable": 0.10,
+        },
+        bundle,
+    )
+
+    assert score >= bundle.candidate_score_threshold
+    assert any(f.code == "high_checkpoint_disagreement_spread" for f in flags)
 
 
 def test_legacy_heuristics_when_no_reference(tmp_path):
@@ -638,7 +859,7 @@ def test_hecras_reference_scan_builds_matching_forecast_percentiles(tmp_path):
         hdf_paths=[hdf],
         start_timestep=1,
         forecast_steps=3,
-        dt_seconds=1200,
+        dt_seconds=900,
         thresholds_m=[0.05, 0.30],
     )
     percentiles = reference["forecast_descriptor_percentiles"]
@@ -648,7 +869,44 @@ def test_hecras_reference_scan_builds_matching_forecast_percentiles(tmp_path):
     assert percentiles["calibrated_max_mean_wd_m"]["p50"] == pytest.approx(0.40)
     assert percentiles["peak_expected_area_fraction_wettable_gt_0.05m"]["p50"] == pytest.approx(1.0)
     assert percentiles["peak_expected_area_fraction_wettable_gt_0.3m"]["p50"] == pytest.approx(1.0)
-    assert percentiles["peak_expected_area_lead_hours_gt_0.3m"]["p50"] == pytest.approx(1 / 3)
+    assert percentiles["peak_expected_area_lead_hours_gt_0.3m"]["p50"] == pytest.approx(0.25)
+
+
+def test_hecras_reference_scan_emits_forecast_covariance_when_enough_events(tmp_path):
+    h5py = pytest.importorskip("h5py")
+    hdfs = []
+    for idx in range(20):
+        hdf = tmp_path / f"run_{idx:03d}.hdf"
+        scale = 1.0 + idx * 0.02
+        with h5py.File(hdf, "w") as handle:
+            _create_hdf_dataset(handle, HECRAS_CELL_POINTS_DATASET, [[0.0, 0.0], [1.0, 0.0]])
+            _create_hdf_dataset(handle, HECRAS_AREA_DATASET, [2_000.0, 1_000.0])
+            _create_hdf_dataset(
+                handle,
+                HECRAS_DEPTH_DATASET,
+                [
+                    [0.0, 0.0],
+                    [0.10 * scale, 0.0],
+                    [0.40 * scale, 0.35 * scale],
+                    [0.20 * scale, 0.10 * scale],
+                ],
+            )
+        hdfs.append(hdf)
+
+    reference = build_hecras_forecast_reference(
+        hdf_paths=hdfs,
+        start_timestep=1,
+        forecast_steps=3,
+        dt_seconds=900,
+        thresholds_m=[0.05, 0.30],
+        transform_spec={"peak_expected_area_fraction_wettable_gt_0.3m": "logit_bounded"},
+    )
+
+    cov = reference["forecast_covariance"]
+    assert "calibrated_max_mean_wd_m" not in cov["descriptor_names"]
+    assert "covariance_diagonal" in cov
+    assert "reference_vectors" in cov
+    assert cov["empirical_distance_percentiles"]["p99"] >= cov["empirical_distance_percentiles"]["p95"]
 
 
 def _create_hdf_dataset(handle, path: str, data):
@@ -664,7 +922,13 @@ def test_forecast_descriptors_include_threshold_specific_extent_metrics():
             "max_mean_wd_m": 1.2,
             "peak_expected_flooded_area_km2_gt_0.05m": 3.4,
             "peak_expected_flooded_area_fraction_wettable_gt_0.05m": 0.25,
+            "peak_expected_flooded_area_lead_hours_gt_0.05m": 3.0,
             "peak_area_weighted_iqr_wd_m": 0.1,
+            "peak_area_weighted_total_ensemble_spread_wd_m": 0.18,
+            "peak_area_weighted_between_checkpoint_spread_wd_m": 0.12,
+            "peak_area_weighted_between_checkpoint_variance_share": 0.45,
+            "peak_high_checkpoint_disagreement_area_fraction_wettable": 0.16,
+            "peak_between_checkpoint_disagreement_lead_hours": 5.0,
             "exceedance_by_threshold_m": {
                 "0.3": {
                     "threshold_m": 0.3,
@@ -682,6 +946,12 @@ def test_forecast_descriptors_include_threshold_specific_extent_metrics():
     assert descriptors["peak_expected_area_km2_gt_0.3m"] == pytest.approx(1.7)
     assert descriptors["peak_high_confidence_area_fraction_wettable_gt_0.3m"] == pytest.approx(0.08)
     assert descriptors["peak_expected_area_lead_hours_gt_0.3m"] == pytest.approx(4.0)
+    assert descriptors["peak_expected_flooded_area_lead_hours_gt_0.05m"] == pytest.approx(3.0)
+    assert descriptors["peak_area_weighted_total_ensemble_spread_wd_m"] == pytest.approx(0.18)
+    assert descriptors["peak_area_weighted_between_checkpoint_spread_wd_m"] == pytest.approx(0.12)
+    assert descriptors["peak_area_weighted_between_checkpoint_variance_share"] == pytest.approx(0.45)
+    assert descriptors["peak_high_checkpoint_disagreement_area_fraction_wettable"] == pytest.approx(0.16)
+    assert descriptors["peak_between_checkpoint_disagreement_lead_hours"] == pytest.approx(5.0)
 
 
 def test_validate_forcing_returns_screening_and_allows_candidate_csv(tmp_path):
@@ -697,11 +967,12 @@ def test_validate_forcing_returns_screening_and_allows_candidate_csv(tmp_path):
     body = response.json()
     assert body["valid"] is True
     assert body["screening"]["available"] is True
-    assert body["screening"]["candidate_recommended"] is True
+    assert body["screening"]["candidate_recommended"] is False
     assert body["screening"]["input_novelty_score"] >= 0.8
+    assert any(flag["code"] == "above_candidate_reference" for flag in body["screening"]["flags"])
 
 
-def test_suspicious_submit_writes_pre_run_report_and_candidate_package(tmp_path):
+def test_phase1_only_submit_writes_pre_run_report_without_candidate_package(tmp_path):
     client, provider, orchestrator = _client(tmp_path)
     provider.current = _alice()
 
@@ -715,14 +986,12 @@ def test_suspicious_submit_writes_pre_run_report_and_candidate_package(tmp_path)
     run_id = response.json()["run_id"]
     assert "monitoring_report_pre_run.json" in {ref.artifact_id for ref in orchestrator.artifact_store.list(run_id)}
     payload = client.get(f"/api/runs/{run_id}/monitoring").json()
-    assert payload["pre_run"]["candidate_recommended"] is True
-    candidate = payload["candidate"]
-    assert candidate["status"] == "NEW"
-    assert "candidate_manifest.json" in candidate["package_artifacts"]
+    assert payload["pre_run"]["candidate_recommended"] is False
+    assert payload["candidate"] is None
 
 
 def test_owner_access_and_admin_candidate_status_update(tmp_path):
-    client, provider, _ = _client(tmp_path)
+    client, provider, _ = _client(tmp_path, monitoring_bundle=_monitoring_bundle(control_modulus=1))
     provider.current = _alice()
     run_id = client.post(
         "/api/runs",
@@ -805,7 +1074,7 @@ def test_completed_fake_run_writes_post_run_monitoring_report(tmp_path):
 
 
 def test_candidate_package_survives_normal_run_artifact_cleanup(tmp_path):
-    client, provider, orchestrator = _client(tmp_path)
+    client, provider, orchestrator = _client(tmp_path, monitoring_bundle=_monitoring_bundle(control_modulus=1))
     provider.current = _alice()
     run_id = client.post(
         "/api/runs",
@@ -847,6 +1116,8 @@ def test_multivariate_score_uses_empirical_not_chi2(tmp_path):
     if mv_flags:
         assert "Mahalanobis distance" in mv_flags[0].message
         assert "empirical" in mv_flags[0].message or "p9" in mv_flags[0].message
+        assert "chi2_p_value" in mv_flags[0].details
+        assert "top_3_standardized_deviations" in mv_flags[0].details
 
 
 def test_transforms_applied_before_covariance(tmp_path):
@@ -979,7 +1250,7 @@ def test_max_depth_excluded_from_forecast_covariance_by_default():
 
 def test_simulated_endpoint_creates_error_record(tmp_path):
     """POST /api/admin/retraining-candidates/{id}/simulated creates error record + updates status."""
-    client, provider, orchestrator = _client(tmp_path)
+    client, provider, orchestrator = _client(tmp_path, monitoring_bundle=_monitoring_bundle(control_modulus=1))
     provider.current = _alice()
 
     run_id = client.post(
@@ -1005,9 +1276,48 @@ def test_simulated_endpoint_creates_error_record(tmp_path):
     assert data["status"] == "SIMULATED"
 
 
+def test_simulated_endpoint_extracts_hecras_hdf_descriptors(tmp_path, monkeypatch):
+    h5py = pytest.importorskip("h5py")
+    client, provider, orchestrator = _client(tmp_path, monitoring_bundle=_monitoring_bundle(control_modulus=1))
+    provider.current = _alice()
+
+    run_id = client.post(
+        "/api/runs",
+        files={"file": ("forcing.csv", _valid_csv(), "text/csv")},
+        data={"request_full_hdf5": "false"},
+    ).json()["run_id"]
+    orchestrator.execute(run_id)
+    record = orchestrator.repository.get(run_id)
+
+    hecras_root = tmp_path / "hecras"
+    hecras_root.mkdir()
+    hdf = hecras_root / "candidate.hdf"
+    start_timestep = int(orchestrator.bundle.skip_before_timestep) + int(orchestrator.bundle.n_history)
+    n_steps = start_timestep + int(record.spec.forecast_steps) + 2
+    depth = [[0.0, 0.0] for _ in range(n_steps)]
+    depth[start_timestep + int(record.spec.forecast_steps) - 1] = [0.40, 0.35]
+    with h5py.File(hdf, "w") as handle:
+        _create_hdf_dataset(handle, HECRAS_CELL_POINTS_DATASET, [[0.0, 0.0], [1.0, 0.0]])
+        _create_hdf_dataset(handle, HECRAS_AREA_DATASET, [2_000.0, 1_000.0])
+        _create_hdf_dataset(handle, HECRAS_DEPTH_DATASET, depth)
+    monkeypatch.setenv("FGN_HECRAS_RESULT_ROOT", str(hecras_root))
+
+    provider.current = _admin()
+    candidate_id = client.get("/api/admin/retraining-candidates").json()[0]["candidate_id"]
+    resp = client.post(
+        f"/api/admin/retraining-candidates/{candidate_id}/simulated",
+        json={"hecras_hdf_path": str(hdf)},
+    )
+
+    assert resp.status_code == 200
+    saved = orchestrator.monitoring_orchestrator.repository.get_hecras_error_record(candidate_id)
+    assert saved is not None
+    assert saved.hecras_descriptors["peak_expected_area_fraction_wettable_gt_0.3m"] == pytest.approx(1.0)
+
+
 def test_simulated_endpoint_rejects_unsafe_path(tmp_path):
     """POST /api/admin/retraining-candidates/{id}/simulated with unsafe path returns error."""
-    client, provider, orchestrator = _client(tmp_path)
+    client, provider, orchestrator = _client(tmp_path, monitoring_bundle=_monitoring_bundle(control_modulus=1))
     provider.current = _alice()
 
     run_id = client.post(
@@ -1084,8 +1394,8 @@ def test_existing_scoring_unchanged_without_phase2_fields(tmp_path):
 
 
 def test_existing_candidate_workflow_unchanged(tmp_path):
-    """Generic status update still works for Phase 1 candidates."""
-    client, provider, _ = _client(tmp_path)
+    """Generic status update still works for deterministic-control candidates."""
+    client, provider, _ = _client(tmp_path, monitoring_bundle=_monitoring_bundle(control_modulus=1))
     provider.current = _alice()
 
     run_id = client.post(

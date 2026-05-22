@@ -180,6 +180,13 @@ class ForecastProductBuilder:
         p95_peak_by_time = q95.max(axis=1)
         _, peak_p95_lead = self._peak_value_and_time(p95_peak_by_time, lead_arr)
         peak_by_time = mean.max(axis=1)
+        checkpoint_disagreement = self.checkpoint_disagreement_summary_by_time(
+            members_eval=members_eval,
+            member_model_id=(forecast.metadata or {}).get("member_model_id"),
+            area_m2=area_m2,
+            wettable_area_m2=wettable_area_m2,
+            lead_hours=lead_arr,
+        )
         inundated_by_time = (mean > 0.05).sum(axis=1)
         arrival = np.argmax(mean > 0.05, axis=0) if mean.size else np.array([], dtype=int)
         any_wet = np.any(mean > 0.05, axis=0) if mean.size else np.array([], dtype=bool)
@@ -226,6 +233,7 @@ class ForecastProductBuilder:
             "uncertainty_to_signal_ratio": (peak_iqr / max_mean_wd_m) if max_mean_wd_m > 1.0e-9 else None,
             "exceedance_by_threshold_m": exceedance_nested,
             "isotonic_calibration_applied": bool(use_iso),
+            **checkpoint_disagreement,
             **exceedance,
         }
 
@@ -416,6 +424,148 @@ class ForecastProductBuilder:
             "within_share": within_total / denom,
         }
         return between, within, summary
+
+    @staticmethod
+    def checkpoint_disagreement_summary_by_time(
+        *,
+        members_eval: np.ndarray,
+        member_model_id: object,
+        area_m2: np.ndarray,
+        wettable_area_m2: float,
+        lead_hours: np.ndarray,
+        high_share_threshold: float = 0.50,
+        min_total_spread_m: float = EXTENT_THRESHOLD_M,
+    ) -> Dict[str, object]:
+        """Summarise checkpoint-vs-latent disagreement over the full horizon.
+
+        The serving ensemble is structured as checkpoints × latent samples.
+        This helper decomposes variance at each lead time into:
+
+        - between-checkpoint variance: disagreement among trained checkpoints;
+        - within-checkpoint variance: latent variability inside each checkpoint.
+
+        A "high checkpoint-disagreement footprint" is the wettable area where
+        checkpoint disagreement explains at least half of total ensemble
+        variance and the total ensemble spread is at least 5 cm. The spread
+        floor avoids treating numerically tiny differences in dry areas as a
+        meaningful disagreement signal.
+        """
+        empty: Dict[str, object] = {
+            "checkpoint_disagreement_available": False,
+            "checkpoint_disagreement_groups": [],
+            "checkpoint_disagreement_high_share_threshold": float(high_share_threshold),
+            "checkpoint_disagreement_min_total_spread_m": float(min_total_spread_m),
+            "area_weighted_total_ensemble_variance_wd_m2_by_time": [],
+            "area_weighted_between_checkpoint_variance_wd_m2_by_time": [],
+            "area_weighted_within_checkpoint_variance_wd_m2_by_time": [],
+            "area_weighted_between_checkpoint_variance_share_by_time": [],
+            "high_checkpoint_disagreement_area_fraction_wettable_by_time": [],
+            "peak_area_weighted_total_ensemble_variance_wd_m2": None,
+            "peak_area_weighted_total_ensemble_spread_wd_m": None,
+            "peak_area_weighted_between_checkpoint_variance_wd_m2": None,
+            "peak_area_weighted_between_checkpoint_spread_wd_m": None,
+            "peak_area_weighted_within_checkpoint_variance_wd_m2": None,
+            "peak_area_weighted_within_checkpoint_spread_wd_m": None,
+            "peak_area_weighted_between_checkpoint_variance_share": None,
+            "peak_between_checkpoint_disagreement_lead_hours": None,
+            "peak_high_checkpoint_disagreement_area_fraction_wettable": None,
+            "peak_high_checkpoint_disagreement_lead_hours": None,
+        }
+        if member_model_id is None or isinstance(member_model_id, (str, bytes)):
+            return empty
+        try:
+            ids = list(member_model_id)  # type: ignore[arg-type]
+        except TypeError:
+            return empty
+        members = np.asarray(members_eval, dtype=np.float64)
+        if members.ndim != 3 or len(ids) != members.shape[0]:
+            return empty
+        groups = sorted(set(str(item) for item in ids))
+        if len(groups) < 2:
+            return empty
+
+        group_means: list[np.ndarray] = []
+        group_vars: list[np.ndarray] = []
+        for group_id in groups:
+            mask = np.array([str(item) == group_id for item in ids], dtype=bool)
+            group = members[mask]
+            if group.shape[0] < 1:
+                continue
+            group_means.append(group.mean(axis=0))
+            group_vars.append(group.var(axis=0, ddof=0))
+        if len(group_means) < 2:
+            return empty
+
+        area = np.asarray(area_m2, dtype=np.float64).reshape(-1)
+        if area.shape[0] != members.shape[2]:
+            return empty
+        denom_area = float(wettable_area_m2)
+        if denom_area <= 0.0:
+            return empty
+
+        total = members.var(axis=0, ddof=0)  # [time, cells]
+        between = np.stack(group_means, axis=0).var(axis=0, ddof=0)
+        within = np.stack(group_vars, axis=0).mean(axis=0)
+        denom = between + within
+        share = np.divide(
+            between,
+            denom,
+            out=np.zeros_like(between, dtype=np.float64),
+            where=denom > 1.0e-12,
+        )
+
+        def area_weight(values: np.ndarray) -> np.ndarray:
+            return (np.asarray(values, dtype=np.float64) @ area) / denom_area
+
+        total_by_time = area_weight(total)
+        between_by_time = area_weight(between)
+        within_by_time = area_weight(within)
+        share_by_time = area_weight(share)
+        total_spread = np.sqrt(np.maximum(total, 0.0))
+        high_disagreement = (share >= float(high_share_threshold)) & (
+            total_spread >= float(min_total_spread_m)
+        )
+        high_area_fraction_by_time = area_weight(high_disagreement.astype(np.float64))
+        peak_between, peak_between_lead = ForecastProductBuilder._peak_value_and_time(
+            between_by_time,
+            lead_hours,
+        )
+        peak_high_fraction, peak_high_lead = ForecastProductBuilder._peak_value_and_time(
+            high_area_fraction_by_time,
+            lead_hours,
+        )
+
+        return {
+            "checkpoint_disagreement_available": True,
+            "checkpoint_disagreement_groups": groups,
+            "checkpoint_disagreement_high_share_threshold": float(high_share_threshold),
+            "checkpoint_disagreement_min_total_spread_m": float(min_total_spread_m),
+            "area_weighted_total_ensemble_variance_wd_m2_by_time": [float(x) for x in total_by_time],
+            "area_weighted_between_checkpoint_variance_wd_m2_by_time": [float(x) for x in between_by_time],
+            "area_weighted_within_checkpoint_variance_wd_m2_by_time": [float(x) for x in within_by_time],
+            "area_weighted_between_checkpoint_variance_share_by_time": [float(x) for x in share_by_time],
+            "high_checkpoint_disagreement_area_fraction_wettable_by_time": [
+                float(x) for x in high_area_fraction_by_time
+            ],
+            "peak_area_weighted_total_ensemble_variance_wd_m2": float(total_by_time.max()) if total_by_time.size else 0.0,
+            "peak_area_weighted_total_ensemble_spread_wd_m": (
+                float(np.sqrt(max(float(total_by_time.max()), 0.0))) if total_by_time.size else 0.0
+            ),
+            "peak_area_weighted_between_checkpoint_variance_wd_m2": peak_between,
+            "peak_area_weighted_between_checkpoint_spread_wd_m": float(np.sqrt(max(peak_between, 0.0))),
+            "peak_area_weighted_within_checkpoint_variance_wd_m2": (
+                float(within_by_time.max()) if within_by_time.size else 0.0
+            ),
+            "peak_area_weighted_within_checkpoint_spread_wd_m": (
+                float(np.sqrt(max(float(within_by_time.max()), 0.0))) if within_by_time.size else 0.0
+            ),
+            "peak_area_weighted_between_checkpoint_variance_share": (
+                float(share_by_time.max()) if share_by_time.size else 0.0
+            ),
+            "peak_between_checkpoint_disagreement_lead_hours": peak_between_lead,
+            "peak_high_checkpoint_disagreement_area_fraction_wettable": peak_high_fraction,
+            "peak_high_checkpoint_disagreement_lead_hours": peak_high_lead,
+        }
 
     @staticmethod
     def reliability_curves_payload(

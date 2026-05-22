@@ -21,7 +21,7 @@ from typing import Iterable, Mapping, Protocol, Sequence
 
 import numpy as np
 
-from neuralop.flood.serving.drift import DriftTestResult
+from neuralop.flood.serving.drift import DriftDetector, DriftTestResult
 from neuralop.flood.serving.forcing import ForcingInput
 from neuralop.flood.serving.run_spec import RunSpec
 from neuralop.flood.serving.storage import ArtifactStore
@@ -42,6 +42,45 @@ class CandidateStatus(str, Enum):
     SELECTED_FOR_HECRAS = "SELECTED_FOR_HECRAS"
     REJECTED = "REJECTED"
     SIMULATED = "SIMULATED"
+
+
+REFERENCE_ENVELOPE_FLAG_CODES = {
+    "below_candidate_reference",
+    "above_candidate_reference",
+    "below_reference_warning",
+    "above_reference_warning",
+}
+
+PHASE2_DECISION_FLAG_CODES = {
+    "multivariate_outlier",
+    "high_uncertainty_to_signal",
+    "high_impact_high_uncertainty",
+    "high_checkpoint_disagreement_spread",
+    "high_checkpoint_disagreement_share",
+    "broad_checkpoint_disagreement_footprint",
+    "large_calibration_shift",
+    "population_reinforced_candidate",
+    "deterministic_control_sample",
+}
+
+FRAGILE_REFERENCE_DESCRIPTORS = {
+    "calibrated_max_mean_wd_m",
+    "raw_max_mean_wd_m",
+    "max_mean_wd_m",
+    "hecras_mean_wd_overall_m",
+    "n_cells",
+    "n_time",
+    "wettable_area_m2",
+    "wettable_area_km2",
+}
+
+FRAGILE_REFERENCE_DESCRIPTOR_TOKENS = (
+    "inundated_cells",
+    "cell_count",
+    "full_domain",
+    "mean_wd_overall",
+    "max_mean_wd",
+)
 
 
 @dataclass(frozen=True)
@@ -110,6 +149,7 @@ class MonitoringReport:
             "available": True,
             "monitoring_bundle_id": self.monitoring_bundle_id,
             "input_novelty_score": self.scores.get("input_novelty_score", 0.0),
+            "candidate_decision_score": self.scores.get("candidate_decision_score", 0.0),
             "candidate_recommended": self.candidate_recommended,
             "flags": [flag.as_dict() for flag in self.flags],
         }
@@ -175,6 +215,15 @@ class HecrasErrorRecord:
     hecras_descriptors: dict[str, float | int | None]
     error_descriptors: dict[str, float | None]
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+@dataclass(frozen=True)
+class MonitoringDecision:
+    candidate_recommended: bool
+    candidate_reason: str | None
+    candidate_decision_score: float
+    population_reinforced_score: float
+    flags: tuple[MonitoringFlag, ...]
 
 
 def validate_hecras_path(path: str) -> Path:
@@ -515,6 +564,7 @@ class MonitoringOrchestrator:
             monitoring_bundle=self.bundle,
             descriptors=descriptors,
             score_prefix="input",
+            population_drift_descriptors=self._persistent_population_drift_descriptors(),
         )
         self.repository.create_report(report)
         self.repository.log_descriptors(DescriptorLogEntry(
@@ -560,6 +610,7 @@ class MonitoringOrchestrator:
             monitoring_bundle=self.bundle,
             descriptors=descriptors,
             score_prefix="forecast",
+            population_drift_descriptors=self._persistent_population_drift_descriptors(),
         )
         self.repository.create_report(report)
         self.repository.log_descriptors(DescriptorLogEntry(
@@ -623,6 +674,20 @@ class MonitoringOrchestrator:
             admin_notes=admin_notes,
         )
         return updated.public_payload()
+
+    def _persistent_population_drift_descriptors(self) -> set[str | None]:
+        try:
+            results = self.repository.list_drift_test_results(limit=500)
+        except Exception:
+            return set()
+        if not results:
+            return set()
+        by_day: dict[object, list[DriftTestResult]] = {}
+        for result in results:
+            by_day.setdefault(result.created_at.date(), []).append(result)
+        daily_results = [by_day[day] for day in sorted(by_day)]
+        persistent = DriftDetector().apply_persistence_filter(daily_results)
+        return {result.descriptor_name for result in persistent if result.drift_detected}
 
     def _preserve_candidate_package(
         self,
@@ -748,10 +813,28 @@ def build_forecast_descriptors(
             calibrated_summary.get("peak_expected_flooded_area_km2_gt_0.05m")
         ),
         "peak_expected_flooded_area_fraction_wettable_gt_0.05m": cal_peak_fraction,
+        "peak_expected_flooded_area_lead_hours_gt_0.05m": _maybe_float(
+            calibrated_summary.get("peak_expected_flooded_area_lead_hours_gt_0.05m")
+        ),
         "raw_peak_expected_flooded_area_fraction_wettable_gt_0.05m": raw_peak_fraction,
         "peak_area_weighted_iqr_wd_m": _maybe_float(calibrated_summary.get("peak_area_weighted_iqr_wd_m")),
         "peak_area_weighted_central_90_wd_m": _maybe_float(
             calibrated_summary.get("peak_area_weighted_central_90_wd_m")
+        ),
+        "peak_area_weighted_total_ensemble_spread_wd_m": _maybe_float(
+            calibrated_summary.get("peak_area_weighted_total_ensemble_spread_wd_m")
+        ),
+        "peak_area_weighted_between_checkpoint_spread_wd_m": _maybe_float(
+            calibrated_summary.get("peak_area_weighted_between_checkpoint_spread_wd_m")
+        ),
+        "peak_area_weighted_between_checkpoint_variance_share": _maybe_float(
+            calibrated_summary.get("peak_area_weighted_between_checkpoint_variance_share")
+        ),
+        "peak_high_checkpoint_disagreement_area_fraction_wettable": _maybe_float(
+            calibrated_summary.get("peak_high_checkpoint_disagreement_area_fraction_wettable")
+        ),
+        "peak_between_checkpoint_disagreement_lead_hours": _maybe_float(
+            calibrated_summary.get("peak_between_checkpoint_disagreement_lead_hours")
         ),
         "uncertainty_to_signal_ratio": _maybe_float(calibrated_summary.get("uncertainty_to_signal_ratio")),
         "calibration_peak_area_shift_percentage_points_gt_0.05m": _maybe_float(
@@ -807,6 +890,7 @@ def build_monitoring_bundle_from_forcings(
     transform_spec: Mapping[str, str] | None = None,
     covariance_exclude_descriptors: Sequence[str] | None = None,
     heuristic_reference_percentiles: Mapping[str, dict[str, float]] | None = None,
+    created_from_commit: str | None = None,
 ) -> dict[str, object]:
     rows = [build_forcing_descriptors(forcing) for forcing in forcings]
     if not rows:
@@ -831,6 +915,7 @@ def build_monitoring_bundle_from_forcings(
         "forecast_descriptor_percentiles": {},
         "transform_spec": ts,
         "reference_population": {"n_reference_forcing": len(rows)},
+        "created_from_commit": created_from_commit,
         "covariance_exclude_descriptors": exclude,
         "thresholds": {
             "warning_percentile_low": "p05",
@@ -870,7 +955,7 @@ def _compute_covariance_block(
     mean_vec = np.mean(X, axis=0)
     cov_mat = np.cov(X, rowvar=False)
     p = len(cov_keys)
-    alpha = 0.01 * float(np.trace(cov_mat)) / p
+    alpha = max(0.01 * float(np.trace(cov_mat)) / p, 1.0e-9)
     cov_reg = cov_mat + alpha * np.eye(p)
     inv_cov = np.linalg.inv(cov_reg)
 
@@ -885,6 +970,7 @@ def _compute_covariance_block(
         "descriptor_names": cov_keys,
         "mean_vector": mean_vec.tolist(),
         "inv_covariance_matrix": inv_cov.tolist(),
+        "covariance_diagonal": np.diag(cov_reg).tolist(),
         "n_reference": len(rows),
         "regularization_alpha": float(alpha),
         "empirical_distance_percentiles": {
@@ -894,6 +980,8 @@ def _compute_covariance_block(
             "p95": float(dist_pcts[3]),
             "p99": float(dist_pcts[4]),
         },
+        "reference_vectors": X.tolist(),
+        "reference_vector_space": "transformed",
     }
 
 
@@ -904,37 +992,34 @@ def _build_report(
     monitoring_bundle: MonitoringBundle,
     descriptors: dict[str, float | int | None],
     score_prefix: str,
+    population_drift_descriptors: set[str | None] | None = None,
 ) -> MonitoringReport:
     reference = (
         monitoring_bundle.descriptor_percentiles
         if phase == MonitoringPhase.PRE_RUN
         else monitoring_bundle.forecast_descriptor_percentiles
     )
-    score, flags = _score_descriptors(descriptors, reference, monitoring_bundle)
+    reference_score, reference_flags = _score_descriptors(descriptors, reference, monitoring_bundle)
     mv_prefix = "forcing" if phase == MonitoringPhase.PRE_RUN else "forecast"
     mv_score, mv_flags = _score_multivariate(descriptors, monitoring_bundle, mv_prefix)
     heuristic_score, heuristic_flags = (
         _post_run_reference_score(descriptors, monitoring_bundle) if phase == MonitoringPhase.POST_RUN else (0.0, [])
     )
-    flags = [*flags, *mv_flags, *heuristic_flags]
-    score = max(score, mv_score, heuristic_score)
     control = _is_control_sample(run_spec.input_hash, monitoring_bundle.control_sample_modulus)
-    candidate = score >= monitoring_bundle.candidate_score_threshold or any(
-        flag.severity == "candidate" for flag in flags
+    decision = _monitoring_decision_policy(
+        monitoring_bundle=monitoring_bundle,
+        reference_flags=reference_flags,
+        multivariate_score=mv_score,
+        multivariate_flags=mv_flags,
+        heuristic_score=heuristic_score,
+        heuristic_flags=heuristic_flags,
+        heuristic_is_reference_derived=monitoring_bundle.heuristic_reference_percentiles is not None,
+        deterministic_control_sample=control,
+        population_drift_descriptors=population_drift_descriptors or set(),
     )
-    reason = None
-    if candidate:
-        reason = flags[0].code if flags else "candidate_score_threshold"
-    elif control:
-        candidate = True
-        reason = "deterministic_control_sample"
-        flags.append(
-            MonitoringFlag(
-                code="deterministic_control_sample",
-                message="Deterministic control sample selected for retraining-set balance.",
-                severity="info",
-            )
-        )
+    flags = [*reference_flags, *mv_flags, *heuristic_flags, *decision.flags]
+    score = max(reference_score, mv_score, heuristic_score, decision.population_reinforced_score)
+    legacy_score_key = f"{score_prefix}_novelty_score" if phase == MonitoringPhase.PRE_RUN else "forecast_monitoring_score"
     return MonitoringReport(
         report_id=_report_id(run_spec.run_id, phase),
         run_id=run_spec.run_id,
@@ -944,13 +1029,140 @@ def _build_report(
         input_hash=run_spec.input_hash,
         descriptors=descriptors,
         scores={
-            f"{score_prefix}_novelty_score" if phase == MonitoringPhase.PRE_RUN else "forecast_monitoring_score": score,
-            "candidate_score": score if candidate else (0.05 if control else score),
+            legacy_score_key: score,
+            "reference_envelope_score": reference_score,
+            "multivariate_score": mv_score,
+            "post_run_heuristic_score": heuristic_score,
+            "population_reinforced_score": decision.population_reinforced_score,
+            "candidate_decision_score": decision.candidate_decision_score,
+            "candidate_score": decision.candidate_decision_score,
         },
         flags=tuple(flags),
-        candidate_recommended=candidate,
-        candidate_reason=reason,
+        candidate_recommended=decision.candidate_recommended,
+        candidate_reason=decision.candidate_reason,
     )
+
+
+def _monitoring_decision_policy(
+    *,
+    monitoring_bundle: MonitoringBundle,
+    reference_flags: Sequence[MonitoringFlag],
+    multivariate_score: float,
+    multivariate_flags: Sequence[MonitoringFlag],
+    heuristic_score: float,
+    heuristic_flags: Sequence[MonitoringFlag],
+    heuristic_is_reference_derived: bool,
+    deterministic_control_sample: bool,
+    population_drift_descriptors: set[str | None],
+) -> MonitoringDecision:
+    threshold = float(monitoring_bundle.candidate_score_threshold)
+
+    if multivariate_score >= threshold:
+        reason = _first_flag_code(multivariate_flags, default="multivariate_outlier")
+        return MonitoringDecision(
+            candidate_recommended=True,
+            candidate_reason=reason,
+            candidate_decision_score=float(multivariate_score),
+            population_reinforced_score=0.0,
+            flags=(),
+        )
+
+    if heuristic_is_reference_derived and heuristic_score >= threshold:
+        reason = _first_flag_code(heuristic_flags, default="post_run_heuristic_candidate")
+        return MonitoringDecision(
+            candidate_recommended=True,
+            candidate_reason=reason,
+            candidate_decision_score=float(heuristic_score),
+            population_reinforced_score=0.0,
+            flags=(),
+        )
+
+    population_flag = _population_reinforcement_flag(reference_flags, population_drift_descriptors)
+    if population_flag is not None:
+        return MonitoringDecision(
+            candidate_recommended=True,
+            candidate_reason=population_flag.code,
+            candidate_decision_score=1.0,
+            population_reinforced_score=1.0,
+            flags=(population_flag,),
+        )
+
+    if deterministic_control_sample:
+        control_flag = MonitoringFlag(
+            code="deterministic_control_sample",
+            message="Deterministic control sample selected for retraining-set balance.",
+            severity="info",
+            details={
+                "decision_eligible": True,
+                "decision_layer": "deterministic_control",
+            },
+        )
+        return MonitoringDecision(
+            candidate_recommended=True,
+            candidate_reason=control_flag.code,
+            candidate_decision_score=0.05,
+            population_reinforced_score=0.0,
+            flags=(control_flag,),
+        )
+
+    return MonitoringDecision(
+        candidate_recommended=False,
+        candidate_reason=None,
+        candidate_decision_score=0.0,
+        population_reinforced_score=0.0,
+        flags=(),
+    )
+
+
+def _first_flag_code(flags: Sequence[MonitoringFlag], *, default: str) -> str:
+    for flag in flags:
+        if flag.code in PHASE2_DECISION_FLAG_CODES:
+            return flag.code
+    return default
+
+
+def _population_reinforcement_flag(
+    reference_flags: Sequence[MonitoringFlag],
+    population_drift_descriptors: set[str | None],
+) -> MonitoringFlag | None:
+    if not population_drift_descriptors:
+        return None
+    for flag in reference_flags:
+        if flag.code not in {"below_candidate_reference", "above_candidate_reference"}:
+            continue
+        if flag.descriptor is None or _is_fragile_reference_descriptor(flag.descriptor):
+            continue
+        if any(_descriptor_family_matches(flag.descriptor, active) for active in population_drift_descriptors):
+            return MonitoringFlag(
+                code="population_reinforced_candidate",
+                message=(
+                    f"{flag.descriptor} is individually outside the reference envelope "
+                    "while persistent population drift is active for the same descriptor family."
+                ),
+                severity="candidate",
+                descriptor=flag.descriptor,
+                value=flag.value,
+                reference_low=flag.reference_low,
+                reference_high=flag.reference_high,
+                details={
+                    "decision_eligible": True,
+                    "decision_layer": "population_reinforced",
+                    "active_population_drift_descriptors": sorted(
+                        str(item) for item in population_drift_descriptors if item is not None
+                    ),
+                },
+            )
+    return None
+
+
+def _descriptor_family_matches(descriptor: str, active_descriptor: str | None) -> bool:
+    if active_descriptor is None:
+        return False
+    if descriptor == active_descriptor:
+        return True
+    left = descriptor.split("_gt_", 1)[0]
+    right = active_descriptor.split("_gt_", 1)[0]
+    return left == right
 
 
 def _apply_transforms(
@@ -1005,6 +1217,13 @@ def _score_multivariate(
         for j in range(p):
             d_sq += diff[i] * inv_cov[i][j] * diff[j]
     d = math.sqrt(max(0.0, d_sq))
+    chi2_p_value: float | None = None
+    try:
+        from scipy.stats import chi2
+
+        chi2_p_value = float(chi2.sf(d_sq, df=p))
+    except Exception:
+        chi2_p_value = None
 
     if d < empirical.get("p90", float("inf")):
         score = 0.0
@@ -1018,10 +1237,10 @@ def _score_multivariate(
     if score == 0.0:
         return 0.0, []
 
-    diag = [inv_cov[i][i] for i in range(p)]
+    std_diag = _covariance_diagonal(covariance, inv_cov)
     std_devs = []
     for i in range(p):
-        sd = 1.0 / math.sqrt(diag[i]) if diag[i] > 0 else 1.0
+        sd = math.sqrt(std_diag[i]) if i < len(std_diag) and std_diag[i] > 0 else 1.0
         std_devs.append((desc_names[i], abs(diff[i]) / sd))
     std_devs.sort(key=lambda t: t[1], reverse=True)
     top_3 = std_devs[:3]
@@ -1038,10 +1257,29 @@ def _score_multivariate(
         details={
             "d_mahal": d,
             "empirical_percentile_exceeded": "p99" if score >= 1.0 else "p95" if score >= 0.6 else "p90",
+            "chi2_p_value": chi2_p_value,
             "top_3_standardized_deviations": {n: z for n, z in top_3},
+            "decision_eligible": score >= 1.0,
+            "decision_layer": "multivariate",
         },
     )
     return score, [flag]
+
+
+def _covariance_diagonal(
+    covariance: Mapping[str, object],
+    inv_cov: list[list[float]],
+) -> list[float]:
+    raw_diag = covariance.get("covariance_diagonal")
+    if isinstance(raw_diag, Sequence) and not isinstance(raw_diag, (str, bytes)):
+        values = [float(x) for x in raw_diag if isinstance(x, (int, float))]
+        if values:
+            return values
+    try:
+        cov = np.linalg.inv(np.asarray(inv_cov, dtype=np.float64))
+        return [float(x) for x in np.diag(cov)]
+    except Exception:
+        return [1.0 for _ in inv_cov]
 
 
 def _score_descriptors(
@@ -1105,6 +1343,10 @@ def _post_run_reference_score(
             descriptor="uncertainty_to_signal_ratio",
             value=ratio,
             reference_high=ratio_p95,
+            details={
+                "decision_eligible": s >= 1.0,
+                "decision_layer": "reference_derived_post_run_heuristic",
+            },
         ))
 
     iqr_area_ref = ref.get("iqr_area_product", {})
@@ -1122,7 +1364,74 @@ def _post_run_reference_score(
                 descriptor="peak_area_weighted_iqr_wd_m",
                 value=iqr,
                 reference_high=iqr_area_p95,
+                details={
+                    "decision_eligible": s >= 1.0,
+                    "decision_layer": "reference_derived_post_run_heuristic",
+                    "iqr_area_product": iqr_area_product,
+                },
             ))
+
+    checkpoint_spread = _maybe_float(descriptors.get("peak_area_weighted_between_checkpoint_spread_wd_m"))
+    spread_ref = ref.get("peak_area_weighted_between_checkpoint_spread_wd_m", {})
+    spread_p95 = spread_ref.get("p95")
+    spread_p99 = spread_ref.get("p99")
+    if checkpoint_spread is not None and spread_p95 is not None and checkpoint_spread >= spread_p95:
+        s = 1.0 if spread_p99 is not None and checkpoint_spread >= spread_p99 else 0.6
+        score = max(score, s)
+        flags.append(MonitoringFlag(
+            code="high_checkpoint_disagreement_spread",
+            message="Trained checkpoints disagree more strongly than expected for the reference population.",
+            severity="candidate" if s >= 1.0 else "warning",
+            descriptor="peak_area_weighted_between_checkpoint_spread_wd_m",
+            value=checkpoint_spread,
+            reference_high=spread_p95,
+            details={
+                "decision_eligible": s >= 1.0,
+                "decision_layer": "reference_derived_post_run_heuristic",
+            },
+        ))
+
+    checkpoint_share = _maybe_float(descriptors.get("peak_area_weighted_between_checkpoint_variance_share"))
+    share_ref = ref.get("peak_area_weighted_between_checkpoint_variance_share", {})
+    share_p95 = share_ref.get("p95")
+    share_p99 = share_ref.get("p99")
+    if checkpoint_share is not None and share_p95 is not None and checkpoint_share >= share_p95:
+        s = 1.0 if share_p99 is not None and checkpoint_share >= share_p99 else 0.6
+        score = max(score, s)
+        flags.append(MonitoringFlag(
+            code="high_checkpoint_disagreement_share",
+            message="A large share of ensemble variance comes from checkpoint-to-checkpoint disagreement.",
+            severity="candidate" if s >= 1.0 else "warning",
+            descriptor="peak_area_weighted_between_checkpoint_variance_share",
+            value=checkpoint_share,
+            reference_high=share_p95,
+            details={
+                "decision_eligible": s >= 1.0,
+                "decision_layer": "reference_derived_post_run_heuristic",
+            },
+        ))
+
+    disagreement_fraction = _maybe_float(
+        descriptors.get("peak_high_checkpoint_disagreement_area_fraction_wettable")
+    )
+    footprint_ref = ref.get("peak_high_checkpoint_disagreement_area_fraction_wettable", {})
+    footprint_p95 = footprint_ref.get("p95")
+    footprint_p99 = footprint_ref.get("p99")
+    if disagreement_fraction is not None and footprint_p95 is not None and disagreement_fraction >= footprint_p95:
+        s = 1.0 if footprint_p99 is not None and disagreement_fraction >= footprint_p99 else 0.6
+        score = max(score, s)
+        flags.append(MonitoringFlag(
+            code="broad_checkpoint_disagreement_footprint",
+            message="Checkpoint-driven disagreement covers an unusually large part of the wettable domain.",
+            severity="candidate" if s >= 1.0 else "warning",
+            descriptor="peak_high_checkpoint_disagreement_area_fraction_wettable",
+            value=disagreement_fraction,
+            reference_high=footprint_p95,
+            details={
+                "decision_eligible": s >= 1.0,
+                "decision_layer": "reference_derived_post_run_heuristic",
+            },
+        ))
 
     shift_ref = ref.get("max_abs_calibration_shift_pp", {})
     shift_p95 = shift_ref.get("p95", 5.0)
@@ -1137,6 +1446,10 @@ def _post_run_reference_score(
             descriptor="max_abs_calibration_shift_percentage_points_by_threshold",
             value=shift,
             reference_high=shift_p95,
+            details={
+                "decision_eligible": s >= 1.0,
+                "decision_layer": "reference_derived_post_run_heuristic",
+            },
         ))
 
     return score, flags
@@ -1161,6 +1474,10 @@ def _post_run_heuristic_score_legacy(
                 descriptor="uncertainty_to_signal_ratio",
                 value=ratio,
                 reference_high=0.5,
+                details={
+                    "decision_eligible": False,
+                    "decision_layer": "legacy_post_run_heuristic",
+                },
             )
         )
     if iqr is not None and area_fraction >= 0.20 and iqr >= 0.10:
@@ -1173,6 +1490,10 @@ def _post_run_heuristic_score_legacy(
                 descriptor="peak_area_weighted_iqr_wd_m",
                 value=iqr,
                 reference_high=0.10,
+                details={
+                    "decision_eligible": False,
+                    "decision_layer": "legacy_post_run_heuristic",
+                },
             )
         )
     if shift >= 5.0:
@@ -1185,6 +1506,10 @@ def _post_run_heuristic_score_legacy(
                 descriptor="max_abs_calibration_shift_percentage_points_by_threshold",
                 value=shift,
                 reference_high=5.0,
+                details={
+                    "decision_eligible": False,
+                    "decision_layer": "legacy_post_run_heuristic",
+                },
             )
         )
     return score, flags
@@ -1210,7 +1535,21 @@ def _reference_flag(
         value=value,
         reference_low=low,
         reference_high=high,
+        details={
+            "decision_eligible": False,
+            "decision_layer": "reference_envelope",
+            "reference_level": "candidate" if "candidate" in code else "warning",
+            "fragile_descriptor": _is_fragile_reference_descriptor(descriptor),
+        },
     )
+
+
+def _is_fragile_reference_descriptor(descriptor: str | None) -> bool:
+    if descriptor is None:
+        return False
+    if descriptor in FRAGILE_REFERENCE_DESCRIPTORS:
+        return True
+    return any(token in descriptor for token in FRAGILE_REFERENCE_DESCRIPTOR_TOKENS)
 
 
 def _latest_payload(reports: Sequence[MonitoringReport], phase: MonitoringPhase) -> dict[str, object] | None:

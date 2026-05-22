@@ -12,16 +12,24 @@ import argparse
 import json
 import math
 import os
+import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
 import numpy as np
 
+from neuralop.flood.serving.forcing import parse_forcing_csv
+from neuralop.flood.serving.model_bundle import load_model_bundle
 from neuralop.flood.serving.monitoring import (
     MonitoringBundle,
     MonitoringPhase,
-    _apply_transforms,
+    _compute_covariance_block,
+    build_forcing_descriptors,
+)
+from neuralop.flood.serving.monitoring_build_bundle import (
+    _forcing_paths_from_globs,
+    load_clean_boundary_table_forcings,
 )
 
 
@@ -85,27 +93,15 @@ def refresh_bundle(
         if numeric:
             new_descriptors.append(numeric)
 
-    existing_percentiles = bundle.descriptor_percentiles
-    existing_keys = sorted(existing_percentiles.keys())
+    reference_rows = _load_reference_descriptors_from_provenance(bundle)
+    if not reference_rows:
+        reference_rows = _synthetic_reference_from_percentiles(bundle)
 
-    all_keys = sorted(set(existing_keys) | {k for d in new_descriptors for k in d})
-    numeric_keys = [k for k in all_keys if k in existing_keys]
+    existing_keys = sorted(bundle.descriptor_percentiles.keys())
+    all_keys = sorted(set(existing_keys) | {k for d in new_descriptors for k in d} | {k for d in reference_rows for k in d})
+    numeric_keys = [k for k in all_keys if k in existing_keys or any(k in row for row in reference_rows)]
 
-    reference_synthetic: list[dict[str, float]] = []
-    for key in numeric_keys:
-        pcts = existing_percentiles[key]
-        ref_pop = bundle.reference_population.get("n_reference_forcing", 100)
-        rng = np.random.default_rng(hash(key) % (2**31))
-        p01 = pcts.get("p01", pcts.get("min", 0))
-        p50 = pcts.get("p50", 0)
-        p99 = pcts.get("p99", pcts.get("max", 1))
-        scale = max((p99 - p01) / 4.0, 0.01)
-        for i in range(ref_pop):
-            if len(reference_synthetic) <= i:
-                reference_synthetic.append({})
-            reference_synthetic[i][key] = float(rng.normal(p50, scale))
-
-    combined = reference_synthetic + new_descriptors
+    combined = reference_rows + new_descriptors
 
     updated_percentiles: dict[str, dict[str, float]] = {}
     for key in numeric_keys:
@@ -122,44 +118,12 @@ def refresh_bundle(
             "max": float(np.max(values)),
         }
 
-    covariance_data = None
-    if bundle.transform_spec:
-        exclude = set(bundle.covariance_exclude_descriptors)
-        cov_keys = [k for k in numeric_keys if k not in exclude]
-        if len(cov_keys) >= 2 and len(combined) > len(cov_keys):
-            transformed_rows = []
-            for d in combined:
-                t = _apply_transforms({k: d.get(k, 0.0) for k in cov_keys}, bundle.transform_spec)
-                transformed_rows.append([t[k] for k in cov_keys])
-            X = np.array(transformed_rows, dtype=np.float64)
-            mean_vec = np.mean(X, axis=0)
-            cov_mat = np.cov(X, rowvar=False)
-            p = len(cov_keys)
-            alpha = 0.01 * np.trace(cov_mat) / p
-            cov_reg = cov_mat + alpha * np.eye(p)
-            inv_cov = np.linalg.inv(cov_reg)
-
-            dists = []
-            for row in X:
-                diff = row - mean_vec
-                d2 = float(diff @ inv_cov @ diff)
-                dists.append(math.sqrt(max(0, d2)))
-            dist_pcts = np.percentile(dists, [50, 75, 90, 95, 99])
-
-            covariance_data = {
-                "descriptor_names": cov_keys,
-                "mean_vector": mean_vec.tolist(),
-                "inv_covariance_matrix": inv_cov.tolist(),
-                "n_reference": len(combined),
-                "regularization_alpha": float(alpha),
-                "empirical_distance_percentiles": {
-                    "p50": float(dist_pcts[0]),
-                    "p75": float(dist_pcts[1]),
-                    "p90": float(dist_pcts[2]),
-                    "p95": float(dist_pcts[3]),
-                    "p99": float(dist_pcts[4]),
-                },
-            }
+    covariance_data = _compute_covariance_block(
+        rows=[{k: d.get(k) for k in numeric_keys} for d in combined],
+        keys=numeric_keys,
+        transform_spec=dict(bundle.transform_spec),
+        exclude=list(bundle.covariance_exclude_descriptors),
+    )
 
     new_bundle: dict[str, object] = {
         "bundle_id": f"{bundle.bundle_id}-refreshed-{datetime.now(timezone.utc).strftime('%Y%m%d')}",
@@ -171,11 +135,11 @@ def refresh_bundle(
         "reference_population": {
             "n_reference_forcing": len(combined),
             "n_new_simulated": len(new_descriptors),
-            "n_original_reference": len(reference_synthetic),
+            "n_original_reference": len(reference_rows),
         },
         "covariance_exclude_descriptors": list(bundle.covariance_exclude_descriptors),
         "created_at": datetime.now(timezone.utc).isoformat(),
-        "created_from_commit": None,
+        "created_from_commit": _current_git_commit(),
         "provenance": {
             "refresh_source_bundle": bundle.bundle_id,
             "simulated_candidate_run_ids": sorted(sim_run_ids),
@@ -207,6 +171,83 @@ def refresh_bundle(
     print("To activate: update FGN_MONITORING_BUNDLE_PATH and restart containers.")
 
     return new_bundle
+
+
+def _load_reference_descriptors_from_provenance(bundle: MonitoringBundle) -> list[dict[str, float]]:
+    provenance = bundle.provenance
+    model_bundle_path = provenance.get("model_bundle_path")
+    if not isinstance(model_bundle_path, str) or not model_bundle_path:
+        return []
+    try:
+        model_bundle = load_model_bundle(model_bundle_path)
+    except Exception:
+        return []
+
+    descriptors: list[dict[str, float]] = []
+    forcing_globs = provenance.get("forcing_globs", [])
+    if isinstance(forcing_globs, list):
+        for path in _forcing_paths_from_globs([str(item) for item in forcing_globs]):
+            try:
+                forcing = parse_forcing_csv(path, bundle=model_bundle)
+            except Exception:
+                continue
+            descriptors.append(_numeric_descriptor_row(build_forcing_descriptors(forcing)))
+
+    clean_pairs = provenance.get("clean_boundary_pairs", [])
+    if isinstance(clean_pairs, list):
+        for pair in clean_pairs:
+            if not isinstance(pair, (list, tuple)) or len(pair) != 2:
+                continue
+            try:
+                forcings = load_clean_boundary_table_forcings(
+                    stage_table=Path(str(pair[0])),
+                    precipitation_table=Path(str(pair[1])),
+                    dt_seconds=int(model_bundle.dt_seconds),
+                    skip_before_timestep=int(model_bundle.skip_before_timestep),
+                    n_history=int(model_bundle.n_history),
+                    max_forecast_steps=int(model_bundle.max_forecast_steps),
+                )
+            except Exception:
+                continue
+            descriptors.extend(_numeric_descriptor_row(build_forcing_descriptors(forcing)) for forcing in forcings)
+    return descriptors
+
+
+def _synthetic_reference_from_percentiles(bundle: MonitoringBundle) -> list[dict[str, float]]:
+    existing_percentiles = bundle.descriptor_percentiles
+    existing_keys = sorted(existing_percentiles.keys())
+    ref_pop = int(bundle.reference_population.get("n_reference_forcing", 100) or 100)
+    reference_synthetic: list[dict[str, float]] = []
+    for key in existing_keys:
+        pcts = existing_percentiles[key]
+        rng = np.random.default_rng(abs(hash(key)) % (2**31))
+        p01 = pcts.get("p01", pcts.get("min", 0))
+        p50 = pcts.get("p50", 0)
+        p99 = pcts.get("p99", pcts.get("max", 1))
+        scale = max((p99 - p01) / 4.0, 0.01)
+        for i in range(ref_pop):
+            if len(reference_synthetic) <= i:
+                reference_synthetic.append({})
+            reference_synthetic[i][key] = float(rng.normal(p50, scale))
+    return reference_synthetic
+
+
+def _numeric_descriptor_row(row: dict[str, object]) -> dict[str, float]:
+    return {key: float(value) for key, value in row.items() if isinstance(value, (int, float)) and math.isfinite(float(value))}
+
+
+def _current_git_commit() -> str | None:
+    try:
+        completed = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except Exception:
+        return None
+    sha = completed.stdout.strip()
+    return sha or None
 
 
 def main() -> None:

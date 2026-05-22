@@ -16,6 +16,10 @@ from typing import Callable, Dict, Mapping, Protocol, Sequence
 import numpy as np
 
 from neuralop.flood.serving.forcing import ForcingInput
+from neuralop.flood.serving.initial_conditions import (
+    InitialConditionProvider,
+    initial_condition_provider_from_bundle,
+)
 from neuralop.flood.serving.model_bundle import FGNModelBundle
 from neuralop.flood.serving.products import ForecastResult
 from neuralop.flood.serving.run_spec import RunSpec
@@ -105,6 +109,16 @@ class FakeFGNInferenceService:
                 "cell_area_m2": np.ones(n_cells, dtype=np.float32),
                 "member_model_id": member_model_id,
                 "member_sample_id": member_sample_id,
+                "initial_condition": {
+                    "mode": "dry",
+                    "library_id": None,
+                    "reference_scope": None,
+                    "selected_reference_ids": [],
+                    "weights": [],
+                    "distances": [],
+                    "low_confidence": False,
+                    "confidence_label": "synthetic_fake",
+                },
             },
         )
 
@@ -126,6 +140,7 @@ class ProductionFGNInferenceService:
         preloaded_models: Sequence[object] | None = None,
         preloaded_normalizers: Mapping[str, object] | None = None,
         preloaded_domain_assets: DomainAssets | None = None,
+        initial_condition_provider: InitialConditionProvider | None = None,
     ) -> None:
         self.bundle = bundle
         self.device_name = str(device)
@@ -133,6 +148,7 @@ class ProductionFGNInferenceService:
         self._models = list(preloaded_models) if preloaded_models is not None else None
         self._normalizers = dict(preloaded_normalizers) if preloaded_normalizers is not None else None
         self._domain_assets = preloaded_domain_assets
+        self.initial_condition_provider = initial_condition_provider or initial_condition_provider_from_bundle(bundle)
         self._prepared = None
 
     def _torch(self):
@@ -413,8 +429,21 @@ class ProductionFGNInferenceService:
 
         boundary_raw = self._boundary_tensor(forcing_input, n_cells=n_cells, device=device)
         boundary_norm = self._normalize(normalizers["boundary"], boundary_raw)
-        zero_dyn_raw = torch.zeros((self.bundle.n_history, n_cells, 1), dtype=torch.float32, device=device)
-        zero_dyn_norm = self._normalize(normalizers["dynamic"], zero_dyn_raw)
+        initial_condition = self.initial_condition_provider.resolve(
+            forcing_input,
+            bundle=self.bundle,
+            n_cells=n_cells,
+        )
+        initial_dyn_raw = torch.as_tensor(initial_condition.wd_history_m, dtype=torch.float32, device=device)
+        if initial_dyn_raw.shape != (int(self.bundle.n_history), n_cells, 1):
+            raise ValueError(
+                "Initial-condition provider returned malformed WD history: "
+                f"{tuple(initial_dyn_raw.shape)} != {(int(self.bundle.n_history), n_cells, 1)}."
+            )
+        if dry_mask is not None:
+            initial_dyn_raw = initial_dyn_raw.clone()
+            initial_dyn_raw[:, dry_mask, :] = 0.0
+        initial_dyn_norm = self._normalize(normalizers["dynamic"], initial_dyn_raw)
         start = int(self.bundle.skip_before_timestep) + int(self.bundle.n_history)
         initial_boundary = boundary_norm[self.bundle.skip_before_timestep:start].clone()
         boundary_future = boundary_norm[start:start + n_time]
@@ -446,7 +475,7 @@ class ProductionFGNInferenceService:
                     device=device,
                     dtype=dtype,
                 )
-                current_dynamics = [zero_dyn_norm.clone() for _ in range(n_per_model)]
+                current_dynamics = [initial_dyn_norm.clone() for _ in range(n_per_model)]
                 current_boundary = initial_boundary.clone()
                 model_members = []
                 for t in range(n_time):
@@ -532,6 +561,7 @@ class ProductionFGNInferenceService:
                 "cell_area_m2": prepared.get("cell_area_m2_np"),
                 "slope_raw": prepared.get("slope_raw_np"),
                 "flow_accumulation_raw": prepared.get("flow_accumulation_raw_np"),
+                "initial_condition": initial_condition.selection,
                 "fgn_latent_temporal_mode": "persistent",
                 "fgn_ar_state_update": "member_feedback",
             },
