@@ -14,8 +14,8 @@ permissions:
 jobs:
   build-and-push:
     if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
-    runs-on: ubuntu-latest
-    timeout-minutes: 60
+    runs-on: [self-hosted, fgn-lab, linux, gpu]
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
         with:
