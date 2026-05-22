@@ -1,0 +1,57 @@
+name: FGN Serving Deploy Lab
+
+on:
+  workflow_run:
+    workflows: ["FGN Serving Images"]
+    branches: [main]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      smoke_only:
+        description: "Run lab smoke checks without deploying images"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  packages: read
+
+concurrency:
+  group: fgn-lab-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
+    runs-on: [self-hosted, fgn-lab, linux, gpu]
+    environment: lab-production
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+      - uses: docker/login-action@v3
+        if: ${{ !inputs.smoke_only }}
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Prepare deployment image tags
+        id: deploy
+        shell: bash
+        run: |
+          namespace="ghcr.io/${GITHUB_REPOSITORY,,}"
+          sha="${{ github.event.workflow_run.head_sha || github.sha }}"
+          {
+            echo "FGN_DEPLOY_COMMIT=${sha}"
+            echo "FGN_API_IMAGE=${namespace}/fgn-serving-python:${sha}"
+            echo "FGN_WORKER_IMAGE=${namespace}/fgn-serving-python:${sha}"
+            echo "FGN_CLEANUP_IMAGE=${namespace}/fgn-serving-python:${sha}"
+            echo "FGN_FRONTEND_IMAGE=${namespace}/fgn-serving-frontend:${sha}"
+          } >> "$GITHUB_ENV"
+      - name: Smoke-only check
+        if: ${{ inputs.smoke_only }}
+        run: deployment/fgn-serving/scripts/smoke_lab.sh
+      - name: Deploy to lab PC
+        if: ${{ !inputs.smoke_only }}
+        run: deployment/fgn-serving/scripts/deploy_lab.sh

@@ -1,0 +1,84 @@
+name: FGN Serving CI
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/fgn-serving-ci.yml"
+      - "apps/fgn-serving-frontend/**"
+      - "deployment/fgn-serving/**"
+      - "neuralop/flood/serving/**"
+      - "neuralop/flood/eval/**"
+      - "neuralop/tests/test_fgn_serving*.py"
+      - "neuralop/tests/test_eval_rollout_imports.py"
+      - "neuralop/tests/test_rollout_animation_diagnostics.py"
+      - "pyproject.toml"
+      - "requirements.txt"
+  pull_request:
+    paths:
+      - ".github/workflows/fgn-serving-ci.yml"
+      - "apps/fgn-serving-frontend/**"
+      - "deployment/fgn-serving/**"
+      - "neuralop/flood/serving/**"
+      - "neuralop/flood/eval/**"
+      - "neuralop/tests/test_fgn_serving*.py"
+      - "neuralop/tests/test_eval_rollout_imports.py"
+      - "neuralop/tests/test_rollout_animation_diagnostics.py"
+      - "pyproject.toml"
+      - "requirements.txt"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  python-serving:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install "setuptools<81"
+          python -m pip install "torch==2.5.1" "torchvision==0.20.1" "torchaudio==2.5.1" --index-url https://download.pytorch.org/whl/cpu
+          python -m pip install -e ".[dev,serve]" scipy
+      - name: Run serving and rollout tests
+        run: |
+          pytest -q \
+            neuralop/tests/test_fgn_serving_api.py \
+            neuralop/tests/test_fgn_serving_contracts.py \
+            neuralop/tests/test_fgn_serving_entrypoints.py \
+            neuralop/tests/test_fgn_serving_initial_conditions.py \
+            neuralop/tests/test_fgn_serving_monitoring.py \
+            neuralop/tests/test_fgn_serving_production.py \
+            neuralop/tests/test_eval_rollout_imports.py \
+            neuralop/tests/test_rollout_animation_diagnostics.py
+
+  frontend:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: apps/fgn-serving-frontend/package-lock.json
+      - name: Build frontend
+        working-directory: apps/fgn-serving-frontend
+        run: |
+          npm ci
+          npm run build
+
+  deployment-config:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate deployment automation
+        run: deployment/fgn-serving/scripts/validate_automation.sh

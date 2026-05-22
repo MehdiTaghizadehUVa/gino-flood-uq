@@ -109,6 +109,11 @@ unpinned terminal run artifacts after `FGN_RETENTION_DAYS` while preserving SQL
 audit metadata. On the lab PC, Compose must run inside WSL2/Docker Desktop with
 GPU support enabled.
 
+Production Compose now pulls published GHCR images by default. Local source
+builds are still available through `docker-compose.local-build.yml`; see
+`docs/fgn_serving_deployment_automation.md` for the automated CI, image publish,
+self-hosted-runner deployment, and rollback workflow.
+
 The API exposes owner-visible run/artifact endpoints plus admin list, pin,
 unpin, cancel, and runtime allowlist-management endpoints. Only `RunOrchestrator`
 transitions run state. Allowlist, admin, and disclaimer state are persisted in
@@ -136,15 +141,15 @@ For VPN/LAN HTTPS, Caddy uses `tls internal`. Collaborators must trust the Caddy
 root CA, and Google OAuth redirect URLs must point at
 `https://${FGN_SITE_HOSTNAME}/oauth2/callback`.
 
-Before starting production Compose:
+Before starting a local source-build Compose stack:
 
 ```bash
 cd deployment/fgn-serving
 cp .env.example .env
 # edit .env: FGN_SITE_HOSTNAME, FGN_DATA_ROOT, Google OAuth secrets,
 # POSTGRES_PASSWORD, OAUTH2_PROXY_COOKIE_SECRET, FGN_ALLOWED_EMAILS
-docker compose build
-docker compose up -d
+docker compose -f docker-compose.yml -f docker-compose.local-build.yml build
+docker compose -f docker-compose.yml -f docker-compose.local-build.yml up -d
 ```
 
 Health checks:

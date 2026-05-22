@@ -1,10 +1,12 @@
+x-fgn-env: &fgn-env
+  - path: .env
+    required: false
+
 services:
   api:
-    build:
-      context: ../..
-      dockerfile: deployment/fgn-serving/python.Dockerfile
+    image: ${FGN_API_IMAGE:-ghcr.io/mehditaghizadehuva/gino-flood-uq/fgn-serving-python:main}
     command: uvicorn neuralop.flood.serving.api_app:app --host 0.0.0.0 --port 8000
-    env_file: .env
+    env_file: *fgn-env
     volumes:
       - ${FGN_DATA_ROOT:?set FGN_DATA_ROOT}/model_bundle:/model_bundle:ro
       - ${FGN_DATA_ROOT:?set FGN_DATA_ROOT}/artifacts:/artifacts
@@ -21,11 +23,9 @@ services:
       start_period: 30s
 
   worker-gpu:
-    build:
-      context: ../..
-      dockerfile: deployment/fgn-serving/python.Dockerfile
+    image: ${FGN_WORKER_IMAGE:-ghcr.io/mehditaghizadehuva/gino-flood-uq/fgn-serving-python:main}
     command: celery -A neuralop.flood.serving.celery_app worker --loglevel=INFO --concurrency=1
-    env_file: .env
+    env_file: *fgn-env
     volumes:
       - ${FGN_DATA_ROOT:?set FGN_DATA_ROOT}/model_bundle:/model_bundle:ro
       - ${FGN_DATA_ROOT:?set FGN_DATA_ROOT}/artifacts:/artifacts
@@ -49,9 +49,8 @@ services:
       start_period: 120s
 
   frontend:
-    build:
-      context: ../../apps/fgn-serving-frontend
-    env_file: .env
+    image: ${FGN_FRONTEND_IMAGE:-ghcr.io/mehditaghizadehuva/gino-flood-uq/fgn-serving-frontend:main}
+    env_file: *fgn-env
     depends_on:
       - api
     healthcheck:
@@ -63,7 +62,7 @@ services:
 
   oauth2-proxy:
     image: quay.io/oauth2-proxy/oauth2-proxy:v7.6.0
-    env_file: .env
+    env_file: *fgn-env
     command:
       - --provider=google
       - --http-address=0.0.0.0:4180
@@ -84,11 +83,9 @@ services:
       start_period: 15s
 
   cleanup-backup:
-    build:
-      context: ../..
-      dockerfile: deployment/fgn-serving/python.Dockerfile
+    image: ${FGN_CLEANUP_IMAGE:-ghcr.io/mehditaghizadehuva/gino-flood-uq/fgn-serving-python:main}
     command: sh -c 'while true; do python -m neuralop.flood.serving.cleanup; python -m neuralop.flood.serving.drift_runner --database-url "$DATABASE_URL"; sleep 86400; done'
-    env_file: .env
+    env_file: *fgn-env
     volumes:
       - ${FGN_DATA_ROOT:?set FGN_DATA_ROOT}/model_bundle:/model_bundle:ro
       - ${FGN_DATA_ROOT:?set FGN_DATA_ROOT}/artifacts:/artifacts
@@ -98,7 +95,7 @@ services:
 
   postgres-backup:
     image: postgres:16-alpine
-    env_file: .env
+    env_file: *fgn-env
     volumes:
       - ${FGN_DATA_ROOT:?set FGN_DATA_ROOT}/backups:/backups
     entrypoint: ["/bin/sh", "-c"]
@@ -145,7 +142,7 @@ services:
 
   proxy:
     image: caddy:2-alpine
-    env_file: .env
+    env_file: *fgn-env
     ports:
       - "80:80"
       - "443:443"

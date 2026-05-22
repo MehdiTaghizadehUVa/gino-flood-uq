@@ -1,0 +1,23 @@
+services:
+  api:
+    image: fgn-serving-python:local
+    build:
+      context: ../..
+      dockerfile: deployment/fgn-serving/python.Dockerfile
+
+  worker-gpu:
+    image: fgn-serving-python:local
+    build:
+      context: ../..
+      dockerfile: deployment/fgn-serving/python.Dockerfile
+
+  cleanup-backup:
+    image: fgn-serving-python:local
+    build:
+      context: ../..
+      dockerfile: deployment/fgn-serving/python.Dockerfile
+
+  frontend:
+    image: fgn-serving-frontend:local
+    build:
+      context: ../../apps/fgn-serving-frontend
