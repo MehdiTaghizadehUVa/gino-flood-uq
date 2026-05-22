@@ -10,7 +10,7 @@ if [[ -n "${tracked_secret_paths}" ]]; then
   exit 1
 fi
 
-if git grep -n -E 'GOCSPX-|AIza[0-9A-Za-z_-]{20,}|-----BEGIN (RSA|OPENSSH|PRIVATE) KEY-----' -- . ':!*.md' ':!deployment/fgn-serving/.env.example'; then
+if git grep -n -E 'GOCSPX-|AIza[0-9A-Za-z_-]{20,}|-----BEGIN (RSA|OPENSSH|PRIVATE) KEY-----' -- . ':!*.md' ':!deployment/fgn-serving/.env.example' ':!deployment/fgn-serving/scripts/check_no_serving_secrets.sh'; then
   printf 'Potential production secret found in tracked files.\n' >&2
   exit 1
 fi
