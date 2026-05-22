@@ -57,7 +57,7 @@ flood: &FLOOD
     noise_std: [0.01]
     rollout_length: -1
     skip_before_timestep: 12
-    dt: 1200
+    dt: 900
 
   rollout_data:
     root: "/scratch/jrj6wm/uncertainty_floodmodel_linux/results/coastal/Coastal_Flood_coastal_v1_5k_train_prod_t2_w64_20260318_233556/train"

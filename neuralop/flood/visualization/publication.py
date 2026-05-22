@@ -17,7 +17,7 @@ def create_rollout_animation(
         run_id=None,
         out_dir=".",
         filename_prefix="rollout",
-        dt_seconds: float = 1200.0
+        dt_seconds: float = 900.0
 ):
     """
     Creates an animation comparing Ground Truth and Predictions in a 3x2 grid.

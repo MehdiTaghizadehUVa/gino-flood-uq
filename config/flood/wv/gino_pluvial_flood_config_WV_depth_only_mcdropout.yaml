@@ -44,7 +44,7 @@ flood: &FLOOD
     noise_std: [0.01]
     rollout_length: -1
     skip_before_timestep: 12
-    dt: 1200
+    dt: 900
 
   rollout_data:
     root: "/scratch/jrj6wm/Data_Generation_UQ_dataset/results/Dynamic_M40_v1/test"

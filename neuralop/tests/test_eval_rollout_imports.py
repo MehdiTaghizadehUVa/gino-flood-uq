@@ -170,7 +170,7 @@ def test_operator_eval_passes_fgn_state_update_to_rollout(monkeypatch, tmp_path)
             rollout_length=3,
             n_history=2,
             skip_before_timestep=0,
-            dt=1200.0,
+            dt=900.0,
             batch_size=4,
             query_res=[4, 4],
         ),

@@ -121,3 +121,8 @@ scripts/*.log.*
 scripts/*.tmp
 scripts/*.bak_*
 scripts/smoke_*.txt
+
+# Local FGN serving runtime files
+deployment/fgn-serving/.env
+apps/fgn-serving-frontend/node_modules/
+apps/fgn-serving-frontend/.next/

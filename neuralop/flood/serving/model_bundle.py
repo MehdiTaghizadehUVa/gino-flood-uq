@@ -13,6 +13,16 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
 
+from neuralop.flood.serving.initial_conditions import (
+    INITIAL_CONDITION_DRY,
+    INITIAL_CONDITION_FORCING_BASELINE,
+    InitialConditionConfig,
+    validate_initial_condition_library,
+)
+
+
+COASTAL_FGN_DT_SECONDS = 900
+
 
 class ModelBundleError(ValueError):
     """Raised when a deployment bundle is missing or scientifically incompatible."""
@@ -75,6 +85,7 @@ class FGNModelBundle:
     structural_dry_mask_path: Optional[Path] = None
     model_config_path: Optional[Path] = None
     query_res: tuple[int, int] = (48, 48)
+    initial_condition: InitialConditionConfig = field(default_factory=InitialConditionConfig)
     research_disclaimer: str = "Research only; not for emergency or operational decision use."
     metadata: Dict[str, Any] = field(default_factory=dict)
 
@@ -99,6 +110,13 @@ class FGNModelBundle:
             "n_checkpoints": self.n_checkpoints,
             "members_per_checkpoint": self.members_per_checkpoint,
             "total_members": self.total_members,
+            "member_budget": {
+                "max_ensembles": self.n_checkpoints,
+                "max_members_per_ensemble": self.members_per_checkpoint,
+                "default_ensembles": self.n_checkpoints,
+                "default_members_per_ensemble": self.members_per_checkpoint,
+                "default_total_members": self.total_members,
+            },
             "boundary_channels": list(self.boundary_channels),
             "dt_seconds": self.dt_seconds,
             "n_history": self.n_history,
@@ -111,6 +129,7 @@ class FGNModelBundle:
             "research_disclaimer": self.research_disclaimer,
             "has_domain_assets": self.geometry_path is not None and self.static_tensor_path is not None,
             "has_structural_dry_mask": self.structural_dry_mask_path is not None,
+            "initial_condition": self.initial_condition.public_metadata(),
             "input_contract": {
                 "format": "csv",
                 "required_columns": ["time_seconds", "stage", "precipitation"],
@@ -147,8 +166,10 @@ class FGNModelBundle:
                 "Coastal FGN serving v1 is pinned to 60 members. "
                 f"Got {self.n_checkpoints} checkpoints x {self.members_per_checkpoint} = {self.total_members}."
             )
-        if self.dt_seconds != 1200:
-            raise ModelBundleError(f"Expected dt_seconds=1200 for coastal FGN, got {self.dt_seconds}.")
+        if self.dt_seconds != COASTAL_FGN_DT_SECONDS:
+            raise ModelBundleError(
+                f"Expected dt_seconds={COASTAL_FGN_DT_SECONDS} for coastal FGN, got {self.dt_seconds}."
+            )
         if self.n_history != 3:
             raise ModelBundleError(f"Expected n_history=3 for coastal FGN, got {self.n_history}.")
         if self.skip_before_timestep < 0:
@@ -159,6 +180,15 @@ class FGNModelBundle:
             raise ModelBundleError(f"Expected fgn_noise_dim=32 for current coastal FGN, got {self.fgn_noise_dim}.")
         if min(self.query_res) < 2:
             raise ModelBundleError(f"query_res must be at least [2,2], got {self.query_res}.")
+        if self.initial_condition.default_mode not in {
+            INITIAL_CONDITION_DRY,
+            INITIAL_CONDITION_FORCING_BASELINE,
+        }:
+            raise ModelBundleError(
+                f"Unsupported initial-condition mode: {self.initial_condition.default_mode!r}."
+            )
+        if self.initial_condition.k_neighbors < 1:
+            raise ModelBundleError("initial_condition.k_neighbors must be >= 1.")
         if self.mesh_hash and self.expected_mesh_hash and self.mesh_hash != self.expected_mesh_hash:
             raise ModelBundleError(
                 "Model bundle mesh_hash does not match expected_mesh_hash: "
@@ -184,6 +214,11 @@ class FGNModelBundle:
         for path in required_paths:
             if path is None or not Path(path).exists():
                 missing.append(str(path))
+        if self.initial_condition.default_mode == INITIAL_CONDITION_FORCING_BASELINE:
+            if self.initial_condition.library_path is None:
+                missing.append("initial-condition library path")
+            elif not Path(self.initial_condition.library_path).exists():
+                missing.append(f"initial-condition library: {self.initial_condition.library_path}")
         checkpoint_file = "best_model_state_dict.pt" if self.checkpoint_alias == "best_model" else "model_state_dict.pt"
         for checkpoint_dir in self.checkpoint_dirs:
             if not checkpoint_dir.exists():
@@ -192,6 +227,14 @@ class FGNModelBundle:
                 missing.append(str(checkpoint_dir / checkpoint_file))
         if missing:
             raise ModelBundleError("Model bundle is missing required files: " + "; ".join(missing))
+        if self.initial_condition.default_mode == INITIAL_CONDITION_FORCING_BASELINE:
+            try:
+                validate_initial_condition_library(
+                    Path(self.initial_condition.library_path),
+                    n_history=int(self.n_history),
+                )
+            except Exception as exc:
+                raise ModelBundleError(f"Malformed initial-condition library: {exc}") from exc
         return self
 
 
@@ -214,6 +257,18 @@ def _load_mapping(path: Path) -> Mapping[str, Any]:
         return loaded
 
 
+def _initial_condition_config(raw: Mapping[str, Any], *, base_dir: Path) -> InitialConditionConfig:
+    payload = dict(raw.get("initial_condition") or {})
+    library_path = _as_path(payload.get("library_path"), base_dir=base_dir)
+    return InitialConditionConfig(
+        default_mode=str(payload.get("default_mode", INITIAL_CONDITION_DRY)),
+        library_path=library_path,
+        reference_scope=str(payload.get("reference_scope", "train_calibration")),
+        k_neighbors=int(payload.get("k_neighbors", 5)),
+        metadata=dict(payload.get("metadata", {})),
+    )
+
+
 def load_model_bundle(path: str | Path, *, validate_paths: bool = True) -> FGNModelBundle:
     """Load and validate a model bundle manifest from JSON/YAML."""
     manifest_path = Path(path).expanduser().resolve()
@@ -231,7 +286,7 @@ def load_model_bundle(path: str | Path, *, validate_paths: bool = True) -> FGNMo
             calibration_coefficients_path=Path(_as_path(raw["calibration_coefficients_path"], base_dir=base_dir)),
             isotonic_curves_path=Path(_as_path(raw["isotonic_curves_path"], base_dir=base_dir)),
             boundary_channels=[str(x) for x in raw.get("boundary_channels", [])],
-            dt_seconds=int(raw.get("dt_seconds", 1200)),
+            dt_seconds=int(raw.get("dt_seconds", COASTAL_FGN_DT_SECONDS)),
             n_history=int(raw.get("n_history", 3)),
             skip_before_timestep=int(raw.get("skip_before_timestep", 12)),
             max_forecast_steps=int(raw["max_forecast_steps"]),
@@ -245,6 +300,7 @@ def load_model_bundle(path: str | Path, *, validate_paths: bool = True) -> FGNMo
             structural_dry_mask_path=_as_path(raw.get("structural_dry_mask_path"), base_dir=base_dir),
             model_config_path=_as_path(raw.get("model_config_path"), base_dir=base_dir),
             query_res=_pair(raw.get("query_res"), (48, 48)),
+            initial_condition=_initial_condition_config(raw, base_dir=base_dir),
             research_disclaimer=str(
                 raw.get("research_disclaimer", "Research only; not for emergency or operational decision use.")
             ),

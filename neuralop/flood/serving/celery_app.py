@@ -26,8 +26,11 @@ _orchestrator = None
 def get_orchestrator():
     global _orchestrator
     if _orchestrator is None:
-        preload = os.environ.get("FGN_PRELOAD_MODELS", "1").strip().lower() not in {"0", "false", "no"}
-        _orchestrator = build_orchestrator(queue_override=None, preload_models=preload)
+        # Keep worker startup cheap enough that a claimed Celery task can enter
+        # the RunOrchestrator state machine first. Production model loading
+        # still happens lazily inside inference_service.run(), after the DB row
+        # has moved from QUEUED to RUNNING for honest UI/progress reporting.
+        _orchestrator = build_orchestrator(queue_override=None, preload_models=False)
     return _orchestrator
 
 

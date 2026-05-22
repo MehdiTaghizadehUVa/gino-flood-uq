@@ -44,8 +44,8 @@ def test_diagnostic_boundary_panels_are_dataset_adaptive():
 
 
 def test_forecast_horizon_hides_raw_rollout_start_offset():
-    hours = render._forecast_horizon_hours(3, 1200.0, initial_history_steps=3)
-    assert np.allclose(hours, [1.0, 4.0 / 3.0, 5.0 / 3.0])
+    hours = render._forecast_horizon_hours(3, 900.0, initial_history_steps=3)
+    assert np.allclose(hours, [0.75, 1.0, 1.25])
 
 
 def test_relative_l2_axis_uses_forecast_horizon_not_raw_spinup_time():
@@ -55,12 +55,12 @@ def test_relative_l2_axis_uses_forecast_horizon_not_raw_spinup_time():
             ax,
             relative_l2=np.array([0.1, 0.2, 0.3]),
             frame_idx=0,
-            dt_seconds=1200.0,
+            dt_seconds=900.0,
             rollout_start_index=12,
             initial_history_steps=3,
         )
         xdata = ax.lines[0].get_xdata()
-        assert np.allclose(xdata, [1.0, 4.0 / 3.0, 5.0 / 3.0])
+        assert np.allclose(xdata, [0.75, 1.0, 1.25])
         assert ax.get_xlabel() == "Forecast horizon (h)"
     finally:
         render.plt.close(fig)
@@ -80,7 +80,7 @@ def test_boundary_diagnostics_drop_skipped_spinup_steps():
         render._draw_rollout_diagnostics(
             diag_axes=diag_axes,
             frame_idx=0,
-            dt_seconds=1200.0,
+            dt_seconds=900.0,
             boundary_series_raw=boundary,
             boundary_channel_names=["stage"],
             relative_l2=np.array([0.1, 0.2, 0.3]),
@@ -90,7 +90,7 @@ def test_boundary_diagnostics_drop_skipped_spinup_steps():
         boundary_ax = diag_axes["boundary_axes"][0][0]
         xdata = boundary_ax.lines[0].get_xdata()
         ydata = boundary_ax.lines[0].get_ydata()
-        assert np.allclose(xdata, [1.0, 4.0 / 3.0, 5.0 / 3.0])
+        assert np.allclose(xdata, [0.75, 1.0, 1.25])
         assert np.allclose(ydata, [12.0, 13.0, 14.0])
     finally:
         render.plt.close(fig)
@@ -129,7 +129,7 @@ def test_boundary_diagnostics_plot_reference_forcing_ensemble():
         render._draw_rollout_diagnostics(
             diag_axes=diag_axes,
             frame_idx=1,
-            dt_seconds=1200.0,
+            dt_seconds=900.0,
             boundary_series_raw=backbone,
             boundary_ensemble_series_raw=ensemble,
             boundary_channel_names=["stage", "precipitation"],
@@ -400,7 +400,7 @@ def test_hydrograph_animation_writes_coastal_diagnostics(tmp_path, monkeypatch):
         target_variables=["wd"],
         out_dir=str(tmp_path),
         hydrograph_id="coastal_demo",
-        dt_seconds=1200.0,
+        dt_seconds=900.0,
         n_ref_sims=2,
         n_ens=2,
         boundary_series_raw=boundary,
@@ -433,7 +433,7 @@ def test_hydrograph_animation_writes_dynamic_inflow_diagnostics(tmp_path, monkey
         target_variables=["wd"],
         out_dir=str(tmp_path),
         hydrograph_id="dynamic_demo",
-        dt_seconds=1200.0,
+        dt_seconds=900.0,
         n_ref_sims=2,
         n_ens=2,
         boundary_series_raw=boundary,

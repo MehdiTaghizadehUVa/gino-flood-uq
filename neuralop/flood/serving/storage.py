@@ -85,6 +85,8 @@ def _content_type_for_suffix(path: Path) -> str:
         return "application/json"
     if path.suffix == ".csv":
         return "text/csv"
+    if path.suffix == ".svg":
+        return "image/svg+xml"
     if path.suffix in {".h5", ".hdf5"}:
         return "application/x-hdf5"
     guessed, _ = mimetypes.guess_type(str(path))
