@@ -2521,12 +2521,14 @@ def _save_hydrograph_uq_figures_and_animation(
             )
             return [s_gt_m, s_pr_m, s_err, s_gt_s, s_pr_s, s_crps, *gt_edge_artists, *pred_edge_artists]
 
-        ani = animation.FuncAnimation(
-            fig, _animate, frames=n_steps, interval=ANIMATION_INTERVAL_MS, blit=False
-        )
-        _save_animation_outputs(
-            ani,
-            os.path.join(uq_dir, f"uq_rollout_{hid}"),
-            cartographic_context.get("options", _visualization_options(None)),
-        )
+        animation_options = cartographic_context.get("options", _visualization_options(None))
+        if animation_options.get("write_gif", True) or animation_options.get("write_mp4", True):
+            ani = animation.FuncAnimation(
+                fig, _animate, frames=n_steps, interval=ANIMATION_INTERVAL_MS, blit=False
+            )
+            _save_animation_outputs(
+                ani,
+                os.path.join(uq_dir, f"uq_rollout_{hid}"),
+                animation_options,
+            )
         plt.close(fig)

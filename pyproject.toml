@@ -52,6 +52,7 @@ neuralop-flood-serving-worker-preload = "neuralop.flood.serving.worker:main"
 neuralop-flood-serving-build-bundle = "neuralop.flood.serving.bundle_builder:main"
 neuralop-flood-serving-smoke = "neuralop.flood.serving.smoke:main"
 neuralop-flood-serving-cleanup = "neuralop.flood.serving.cleanup:main"
+neuralop-flood-render-calibrated-artifacts = "neuralop.flood.eval.artifact_visualization:main"
 
 [project.optional-dependencies]
 serve = [

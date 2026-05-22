@@ -11,8 +11,10 @@ from neuralop.flood.eval.scientific_calibration import (
     apply_crps_mbm_to_wd_members,
     apply_member_by_member_transform,
     build_calibration_comparison,
+    ensemble_mean_rmse,
     empirical_crps_mean,
     fit_crps_member_by_member_from_artifacts,
+    spread_ratio_penalty,
     weighted_empirical_crps_mean,
     isotonic_predict,
     pava_isotonic_fit,
@@ -35,6 +37,14 @@ def test_empirical_crps_matches_manual_small_array():
     forecast = np.array([[0.0, 2.0], [1.0, 3.0]])
     reference = np.array([[0.0, 4.0], [2.0, 2.0]])
     assert empirical_crps_mean(forecast, reference) == pytest.approx(_manual_crps(forecast, reference))
+
+
+def test_regularization_penalties_measure_mean_and_spread_mismatch():
+    forecast = np.array([[0.0, 2.0], [2.0, 4.0]], dtype=np.float64)
+    reference = np.array([[1.0, 1.0], [1.0, 3.0]], dtype=np.float64)
+
+    assert ensemble_mean_rmse(forecast, reference) == pytest.approx(np.sqrt(0.5))
+    assert spread_ratio_penalty(forecast, reference, target_spread_ratio=1.0) == pytest.approx(0.5)
 
 
 def test_member_by_member_transform_preserves_anomaly_ordering():
@@ -98,6 +108,25 @@ def test_scientific_config_rejects_legacy_affine_keys():
         rollout_calibration=SimpleNamespace(enabled=True, calib_txt="calib.txt", fit_wet_threshold=0.01)
     )
     with pytest.raises(ValueError, match="Legacy lead-time affine"):
+        validate_scientific_calibration_config(cfg)
+
+
+def test_scientific_config_validates_regularized_objective_fields():
+    cfg = SimpleNamespace(
+        rollout_calibration=SimpleNamespace(
+            enabled=True,
+            method="crps_member_by_member",
+            reference=SimpleNamespace(
+                calibration_root="/tmp",
+                calibration_txt="calib.txt",
+                test_root="/tmp",
+                test_txt="test.txt",
+            ),
+            forecast_artifacts=SimpleNamespace(format="hdf5_per_family"),
+            optimizer=SimpleNamespace(objective="combined_regularized_crps", spread_ratio_weight=-1.0),
+        )
+    )
+    with pytest.raises(ValueError, match="spread_ratio_weight"):
         validate_scientific_calibration_config(cfg)
 
 
@@ -192,6 +221,42 @@ def test_low_sample_bins_record_fallback_diagnostics(tmp_path):
     assert diagnostics["warnings"]
 
 
+def test_direct_bins_do_not_fit_unused_fallbacks(tmp_path):
+    h5py = pytest.importorskip("h5py")
+    del h5py
+    pred = np.array(
+        [
+            [[0.10, 0.20, 0.30]],
+            [[0.12, 0.22, 0.32]],
+            [[0.14, 0.24, 0.34]],
+        ],
+        dtype=np.float64,
+    )
+    ref = 0.02 + 0.9 * pred
+    art = save_forecast_artifact(
+        tmp_path / "TE000020.calibration_artifact.h5",
+        hydrograph_id="TE000020",
+        pred_members_wd=pred,
+        ref_members_wd=ref,
+        wettable_mask=np.ones(3, dtype=bool),
+        time_hours=[1.0],
+    )
+    bins = CalibrationBins((0.0, np.inf), (0.0, 1.0), 0.01)
+    messages = []
+    model = fit_crps_member_by_member_from_artifacts(
+        [art],
+        bins=bins,
+        min_fit_points_per_bin=1,
+        max_fit_points_per_bin=10,
+        seed=9,
+        progress_callback=messages.append,
+        progress_interval=0,
+    )
+    diagnostics = build_fit_diagnostics(model)
+    assert diagnostics["fallback_counts"] == {"direct": 1}
+    assert not any("global fallback" in message or "lead fallback" in message for message in messages)
+
+
 def test_mixed_member_counts_raise_clear_error(tmp_path):
     h5py = pytest.importorskip("h5py")
     del h5py
@@ -282,3 +347,48 @@ def test_tail_weighted_objective_changes_fit_on_tail_heavy_fixture():
     tail_vec = np.array([tail["a_m"], tail["beta"], tail["gamma"]])
     assert np.linalg.norm(empirical_vec - tail_vec) > 1e-4
     assert weighted_empirical_crps_mean(pred, ref, threshold_m=0.5, tail_weight=10.0) != pytest.approx(empirical_crps_mean(pred, ref))
+
+
+def test_regularized_objectives_can_change_fit_without_changing_legacy_default():
+    pred = np.array(
+        [
+            [0.0, 1.0, 2.0, 4.0],
+            [2.0, 3.0, 4.0, 6.0],
+            [4.0, 5.0, 6.0, 8.0],
+        ],
+        dtype=np.float64,
+    )
+    ref = np.array(
+        [
+            [1.0, 1.1, 2.2, 3.2],
+            [1.2, 1.3, 2.4, 3.4],
+            [1.4, 1.5, 2.6, 3.6],
+        ],
+        dtype=np.float64,
+    )
+    bounds = {"a_m": [-1.0, 1.0], "beta": [0.2, 2.0], "gamma": [0.05, 3.0]}
+
+    default_fit = _fit_one_bin(pred, ref, bounds=bounds, objective="empirical_crps", seed=4)
+    zero_weight_fit = _fit_one_bin(
+        pred,
+        ref,
+        bounds=bounds,
+        objective="combined_regularized_crps",
+        mean_rmse_weight=0.0,
+        spread_ratio_weight=0.0,
+        seed=4,
+    )
+    spread_fit = _fit_one_bin(
+        pred,
+        ref,
+        bounds=bounds,
+        objective="spread_regularized_crps",
+        spread_ratio_weight=10.0,
+        target_spread_ratio=1.0,
+        seed=4,
+    )
+
+    assert zero_weight_fit["objective"] == pytest.approx(default_fit["objective"], rel=1e-8, abs=1e-8)
+    default_vec = np.array([default_fit["a_m"], default_fit["beta"], default_fit["gamma"]])
+    spread_vec = np.array([spread_fit["a_m"], spread_fit["beta"], spread_fit["gamma"]])
+    assert np.linalg.norm(default_vec - spread_vec) > 1e-4

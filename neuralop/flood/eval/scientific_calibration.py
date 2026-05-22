@@ -15,7 +15,7 @@ import math
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -51,6 +51,15 @@ LEGACY_AFFINE_KEYS = {
 DEFAULT_THRESHOLDS_M = (0.01, 0.05, 0.10, 0.30, 0.50)
 DEFAULT_LEAD_BINS_H = (0.0, 2.0, 6.0, 12.0, 24.0, math.inf)
 DEFAULT_WET_FREQ_EDGES = (0.0, 0.05, 0.50, 1.0)
+SUPPORTED_MBM_OBJECTIVES = {
+    "empirical_crps",
+    "crps",
+    "tail_weighted_crps",
+    "twcrps",
+    "mean_regularized_crps",
+    "spread_regularized_crps",
+    "combined_regularized_crps",
+}
 MIN_EPS = 1e-12
 
 
@@ -165,6 +174,30 @@ def validate_scientific_calibration_config(config: Any) -> None:
             "rollout_calibration.forecast_artifacts.format must be "
             f"{ARTIFACT_FORMAT!r}; got {fmt!r}."
         )
+    optimizer = _cfg_get(config, "rollout_calibration", "optimizer", default=None)
+    objective = str(_cfg_get(optimizer, "objective", default="empirical_crps")).strip().lower()
+    if objective not in SUPPORTED_MBM_OBJECTIVES:
+        allowed = ", ".join(sorted(SUPPORTED_MBM_OBJECTIVES))
+        raise ValueError(
+            "Unsupported rollout_calibration.optimizer.objective "
+            f"{objective!r}; expected one of: {allowed}."
+        )
+    numeric_constraints = {
+        "mean_rmse_weight": (0.0, math.inf),
+        "spread_ratio_weight": (0.0, math.inf),
+        "target_spread_ratio": (MIN_EPS, math.inf),
+        "tail_threshold_m": (0.0, math.inf),
+        "tail_weight": (0.0, math.inf),
+    }
+    for key, (lo, hi) in numeric_constraints.items():
+        raw_value = _cfg_get(optimizer, key, default=None)
+        if raw_value is None:
+            continue
+        value = float(raw_value)
+        if not (lo <= value <= hi):
+            raise ValueError(
+                f"rollout_calibration.optimizer.{key} must be in [{lo}, {hi}]; got {value}."
+            )
 
 
 def _load_split_ids(root: Any, txt: Any) -> set[str]:
@@ -314,11 +347,13 @@ def save_forecast_artifact(
     wettable_mask: np.ndarray | None = None,
     structural_dry_mask: np.ndarray | None = None,
     boundary_series_raw: np.ndarray | None = None,
+    boundary_ensemble_series_raw: np.ndarray | None = None,
     boundary_channel_names: Sequence[str] | None = None,
     member_model_id: Sequence[Any] | None = None,
     member_sample_id: Sequence[Any] | None = None,
     time_hours: Sequence[float] | None = None,
     geometry_raw: np.ndarray | None = None,
+    elevation_raw: np.ndarray | None = None,
     cell_hash: str | None = None,
     metadata: Mapping[str, Any] | None = None,
 ) -> Path:
@@ -359,8 +394,28 @@ def save_forecast_artifact(
         f.create_dataset("structural_dry_mask", data=np.asarray(structural_dry_mask, dtype=bool).reshape(n_cells))
         if boundary_series_raw is not None:
             f.create_dataset("boundary_series_raw", data=np.asarray(boundary_series_raw, dtype=np.float32))
+        if boundary_ensemble_series_raw is not None:
+            boundary_ens = np.asarray(boundary_ensemble_series_raw, dtype=np.float32)
+            if boundary_ens.ndim != 3:
+                raise ValueError(
+                    "boundary_ensemble_series_raw must have shape "
+                    "[n_reference_members, n_time, n_boundary_channels]."
+                )
+            if boundary_ens.shape[0] != ref.shape[0]:
+                raise ValueError(
+                    "boundary_ensemble_series_raw member count must match ref_members_wd; "
+                    f"got {boundary_ens.shape[0]} and {ref.shape[0]}."
+                )
+            f.create_dataset(
+                "boundary_ensemble_series_raw",
+                data=boundary_ens,
+                compression="gzip",
+                compression_opts=4,
+            )
         if geometry_raw is not None:
             f.create_dataset("geometry_raw", data=np.asarray(geometry_raw, dtype=np.float32), compression="gzip", compression_opts=4)
+        if elevation_raw is not None:
+            f.create_dataset("elevation_raw", data=np.asarray(elevation_raw, dtype=np.float32).reshape(n_cells), compression="gzip", compression_opts=4)
         _write_string_dataset(f, "boundary_channel_names", boundary_channel_names or [])
         _write_string_dataset(f, "member_model_id", member_model_id or list(range(n_members)))
         _write_string_dataset(f, "member_sample_id", member_sample_id or list(range(n_members)))
@@ -405,8 +460,12 @@ def load_forecast_artifact(path: str | Path, *, load_members: bool = True) -> Di
                     out["metadata"][key] = value
         if "boundary_series_raw" in f:
             out["boundary_series_raw"] = f["boundary_series_raw"][...]
+        if "boundary_ensemble_series_raw" in f:
+            out["boundary_ensemble_series_raw"] = f["boundary_ensemble_series_raw"][...]
         if "geometry_raw" in f:
             out["geometry_raw"] = f["geometry_raw"][...]
+        if "elevation_raw" in f:
+            out["elevation_raw"] = f["elevation_raw"][...]
         if load_members:
             out["pred_members_wd"] = f["pred_members_wd"][...].astype(np.float64)
             out["ref_members_wd"] = f["ref_members_wd"][...].astype(np.float64)
@@ -486,6 +545,40 @@ def weighted_empirical_crps_mean(
     return float(np.sum(vals * weights) / max(float(np.sum(weights)), MIN_EPS))
 
 
+def ensemble_mean_rmse(forecast_ens: np.ndarray, reference_ens: np.ndarray) -> float:
+    """RMSE between forecast and reference ensemble means over locations."""
+    forecast = np.asarray(forecast_ens, dtype=np.float64)
+    reference = np.asarray(reference_ens, dtype=np.float64)
+    if forecast.ndim != 2 or reference.ndim != 2 or forecast.shape[1] != reference.shape[1]:
+        raise ValueError("ensemble_mean_rmse expects forecast/reference [members, locations].")
+    if forecast.shape[1] == 0:
+        return 0.0
+    diff = np.mean(forecast, axis=0) - np.mean(reference, axis=0)
+    return float(np.sqrt(np.mean(diff ** 2)))
+
+
+def spread_ratio_penalty(
+    forecast_ens: np.ndarray,
+    reference_ens: np.ndarray,
+    *,
+    target_spread_ratio: float,
+) -> float:
+    """Return a CRPS-scale penalty for forecast/reference spread mismatch."""
+    forecast = np.asarray(forecast_ens, dtype=np.float64)
+    reference = np.asarray(reference_ens, dtype=np.float64)
+    if forecast.ndim != 2 or reference.ndim != 2 or forecast.shape[1] != reference.shape[1]:
+        raise ValueError("spread_ratio_penalty expects forecast/reference [members, locations].")
+    if forecast.shape[1] == 0:
+        return 0.0
+    pred_spread = float(np.mean(np.std(forecast, axis=0)))
+    ref_spread = float(np.mean(np.std(reference, axis=0)))
+    if ref_spread <= MIN_EPS:
+        return abs(pred_spread - max(float(target_spread_ratio), 0.0) * ref_spread)
+    ratio = pred_spread / ref_spread
+    # Multiplying by reference spread keeps the penalty in water-depth units.
+    return float(abs(ratio - float(target_spread_ratio)) * ref_spread)
+
+
 def _objective_value(
     forecast_ens: np.ndarray,
     reference_ens: np.ndarray,
@@ -493,21 +586,42 @@ def _objective_value(
     objective: str,
     tail_threshold_m: float,
     tail_weight: float,
+    mean_rmse_weight: float = 0.0,
+    spread_ratio_weight: float = 0.0,
+    target_spread_ratio: float = 1.0,
 ) -> float:
     objective_name = str(objective or "empirical_crps").strip().lower()
     if objective_name in {"empirical_crps", "crps"}:
-        return empirical_crps_mean(forecast_ens, reference_ens)
-    if objective_name in {"tail_weighted_crps", "twcrps"}:
-        return weighted_empirical_crps_mean(
+        base = empirical_crps_mean(forecast_ens, reference_ens)
+    elif objective_name in {"tail_weighted_crps", "twcrps"}:
+        base = weighted_empirical_crps_mean(
             forecast_ens,
             reference_ens,
             threshold_m=float(tail_threshold_m),
             tail_weight=float(tail_weight),
         )
-    raise ValueError(
-        "Unsupported rollout_calibration.optimizer.objective "
-        f"{objective!r}; expected empirical_crps or tail_weighted_crps."
-    )
+    elif objective_name in {
+        "mean_regularized_crps",
+        "spread_regularized_crps",
+        "combined_regularized_crps",
+    }:
+        base = empirical_crps_mean(forecast_ens, reference_ens)
+    else:
+        allowed = ", ".join(sorted(SUPPORTED_MBM_OBJECTIVES))
+        raise ValueError(
+            "Unsupported rollout_calibration.optimizer.objective "
+            f"{objective!r}; expected one of: {allowed}."
+        )
+    value = float(base)
+    if objective_name in {"mean_regularized_crps", "combined_regularized_crps"}:
+        value += float(mean_rmse_weight) * ensemble_mean_rmse(forecast_ens, reference_ens)
+    if objective_name in {"spread_regularized_crps", "combined_regularized_crps"}:
+        value += float(spread_ratio_weight) * spread_ratio_penalty(
+            forecast_ens,
+            reference_ens,
+            target_spread_ratio=float(target_spread_ratio),
+        )
+    return float(value)
 
 
 def apply_member_by_member_transform(
@@ -537,9 +651,14 @@ def _fit_one_bin(
     objective: str = "empirical_crps",
     tail_threshold_m: float = 0.30,
     tail_weight: float = 4.0,
+    mean_rmse_weight: float = 0.0,
+    spread_ratio_weight: float = 0.0,
+    target_spread_ratio: float = 1.0,
     multistart: bool = True,
     seed: int = 123,
     maxiter: int = 600,
+    progress_callback: Callable[[str], None] | None = None,
+    progress_interval: int = 50,
 ) -> Dict[str, Any]:
     pred = np.asarray(pred, dtype=np.float64)
     ref = np.asarray(ref, dtype=np.float64)
@@ -553,7 +672,17 @@ def _fit_one_bin(
         tuple(float(v) for v in bounds.get("gamma", (0.05, 3.0))),
     ]
 
+    score_calls = 0
+
     def score(theta: Sequence[float]) -> float:
+        nonlocal score_calls
+        score_calls += 1
+        if (
+            progress_callback is not None
+            and progress_interval > 0
+            and score_calls % int(progress_interval) == 0
+        ):
+            progress_callback(f"score_calls={score_calls} n_points={pred.shape[1]}")
         cal = apply_member_by_member_transform(
             pred,
             a_m=float(theta[0]),
@@ -567,6 +696,9 @@ def _fit_one_bin(
             objective=objective,
             tail_threshold_m=tail_threshold_m,
             tail_weight=tail_weight,
+            mean_rmse_weight=mean_rmse_weight,
+            spread_ratio_weight=spread_ratio_weight,
+            target_spread_ratio=target_spread_ratio,
         )
 
     def clip_theta(theta: Sequence[float]) -> np.ndarray:
@@ -619,6 +751,11 @@ def _fit_one_bin(
         "objective": float(best_val),
         "n_points": int(pred.shape[1]),
         "optimizer_methods": sorted(set(methods)),
+        "objective_name": str(objective),
+        "mean_rmse_weight": float(mean_rmse_weight),
+        "spread_ratio_weight": float(spread_ratio_weight),
+        "target_spread_ratio": float(target_spread_ratio),
+        "score_calls": int(score_calls),
     }
 
 def _concat_member_points(chunks: List[np.ndarray]) -> np.ndarray:
@@ -684,7 +821,12 @@ def fit_crps_member_by_member_from_artifacts(
     objective: str = "empirical_crps",
     tail_threshold_m: float = 0.30,
     tail_weight: float = 4.0,
+    mean_rmse_weight: float = 0.0,
+    spread_ratio_weight: float = 0.0,
+    target_spread_ratio: float = 1.0,
     multistart: bool = True,
+    progress_callback: Callable[[str], None] | None = None,
+    progress_interval: int = 50,
 ) -> Dict[str, Any]:
     """Fit CRPS-optimized MBM coefficients per lead-time x wet-frequency bin."""
     bins.validate()
@@ -739,33 +881,64 @@ def fit_crps_member_by_member_from_artifacts(
 
     objective_name = str(objective)
     bounds = dict(bounds or {"a_m": (-2.0, 2.0), "beta": (0.2, 2.5), "gamma": (0.05, 3.0)})
-    global_fit = _fit_one_bin(
-        _concat_member_points(global_pred),
-        _concat_member_points(global_ref),
-        bounds=bounds,
-        objective=objective_name,
-        tail_threshold_m=tail_threshold_m,
-        tail_weight=tail_weight,
-        multistart=multistart,
-        seed=seed,
-    )
-    lead_fits: List[Dict[str, Any]] = []
+    min_points = int(min_fit_points_per_bin)
+    lead_point_counts = np.sum(counts, axis=1)
+    needs_lead_fit = np.any(counts < min_points, axis=1) & (lead_point_counts >= min_points)
+    needs_global_fit = bool(np.any((counts < min_points) & (lead_point_counts[:, None] < min_points)))
+    global_fit: Dict[str, Any] | None = None
+    if needs_global_fit:
+        if progress_callback is not None:
+            progress_callback("fit global fallback start")
+        global_fit = _fit_one_bin(
+            _concat_member_points(global_pred),
+            _concat_member_points(global_ref),
+            bounds=bounds,
+            objective=objective_name,
+            tail_threshold_m=tail_threshold_m,
+            tail_weight=tail_weight,
+            mean_rmse_weight=mean_rmse_weight,
+            spread_ratio_weight=spread_ratio_weight,
+            target_spread_ratio=target_spread_ratio,
+            multistart=multistart,
+            seed=seed,
+            progress_callback=(
+                (lambda message: progress_callback(f"global {message}"))
+                if progress_callback is not None
+                else None
+            ),
+            progress_interval=progress_interval,
+        )
+        if progress_callback is not None:
+            progress_callback("fit global fallback done")
+    lead_fits: List[Dict[str, Any] | None] = [None for _ in range(n_l)]
     for lead_idx in range(n_l):
+        if not bool(needs_lead_fit[lead_idx]):
+            continue
         pred_l = _concat_member_points(lead_pred[lead_idx])
         ref_l = _concat_member_points(lead_ref[lead_idx])
-        if pred_l.shape[1] >= int(min_fit_points_per_bin):
-            lead_fits.append(_fit_one_bin(
-                pred_l,
-                ref_l,
-                bounds=bounds,
-                objective=objective_name,
-                tail_threshold_m=tail_threshold_m,
-                tail_weight=tail_weight,
-                multistart=multistart,
-                seed=seed + lead_idx + 1,
-            ))
-        else:
-            lead_fits.append({**global_fit, "fallback": "global"})
+        if progress_callback is not None:
+            progress_callback(f"fit lead fallback {lead_idx}/{n_l - 1} start n_points={pred_l.shape[1]}")
+        lead_fits[lead_idx] = _fit_one_bin(
+            pred_l,
+            ref_l,
+            bounds=bounds,
+            objective=objective_name,
+            tail_threshold_m=tail_threshold_m,
+            tail_weight=tail_weight,
+            mean_rmse_weight=mean_rmse_weight,
+            spread_ratio_weight=spread_ratio_weight,
+            target_spread_ratio=target_spread_ratio,
+            multistart=multistart,
+            seed=seed + lead_idx + 1,
+            progress_callback=(
+                (lambda message, idx=lead_idx: progress_callback(f"lead {idx} {message}"))
+                if progress_callback is not None
+                else None
+            ),
+            progress_interval=progress_interval,
+        )
+        if progress_callback is not None:
+            progress_callback(f"fit lead fallback {lead_idx}/{n_l - 1} done")
 
     coeff = np.zeros((n_l, n_w, 3), dtype=np.float64)
     objective_values = np.full((n_l, n_w), np.nan, dtype=np.float64)
@@ -776,6 +949,10 @@ def fit_crps_member_by_member_from_artifacts(
             pred_b = _concat_member_points(pred_chunks[lead_idx][wet_idx])
             ref_b = _concat_member_points(ref_chunks[lead_idx][wet_idx])
             if pred_b.shape[1] >= int(min_fit_points_per_bin):
+                if progress_callback is not None:
+                    progress_callback(
+                        f"fit lead bin {lead_idx}/{n_l - 1} wet bin {wet_idx}/{n_w - 1} start n_points={pred_b.shape[1]}"
+                    )
                 fit = _fit_one_bin(
                     pred_b,
                     ref_b,
@@ -783,15 +960,64 @@ def fit_crps_member_by_member_from_artifacts(
                     objective=objective_name,
                     tail_threshold_m=tail_threshold_m,
                     tail_weight=tail_weight,
+                    mean_rmse_weight=mean_rmse_weight,
+                    spread_ratio_weight=spread_ratio_weight,
+                    target_spread_ratio=target_spread_ratio,
                     multistart=multistart,
                     seed=seed + 1000 * lead_idx + wet_idx,
+                    progress_callback=(
+                        (
+                            lambda message, lidx=lead_idx, widx=wet_idx: progress_callback(
+                                f"lead {lidx} wet {widx} {message}"
+                            )
+                        )
+                        if progress_callback is not None
+                        else None
+                    ),
+                    progress_interval=progress_interval,
                 )
-            elif lead_fits[lead_idx].get("n_points", 0) >= int(min_fit_points_per_bin):
+                if progress_callback is not None:
+                    progress_callback(
+                        f"fit lead bin {lead_idx}/{n_l - 1} wet bin {wet_idx}/{n_w - 1} done"
+                    )
+            elif lead_fits[lead_idx] is not None and lead_fits[lead_idx].get("n_points", 0) >= min_points:
                 fit = lead_fits[lead_idx]
                 fallback[lead_idx][wet_idx] = "lead_all_wet_frequency"
+                if progress_callback is not None:
+                    progress_callback(
+                        f"fit lead bin {lead_idx}/{n_l - 1} wet bin {wet_idx}/{n_w - 1} fallback=lead_all_wet_frequency n_points={pred_b.shape[1]}"
+                    )
             else:
+                if global_fit is None:
+                    if progress_callback is not None:
+                        progress_callback("fit global fallback start")
+                    global_fit = _fit_one_bin(
+                        _concat_member_points(global_pred),
+                        _concat_member_points(global_ref),
+                        bounds=bounds,
+                        objective=objective_name,
+                        tail_threshold_m=tail_threshold_m,
+                        tail_weight=tail_weight,
+                        mean_rmse_weight=mean_rmse_weight,
+                        spread_ratio_weight=spread_ratio_weight,
+                        target_spread_ratio=target_spread_ratio,
+                        multistart=multistart,
+                        seed=seed,
+                        progress_callback=(
+                            (lambda message: progress_callback(f"global {message}"))
+                            if progress_callback is not None
+                            else None
+                        ),
+                        progress_interval=progress_interval,
+                    )
+                    if progress_callback is not None:
+                        progress_callback("fit global fallback done")
                 fit = global_fit
                 fallback[lead_idx][wet_idx] = "global"
+                if progress_callback is not None:
+                    progress_callback(
+                        f"fit lead bin {lead_idx}/{n_l - 1} wet bin {wet_idx}/{n_w - 1} fallback=global n_points={pred_b.shape[1]}"
+                    )
             coeff[lead_idx, wet_idx, :] = [fit["a_m"], fit["beta"], fit["gamma"]]
             objective_values[lead_idx, wet_idx] = float(fit.get("objective", np.nan))
             n_points[lead_idx, wet_idx] = int(pred_b.shape[1])
@@ -811,6 +1037,9 @@ def fit_crps_member_by_member_from_artifacts(
             "objective": objective_name,
             "tail_threshold_m": float(tail_threshold_m),
             "tail_weight": float(tail_weight),
+            "mean_rmse_weight": float(mean_rmse_weight),
+            "spread_ratio_weight": float(spread_ratio_weight),
+            "target_spread_ratio": float(target_spread_ratio),
             "multistart": bool(multistart),
             "method": "Powell" if minimize is not None else "grid_search",
             "min_fit_points_per_bin": int(min_fit_points_per_bin),

@@ -477,6 +477,9 @@ def main() -> int:
                 objective=str(_nested_get(optimizer_cfg, "objective", default="empirical_crps")),
                 tail_threshold_m=float(_nested_get(optimizer_cfg, "tail_threshold_m", default=0.30)),
                 tail_weight=float(_nested_get(optimizer_cfg, "tail_weight", default=4.0)),
+                mean_rmse_weight=float(_nested_get(optimizer_cfg, "mean_rmse_weight", default=0.0)),
+                spread_ratio_weight=float(_nested_get(optimizer_cfg, "spread_ratio_weight", default=0.0)),
+                target_spread_ratio=float(_nested_get(optimizer_cfg, "target_spread_ratio", default=1.0)),
                 multistart=bool(_nested_get(optimizer_cfg, "multistart", default=True)),
             )
         calibration_dir = Path(config.rollout.out_dir) / "calibration"
