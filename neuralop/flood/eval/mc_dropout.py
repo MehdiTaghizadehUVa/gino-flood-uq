@@ -247,15 +247,17 @@ def evaluate_mc_dropout_one_step(
         raise ValueError("evaluate_mc_dropout_one_step called with uq.method not set to mc_dropout.")
 
     model = model.to(device)
+    if data_processor is not None:
+        data_processor = data_processor.to(device)
+        # DataProcessor.eval() also calls model.eval() on wrapped models, so it
+        # must run before reactivating dropout for MC-dropout inference.
+        data_processor.eval()
     dropout_count = enable_mc_dropout_only(model)
     if dropout_count <= 0:
         raise ValueError(
             "MC dropout requested but no torch.nn.Dropout modules are present in the loaded model. "
             "Check gino.fno_channel_mlp_dropout and checkpoint metadata."
         )
-    if data_processor is not None:
-        data_processor = data_processor.to(device)
-        data_processor.eval()
 
     structural_policy = str(_cfg_get(_section(config, "structural_dry"), "policy", "legacy_full_domain")).strip().lower()
     target_variables = list(_cfg_get(_section(config, "data"), "target_variables", ["wd", "vx", "vy"]))

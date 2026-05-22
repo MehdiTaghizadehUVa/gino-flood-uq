@@ -109,7 +109,11 @@ if not isinstance(root, dict):
 root.setdefault("rollout", {})["out_dir"] = out_dir
 dest.parent.mkdir(parents=True, exist_ok=True)
 with dest.open("w", encoding="utf-8") as f:
-    yaml.safe_dump(payload, f, sort_keys=False)
+    try:
+        yaml.safe_dump(payload, f, sort_keys=False)
+    except TypeError:
+        # UVA system Python may provide PyYAML before sort_keys support.
+        yaml.safe_dump(payload, f)
 PY
 
 EVAL_ARGS=(

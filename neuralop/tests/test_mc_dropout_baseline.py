@@ -9,6 +9,7 @@ from neuralop.flood.eval.mc_dropout import (
     evaluate_mc_dropout_one_step,
     validate_mc_dropout_config,
 )
+from neuralop.flood.processing.wv_impl import FloodGINODataProcessor
 
 
 class _MeanSquaredLoss:
@@ -24,6 +25,19 @@ class _StrictMeanSquaredLoss:
     def __call__(self, pred, *, y, structural_dry_mask=None):
         del structural_dry_mask
         return ((pred - y) ** 2).mean()
+
+
+class _FloodProcessorDropoutModel(nn.Module):
+    def __init__(self, p=0.5):
+        super().__init__()
+        self.dropout = nn.Dropout(p=p)
+        self.norm = nn.BatchNorm1d(4)
+
+    def forward(self, input_geom, latent_queries, output_queries, x, **kwargs):
+        del input_geom, latent_queries, output_queries, kwargs
+        # Touch BatchNorm so the test proves MC dropout does not globally train the model.
+        _ = self.norm(torch.zeros(x.shape[0], 4, device=x.device))
+        return self.dropout(x[..., -1:])
 
 
 class _DropoutModel(nn.Module):
@@ -96,7 +110,10 @@ def test_enable_mc_dropout_only_keeps_non_dropout_modules_eval():
 
 
 def test_mc_one_step_eval_reproducible_but_stochastic():
-    cfg = _cfg(gino={"fno_channel_mlp_dropout": 0.5}, uq={"mc_dropout": {"dropout_probability": 0.5}})
+    cfg = _cfg(
+        gino={"fno_channel_mlp_dropout": 0.5},
+        uq={"mc_dropout": {"dropout_probability": 0.5}},
+    )
     model = _DropoutModel(p=0.5)
     sample = {
         "x": torch.ones(1, 64, 1),
@@ -153,6 +170,41 @@ def test_mc_one_step_eval_passes_only_loss_kwargs():
     )
 
     assert "test_strict_l2" in metrics
+
+
+def test_mc_one_step_eval_keeps_dropout_active_after_wrapped_processor_eval():
+    cfg = _cfg(
+        gino={"fno_channel_mlp_dropout": 0.5},
+        uq={"mc_dropout": {"dropout_probability": 0.5}},
+    )
+    model = _FloodProcessorDropoutModel(p=0.5)
+    processor = FloodGINODataProcessor(device="cpu", target_norm=None, inverse_test=True)
+    processor.wrap(model)
+    n_cells = 8
+    sample = {
+        "dynamic": torch.ones(1, 3, n_cells, 1),
+        "boundary": torch.zeros(1, 3, n_cells, 1),
+        "static": torch.zeros(1, n_cells, 1),
+        "geometry": torch.zeros(1, n_cells, 2),
+        "query_points": torch.zeros(1, 4, 4, 2),
+        "target": torch.zeros(1, n_cells, 1),
+        "structural_dry_mask": torch.tensor([False, True] * (n_cells // 2)),
+    }
+
+    metrics = evaluate_mc_dropout_one_step(
+        model=model,
+        data_processor=processor,
+        data_loader=[sample],
+        eval_losses={"l2": _MeanSquaredLoss()},
+        config=cfg,
+        device=torch.device("cpu"),
+        logger=__import__("logging").getLogger("test_mc_dropout_processor"),
+    )
+
+    assert model.training is False
+    assert model.norm.training is False
+    assert model.dropout.training is True
+    assert metrics["test_mc_spread_mean"] > 0.0
 
 
 def test_rollout_uses_dropout_only_mode_and_clamps_before_feedback():
