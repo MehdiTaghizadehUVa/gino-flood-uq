@@ -26,9 +26,22 @@ if [[ "${DRY_RUN}" == "1" ]]; then
   exit 0
 fi
 
-curl -fsSk --max-time 15 "https://${FGN_SITE_HOSTNAME}/api/health" >/dev/null
-curl -fsSk --max-time 30 "https://${FGN_SITE_HOSTNAME}/api/model-bundle-health" >/dev/null
-curl -fsSk --max-time 15 "https://${FGN_SITE_HOSTNAME}/" >/dev/null
+https_check() {
+  local url="$1" max_attempts="${2:-10}" delay="${3:-5}" timeout="${4:-15}"
+  local attempt=0
+  until curl -fsSk --max-time "${timeout}" "${url}" >/dev/null 2>&1; do
+    attempt=$(( attempt + 1 ))
+    if (( attempt >= max_attempts )); then
+      curl -fsSk --max-time "${timeout}" "${url}" >/dev/null
+    fi
+    log "HTTPS not ready (attempt ${attempt}/${max_attempts}): ${url} — retrying in ${delay}s"
+    sleep "${delay}"
+  done
+}
+
+https_check "https://${FGN_SITE_HOSTNAME}/api/health" 12 5 15
+https_check "https://${FGN_SITE_HOSTNAME}/api/model-bundle-health" 8 5 30
+https_check "https://${FGN_SITE_HOSTNAME}/" 8 5 15
 
 compose ps --status running api worker-gpu frontend redis postgres proxy >/dev/null
 compose exec -T redis redis-cli ping | grep -q PONG
