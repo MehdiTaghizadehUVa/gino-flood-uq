@@ -49,6 +49,14 @@ jobs:
             echo "FGN_CLEANUP_IMAGE=${namespace}/fgn-serving-python:${sha}"
             echo "FGN_FRONTEND_IMAGE=${namespace}/fgn-serving-frontend:${sha}"
           } >> "$GITHUB_ENV"
+      - name: Point to production .env
+        run: |
+          env_file="${HOME}/gino-flood-uq/deployment/fgn-serving/.env"
+          if [[ ! -f "${env_file}" ]]; then
+            echo "ERROR: production .env not found at ${env_file}" >&2
+            exit 1
+          fi
+          echo "ENV_FILE=${env_file}" >> "$GITHUB_ENV"
       - name: Smoke-only check
         if: ${{ inputs.smoke_only }}
         run: deployment/fgn-serving/scripts/smoke_lab.sh
