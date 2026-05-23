@@ -57,6 +57,7 @@ jobs:
             exit 1
           fi
           echo "ENV_FILE=${env_file}" >> "$GITHUB_ENV"
+          echo "FGN_ENV_FILE=${env_file}" >> "$GITHUB_ENV"
       - name: Smoke-only check
         if: ${{ inputs.smoke_only }}
         run: deployment/fgn-serving/scripts/smoke_lab.sh

@@ -1,14 +1,7 @@
 name: Build documentation
 # Action adapted from https://github.com/tensorly/tensorly
 
-"on":
-  push:
-    branches: [main]
-    paths:
-      - "doc/**"
-      - "neuralop/**"
-      - "pyproject.toml"
-      - ".github/workflows/build_doc_dev.yml"
+on:
   pull_request:
     paths:
       - "doc/**"

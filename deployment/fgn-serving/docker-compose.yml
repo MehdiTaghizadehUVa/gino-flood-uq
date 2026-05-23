@@ -1,5 +1,5 @@
 x-fgn-env: &fgn-env
-  - path: .env
+  - path: ${FGN_ENV_FILE:-.env}
     required: false
 
 services:

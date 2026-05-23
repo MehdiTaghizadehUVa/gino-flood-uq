@@ -37,7 +37,8 @@ deployment_root() {
 }
 
 compose() {
-  (cd "${DEPLOY_DIR}" && docker compose -f docker-compose.yml "$@")
+  local env_file="${ENV_FILE:-${DEPLOY_DIR}/.env}"
+  (cd "${DEPLOY_DIR}" && FGN_ENV_FILE="${env_file}" docker compose -f docker-compose.yml "$@")
 }
 
 write_json_record() {
