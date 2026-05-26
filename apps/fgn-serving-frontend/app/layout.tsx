@@ -1,5 +1,7 @@
+import "./globals.css";
+
 export const metadata = {
-  title: "Coastal FGN UQ",
+  title: "Coastal Flood-UQ Console",
   description: "Gated research flood inference with calibrated uncertainty"
 };
 

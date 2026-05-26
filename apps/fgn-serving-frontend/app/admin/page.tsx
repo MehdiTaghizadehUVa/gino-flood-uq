@@ -1,6 +1,12 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
+import { Activity, Database, ShieldCheck, UserPlus, Users } from "lucide-react";
+import { AppShell } from "../components/AppShell";
+import { DataTable } from "../components/DataTable";
+import { MetricCard } from "../components/MetricCard";
+import { PageHeader } from "../components/PageHeader";
+import { StatusBadge, statusTone } from "../components/StatusBadge";
 
 type UserRow = { email: string; is_admin: boolean; disclaimer_acknowledged?: boolean };
 type RunRow = { run_id: string; label?: string; status: string; pinned: boolean; created_at: string };
@@ -48,6 +54,7 @@ export default function AdminPage() {
   const [email, setEmail] = useState("");
   const [admin, setAdmin] = useState(false);
   const [message, setMessage] = useState("");
+  const [showDeletedRuns, setShowDeletedRuns] = useState(false);
 
   const refresh = useCallback(async () => {
     const [usersRes, runsRes, candidatesRes] = await Promise.all([
@@ -96,36 +103,62 @@ export default function AdminPage() {
     await refresh();
   }
 
+  const activeRuns = runs.filter((run) => showDeletedRuns || run.status !== "DELETED");
+  const newCandidates = candidates.filter((candidate) => candidate.status === "NEW").length;
+  const adminUsers = users.filter((user) => user.is_admin).length;
+
   return (
-    <main className="shell">
-      <a href="/">Back to console</a>
-      <h1>FGN Serving Admin</h1>
-      <a href="/admin/monitoring" style={{marginLeft: 12}}>Monitoring Dashboard →</a>
+    <AppShell active="admin">
+    <div className="admin-shell">
+      <PageHeader
+        kicker="Administration"
+        title="Research server dashboard"
+        subtitle="Manage collaborators, retraining-review items, and active run operations from one place."
+        actions={<a className="button secondary" href="/admin/monitoring">Monitoring dashboard</a>}
+      />
+      <section className="metric-grid">
+        <MetricCard label="Allowed users" value={users.length} detail={`${adminUsers} admin${adminUsers === 1 ? "" : "s"}`} icon={<Users size={17} />} />
+        <MetricCard label="Review queue" value={newCandidates} detail="New retraining-review items" icon={<Database size={17} />} />
+        <MetricCard label="Visible runs" value={activeRuns.length} detail={showDeletedRuns ? "Including deleted history" : "Deleted runs hidden"} icon={<Activity size={17} />} />
+        <MetricCard label="Access mode" value="Allowlist" detail="Google OAuth + approved emails" icon={<ShieldCheck size={17} />} />
+      </section>
       {message && <p className="message">{message}</p>}
       <section className="panel">
-        <h2>Allowlist</h2>
+        <div className="card-header">
+          <div>
+            <p className="eyebrow">Access</p>
+            <h2 className="section-title">Allowlist</h2>
+            <p className="section-subtitle">Only approved collaborators can create runs or inspect artifacts.</p>
+          </div>
+        </div>
         <div className="add-row">
           <input value={email} onChange={(e) => setEmail(e.target.value)} placeholder="researcher@example.edu" />
           <label><input type="checkbox" checked={admin} onChange={(e) => setAdmin(e.target.checked)} /> admin</label>
-          <button onClick={addUser} disabled={!email.trim()}>Save</button>
+          <button className="primary" onClick={addUser} disabled={!email.trim()}><UserPlus size={15} /> Save</button>
         </div>
-        <table>
+        <DataTable>
           <thead><tr><th>Email</th><th>Admin</th><th>Disclaimer</th><th></th></tr></thead>
           <tbody>
             {users.map((user) => (
               <tr key={user.email}>
                 <td>{user.email}</td>
-                <td>{user.is_admin ? "yes" : "no"}</td>
-                <td>{user.disclaimer_acknowledged ? "accepted" : "pending"}</td>
-                <td><button onClick={() => removeUser(user.email)}>Remove</button></td>
+                <td><StatusBadge tone={user.is_admin ? "active" : "neutral"}>{user.is_admin ? "Admin" : "User"}</StatusBadge></td>
+                <td><StatusBadge tone={user.disclaimer_acknowledged ? "success" : "warning"}>{user.disclaimer_acknowledged ? "Accepted" : "Pending"}</StatusBadge></td>
+                <td><button className="danger" onClick={() => removeUser(user.email)}>Remove</button></td>
               </tr>
             ))}
           </tbody>
-        </table>
+        </DataTable>
       </section>
       <section className="panel">
-        <h2>Retraining Review Items</h2>
-        <table>
+        <div className="card-header">
+          <div>
+            <p className="eyebrow">Monitoring</p>
+            <h2 className="section-title">Retraining-review items</h2>
+            <p className="section-subtitle">Candidate packages preserved for later high-fidelity review.</p>
+          </div>
+        </div>
+        <DataTable>
           <thead><tr><th>Run</th><th>Owner</th><th>Selection score</th><th>Status</th><th>Reason</th><th>Actions</th></tr></thead>
           <tbody>
             {candidates.map((candidate) => (
@@ -133,7 +166,7 @@ export default function AdminPage() {
                 <td><a href={`/runs/${candidate.run_id}`}>{candidate.run_id.slice(0, 10)}</a></td>
                 <td>{candidate.owner_email}</td>
                 <td>{candidate.candidate_score.toFixed(2)}</td>
-                <td>{formatCandidateStatus(candidate.status)}</td>
+                <td><StatusBadge tone={statusTone(candidate.status)}>{formatCandidateStatus(candidate.status)}</StatusBadge></td>
                 <td>{formatCandidateReason(candidate.reason)}</td>
                 <td>
                   <button onClick={() => candidateAction(candidate.candidate_id, "REVIEWED")}>Review</button>
@@ -147,17 +180,27 @@ export default function AdminPage() {
               <tr><td colSpan={6}>No retraining-review items yet.</td></tr>
             )}
           </tbody>
-        </table>
+        </DataTable>
       </section>
       <section className="panel">
-        <h2>Runs</h2>
-        <table>
+        <div className="card-header">
+          <div>
+            <p className="eyebrow">Operations</p>
+            <h2 className="section-title">Runs</h2>
+            <p className="section-subtitle">Deleted runs are hidden by default to keep operational history focused.</p>
+          </div>
+          <label className="toggle-row">
+            <input type="checkbox" checked={showDeletedRuns} onChange={(event) => setShowDeletedRuns(event.target.checked)} />
+            Show deleted runs
+          </label>
+        </div>
+        <DataTable>
           <thead><tr><th>Run</th><th>Status</th><th>Created</th><th>Actions</th></tr></thead>
           <tbody>
-            {runs.map((run) => (
+            {activeRuns.map((run) => (
               <tr key={run.run_id}>
                 <td>{run.label || run.run_id.slice(0, 10)}{run.pinned ? " · pinned" : ""}</td>
-                <td>{run.status}</td>
+                <td><StatusBadge tone={statusTone(run.status)}>{run.status}</StatusBadge></td>
                 <td>{new Date(run.created_at).toLocaleString()}</td>
                 <td>
                   <button onClick={() => runAction(run.run_id, run.pinned ? "unpin" : "pin")}>{run.pinned ? "Unpin" : "Pin"}</button>
@@ -167,21 +210,18 @@ export default function AdminPage() {
               </tr>
             ))}
           </tbody>
-        </table>
+        </DataTable>
       </section>
       <style jsx>{`
-        .shell { max-width: 1120px; margin: 0 auto; padding: 28px 22px; font-family: ui-sans-serif, system-ui; color: #10231f; }
-        h1 { font-size: 28px; }
-        .panel { border: 1px solid #cbd5e1; background: #f8fafc; padding: 18px; margin-top: 16px; }
+        .admin-shell { display: grid; gap: 16px; }
+        .panel { padding: 18px; }
         .add-row { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
-        input { border: 1px solid #cbd5e1; padding: 9px; min-width: 260px; }
-        button { border: 0; background: #0f766e; color: white; padding: 8px 12px; margin-right: 8px; font-weight: 800; cursor: pointer; }
-        button:disabled { opacity: 0.5; cursor: not-allowed; }
-        .message { padding: 10px; background: #e0f2fe; color: #0c4a6e; }
-        table { width: 100%; border-collapse: collapse; margin-top: 14px; }
-        th, td { text-align: left; border-bottom: 1px solid #e2e8f0; padding: 10px; font-size: 14px; }
-        a { color: #0f766e; font-weight: 800; }
+        input { border: 1px solid var(--border); border-radius: 6px; padding: 9px; min-width: 260px; }
+        .message { padding: 10px; border: 1px solid #9bd4f5; border-radius: 6px; background: #e0f2fe; color: #0c4a6e; }
+        .toggle-row { display: inline-flex; gap: 8px; align-items: center; color: var(--muted); font-size: 13px; font-weight: 700; }
+        a { color: var(--accent); font-weight: 800; }
       `}</style>
-    </main>
+    </div>
+    </AppShell>
   );
 }

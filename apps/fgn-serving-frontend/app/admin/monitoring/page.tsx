@@ -1,6 +1,12 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
+import { Activity, Database, LineChart, ShieldCheck } from "lucide-react";
+import { AppShell } from "../../components/AppShell";
+import { DataTable } from "../../components/DataTable";
+import { MetricCard } from "../../components/MetricCard";
+import { PageHeader } from "../../components/PageHeader";
+import { StatusBadge } from "../../components/StatusBadge";
 
 type DriftResult = {
   test_id: string;
@@ -110,14 +116,36 @@ export default function MonitoringDashboard() {
 
   useEffect(() => { refresh().catch(() => undefined); }, [refresh]);
 
+  const persistentSignals = drift?.n_persistent_detected ?? 0;
+  const latestSignals = drift?.n_detected ?? 0;
+  const totalComparisons = hecras?.total ?? 0;
+  const reviewItems = trends?.total_candidates ?? 0;
+
   return (
-    <main className="shell">
-      <a href="/admin">← Back to Admin</a>
-      <h1>Monitoring Dashboard</h1>
+    <AppShell active="monitoring">
+    <div className="monitoring-shell">
+      <PageHeader
+        kicker="Monitoring"
+        title="Drift and review dashboard"
+        subtitle="Population signals, selection trends, and HEC-RAS comparison records for research review."
+        actions={<a className="button secondary" href="/admin">Admin dashboard</a>}
+      />
+      <section className="metric-grid">
+        <MetricCard label="Persistent signals" value={persistentSignals} detail="Require repeated detection" icon={<ShieldCheck size={17} />} />
+        <MetricCard label="Latest signals" value={latestSignals} detail="Most recent drift run" icon={<Activity size={17} />} />
+        <MetricCard label="Review items" value={reviewItems} detail="Preserved candidate packages" icon={<Database size={17} />} />
+        <MetricCard label="HEC-RAS comparisons" value={totalComparisons} detail="Completed high-fidelity records" icon={<LineChart size={17} />} />
+      </section>
       {error && <p className="error">{error}</p>}
 
       <section className="panel">
-        <h2>Population Drift Status</h2>
+        <div className="card-header">
+          <div>
+            <p className="eyebrow">Population monitoring</p>
+            <h2 className="section-title">Drift status</h2>
+            <p className="section-subtitle">These signals describe recent submission patterns, not proof of model error.</p>
+          </div>
+        </div>
         {drift ? (
           <>
             <div className="stats-row">
@@ -135,7 +163,7 @@ export default function MonitoringDashboard() {
               </div>
             </div>
             <p>{drift.message || "No drift signals detected."}</p>
-            <table>
+            <DataTable>
               <thead>
                 <tr><th>Test</th><th>Monitored quantity</th><th>Signal</th><th>Statistic</th><th>Window</th></tr>
               </thead>
@@ -144,7 +172,11 @@ export default function MonitoringDashboard() {
                   <tr key={r.test_id}>
                     <td>{DRIFT_TEST_LABELS[r.test_type] ?? formatStatusLabel(r.test_type)}</td>
                     <td>{formatDescriptorLabel(r.descriptor_name)}</td>
-                    <td>{r.persistent_drift_detected ? "persistent" : r.drift_detected ? "latest" : "none"}</td>
+                    <td>
+                      <StatusBadge tone={r.persistent_drift_detected ? "danger" : r.drift_detected ? "warning" : "neutral"}>
+                        {r.persistent_drift_detected ? "Persistent" : r.drift_detected ? "Latest" : "None"}
+                      </StatusBadge>
+                    </td>
                     <td>{r.test_statistic.toFixed(3)}</td>
                     <td>{r.n_observations ?? "—"}</td>
                   </tr>
@@ -153,7 +185,7 @@ export default function MonitoringDashboard() {
                   <tr><td colSpan={5}>No drift-runner results yet.</td></tr>
                 )}
               </tbody>
-            </table>
+            </DataTable>
           </>
         ) : (
           <p className="loading">Loading drift status…</p>
@@ -161,7 +193,13 @@ export default function MonitoringDashboard() {
       </section>
 
       <section className="panel">
-        <h2>Retraining Review Trends</h2>
+        <div className="card-header">
+          <div>
+            <p className="eyebrow">Review queue</p>
+            <h2 className="section-title">Selection trends</h2>
+            <p className="section-subtitle">Review items are events preserved for later high-fidelity simulation and training-set review.</p>
+          </div>
+        </div>
         {trends ? (
           <>
             <div className="stats-row">
@@ -195,7 +233,7 @@ export default function MonitoringDashboard() {
               </>
             )}
             <h3>Recent Review Items</h3>
-            <table>
+            <DataTable>
               <thead>
                 <tr><th>Run</th><th>Selection score</th><th>Status</th><th>Created</th></tr>
               </thead>
@@ -212,7 +250,7 @@ export default function MonitoringDashboard() {
                   <tr><td colSpan={4}>No retraining-review items yet.</td></tr>
                 )}
               </tbody>
-            </table>
+            </DataTable>
           </>
         ) : (
           <p className="loading">Loading trends…</p>
@@ -220,11 +258,17 @@ export default function MonitoringDashboard() {
       </section>
 
       <section className="panel">
-        <h2>HEC-RAS Comparison Summary</h2>
+        <div className="card-header">
+          <div>
+            <p className="eyebrow">High-fidelity loop</p>
+            <h2 className="section-title">HEC-RAS comparison summary</h2>
+            <p className="section-subtitle">Signed differences are reported after an admin attaches a completed HEC-RAS result.</p>
+          </div>
+        </div>
         {hecras ? (
           <>
             <p>{hecras.total} completed HEC-RAS comparison record(s)</p>
-            <table>
+            <DataTable>
               <thead>
                 <tr><th>Review item</th><th>Run</th><th>Leading differences</th><th>Created</th></tr>
               </thead>
@@ -247,7 +291,7 @@ export default function MonitoringDashboard() {
                   <tr><td colSpan={4}>No HEC-RAS comparison records yet.</td></tr>
                 )}
               </tbody>
-            </table>
+            </DataTable>
           </>
         ) : (
           <p className="loading">Loading HEC-RAS errors…</p>
@@ -255,12 +299,11 @@ export default function MonitoringDashboard() {
       </section>
 
       <style jsx>{`
-        .shell { max-width: 1120px; margin: 0 auto; padding: 28px 22px; font-family: ui-sans-serif, system-ui; color: #10231f; }
-        h1 { font-size: 28px; }
+        .monitoring-shell { display: grid; gap: 16px; }
         h2 { font-size: 20px; margin-bottom: 8px; }
         h3 { font-size: 16px; margin-top: 16px; }
-        .panel { border: 1px solid #cbd5e1; background: #f8fafc; padding: 18px; margin-top: 16px; }
-        .error { padding: 10px; background: #fef2f2; color: #991b1b; }
+        .panel { padding: 18px; }
+        .error { padding: 10px; border: 1px solid #fecaca; border-radius: 6px; background: #fef2f2; color: #991b1b; }
         .loading { color: #64748b; font-style: italic; }
         .stats-row { display: flex; gap: 24px; flex-wrap: wrap; }
         .stat { display: flex; flex-direction: column; align-items: center; padding: 12px 20px; background: white; border: 1px solid #e2e8f0; min-width: 100px; }
@@ -270,11 +313,9 @@ export default function MonitoringDashboard() {
         .stat-label { font-size: 12px; color: #64748b; text-transform: uppercase; margin-top: 4px; }
         .chip-row { display: flex; flex-wrap: wrap; gap: 8px; margin: 8px 0 12px; }
         .chip { background: #ecfdf5; color: #065f46; border: 1px solid #99f6e4; padding: 6px 10px; font-size: 12px; font-weight: 800; }
-        table { width: 100%; border-collapse: collapse; margin-top: 14px; }
-        th, td { text-align: left; border-bottom: 1px solid #e2e8f0; padding: 10px; font-size: 14px; }
-        a { color: #0f766e; font-weight: 800; }
-        button { border: 0; background: #0f766e; color: white; padding: 8px 12px; margin-right: 8px; font-weight: 800; cursor: pointer; }
+        a { color: var(--accent); font-weight: 800; }
       `}</style>
-    </main>
+    </div>
+    </AppShell>
   );
 }

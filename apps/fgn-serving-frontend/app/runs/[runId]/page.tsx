@@ -2,6 +2,20 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useParams } from "next/navigation";
+import { ArrowLeft, Pin, Trash2, XCircle } from "lucide-react";
+import { AppShell } from "../../components/AppShell";
+import { ArtifactDrawer } from "../../components/ArtifactDrawer";
+import { RunProgress } from "../../components/RunProgress";
+import { CellInspector } from "../../components/run-detail/CellInspector";
+import { RunHeader } from "../../components/run-detail/RunHeader";
+import {
+  CompareTab,
+  DriversTab,
+  HazardTab,
+  RunDetailTabs,
+  UncertaintyTab
+} from "../../components/run-detail/RunTabs";
+import { TimePlayer } from "../../components/run-detail/TimePlayer";
 
 // A run created in the SPA is visible to /api/runs/{id} only after the
 // orchestrator finishes its initial repository write. The first one or two
@@ -1840,60 +1854,43 @@ export default function RunDetails() {
   ].filter((tile) => artifacts.some((artifact) => artifact.artifact_id === tile.id));
 
   return (
-    <main className="shell">
-      <a className="back" href="/">← Back to runs</a>
-      <header className="hero">
-        <div>
-          <h1>Run {run?.label || runId.slice(0, 10)}</h1>
-          {run && (
-            <p className="meta">
-              <span className={`status status-${run.status}`}>{run.status}</span>
-              <span> · created {new Date(run.created_at).toLocaleString()}</span>
-              {run.pinned && <span className="pin"> · pinned</span>}
-            </p>
-          )}
-        </div>
-        {run && (
-          <div className="hero-actions" aria-label="Run actions">
-            {!TERMINAL_STATUSES.has(run.status) && (
-              <button type="button" className="action-button danger" onClick={cancelRun} disabled={actionBusy}>
-                Cancel
-              </button>
-            )}
-            {TERMINAL_STATUSES.has(run.status) && (
-              <button type="button" className="action-button danger" onClick={deleteRun} disabled={actionBusy}>
-                Delete from history
-              </button>
-            )}
-            {me?.is_admin && (
-              <button type="button" className="action-button" onClick={togglePin} disabled={actionBusy}>
-                {run.pinned ? "Unpin" : "Pin"}
-              </button>
-            )}
-          </div>
-        )}
-      </header>
+    <AppShell active="runs" userEmail={me?.email}>
+    <div className="shell run-console">
+      <a className="back" href="/">
+        <ArrowLeft size={15} aria-hidden="true" /> Back to workspace
+      </a>
+      <RunHeader
+        title={`Run ${run?.label || runId.slice(0, 10)}`}
+        status={run?.status}
+        createdAt={run?.created_at}
+        pinned={run?.pinned}
+        actions={
+          run ? (
+            <div className="hero-actions" aria-label="Run actions">
+              {!TERMINAL_STATUSES.has(run.status) && (
+                <button type="button" className="action-button danger" onClick={cancelRun} disabled={actionBusy}>
+                  <XCircle size={15} aria-hidden="true" /> Cancel
+                </button>
+              )}
+              {TERMINAL_STATUSES.has(run.status) && (
+                <button type="button" className="action-button danger" onClick={deleteRun} disabled={actionBusy}>
+                  <Trash2 size={15} aria-hidden="true" /> Delete from history
+                </button>
+              )}
+              {me?.is_admin && (
+                <button type="button" className="action-button" onClick={togglePin} disabled={actionBusy}>
+                  <Pin size={15} aria-hidden="true" /> {run.pinned ? "Unpin" : "Pin"}
+                </button>
+              )}
+            </div>
+          ) : null
+        }
+      />
       {run && (() => {
         const progressPct = Math.round(Math.max(0, Math.min(1, run.progress ?? 0)) * 100);
         return (
           <section className="panel run-progress-panel" aria-label="Run progress and runtime">
-            <div className="run-progress-top">
-              <div>
-                <p className="eyebrow">Run progress</p>
-                <h2>{run.progress_label || run.status}</h2>
-              </div>
-              <strong>{progressPct}%</strong>
-            </div>
-            <div
-              className="progress-track"
-              role="progressbar"
-              aria-valuenow={progressPct}
-              aria-valuemin={0}
-              aria-valuemax={100}
-              aria-label={`Run progress, ${run.progress_label || run.status}`}
-            >
-              <span style={{ width: `${progressPct}%` }} />
-            </div>
+            <RunProgress status={run.status} progress={progressPct} detail={run.progress_label || run.status} />
             <div className="runtime-strip">
               <div>
                 <span>Elapsed</span>
@@ -2018,25 +2015,7 @@ export default function RunDetails() {
         </section>
       )}
 
-      <nav className="tabs" role="tablist" aria-label="Run views">
-        {([
-          { key: "hazard", label: "Hazard" },
-          { key: "uncertainty", label: "Uncertainty" },
-          { key: "drivers", label: "Drivers" },
-          { key: "compare", label: "Compare" },
-        ] as { key: TabKey; label: string }[]).map((entry) => (
-          <button
-            key={entry.key}
-            type="button"
-            role="tab"
-            aria-selected={tab === entry.key}
-            className={`tab ${tab === entry.key ? "active" : ""}`}
-            onClick={() => setTab(entry.key)}
-          >
-            {entry.label}
-          </button>
-        ))}
-      </nav>
+      <RunDetailTabs active={tab} onChange={setTab} />
       <p className="tab-intro">
         Results are organized into three questions — <strong>Hazard</strong> (what / where / when),
         {" "}<strong>Uncertainty</strong> (how confident, and where uncertainty concentrates), and
@@ -2046,7 +2025,7 @@ export default function RunDetails() {
       </p>
 
       {tab === "uncertainty" && (
-        <>
+        <UncertaintyTab>
           <section className="panel" aria-label="Uncertainty headline">
             <header className="envelope-head">
               <h2>Uncertainty</h2>
@@ -2184,11 +2163,11 @@ export default function RunDetails() {
               </p>
             </section>
           )}
-        </>
+        </UncertaintyTab>
       )}
 
       {tab === "drivers" && (
-        <>
+        <DriversTab>
           <section className="panel">
             <header className="envelope-head">
               <h2>Drivers</h2>
@@ -2310,11 +2289,11 @@ export default function RunDetails() {
               </>
             )}
           </section>
-        </>
+        </DriversTab>
       )}
 
       {tab === "compare" && (
-        <>
+        <CompareTab>
           <section className="panel">
             <header className="envelope-head">
               <h2>Compare</h2>
@@ -2495,10 +2474,12 @@ export default function RunDetails() {
               </section>
             </>
           )}
-        </>
+        </CompareTab>
       )}
 
-      {tab === "hazard" && envelopeTiles.length > 0 && (
+      {tab === "hazard" && (
+        <HazardTab>
+      {envelopeTiles.length > 0 && (
         <section className="panel envelope-panel" aria-label="Hazard envelope maps">
           <header className="envelope-head">
             <h2>Forecast envelope</h2>
@@ -2517,7 +2498,7 @@ export default function RunDetails() {
         </section>
       )}
 
-      {tab === "hazard" && summary && (
+      {summary && (
         <section className="cards">
           <article className="card">
             <span className="card-label">Peak expected flooded area</span>
@@ -2566,8 +2547,10 @@ export default function RunDetails() {
         </section>
       )}
 
-      {tab === "hazard" && (<>
-      <section className="panel">
+      <>
+      <section className="hazard-map-layout">
+      <section className="panel hazard-map-panel">
+        <TimePlayer>
         <div className="row-between">
           <h2>Forecast maps</h2>
           <div className="toggle">
@@ -2710,11 +2693,17 @@ export default function RunDetails() {
             Download calibrated animation (GIF)
           </a>
         )}
+        </TimePlayer>
       </section>
 
-      {/* Per-cell inspector. Hidden until a cell is picked. */}
-      {selectedCell !== null && (
-        <section className="panel poi-panel" aria-label="Per-cell ensemble inspector">
+      <CellInspector selected={selectedCell !== null}>
+        {selectedCell === null ? (
+          <div className="empty inspector-empty">
+            <strong>Click a map cell to inspect local uncertainty.</strong>
+            <span>The inspector will show the 60-member depth fan, local exceedance probabilities, and arrival-time distribution.</span>
+          </div>
+        ) : (
+        <>
           <header className="poi-head">
             <div>
               <p className="poi-eyebrow">Per-cell inspector</p>
@@ -2783,8 +2772,10 @@ export default function RunDetails() {
               </figure>
             </div>
           )}
-        </section>
-      )}
+        </>
+        )}
+      </CellInspector>
+      </section>
 
       {figureArtifacts.length > 0 && (
         <section className="panel">
@@ -2873,29 +2864,15 @@ export default function RunDetails() {
          canonical view now lives in the Drivers tab where stage and rainfall
          are shown alongside the response curves on a single time axis. */}
 
-      <section className="panel">
-        <h2>Downloads</h2>
-        {artifacts.length === 0 && <p className="muted">No artifacts available yet.</p>}
-        {artifacts.length > 0 && (
-          <ul className="downloads">
-            {artifacts
-              .slice()
-              .sort((a, b) => a.artifact_id.localeCompare(b.artifact_id))
-              .map((artifact) => (
-                <li key={artifact.artifact_id}>
-                  <a href={artifactUrl(artifact.artifact_id)} target="_blank" rel="noreferrer">
-                    {artifact.artifact_id}
-                  </a>
-                  <span> · {Math.round(artifact.size_bytes / 1024)} KB · {artifact.content_type}</span>
-                </li>
-              ))}
-          </ul>
-        )}
-        {hasHdf5 && (
-          <p className="muted">Full ensemble HDF5 is available — open it with h5py for downstream analysis.</p>
-        )}
-      </section>
-      </>)}
+      <ArtifactDrawer
+        title={hasHdf5 ? "Downloads and ensemble data" : "Downloads"}
+        artifacts={artifacts.slice().sort((a, b) => a.artifact_id.localeCompare(b.artifact_id))}
+        hrefForArtifact={(artifact) => artifactUrl(artifact.artifact_id)}
+        initiallyOpen={false}
+      />
+      </>
+        </HazardTab>
+      )}
 
       <details className="panel">
         <summary>Run specification</summary>
@@ -2903,7 +2880,40 @@ export default function RunDetails() {
       </details>
 
       <style jsx>{`
-        .shell { max-width: 1080px; margin: 0 auto; padding: 48px 24px; font-family: ui-sans-serif, system-ui; color: #10231f; }
+        .shell { max-width: 1440px; margin: 0 auto; padding: 22px 0 48px; font-family: ui-sans-serif, system-ui; color: #10231f; }
+        .run-tab-frame {
+          display: grid;
+          gap: 16px;
+        }
+        .run-tab-frame[aria-label="Hazard"] > .hazard-map-layout { order: 1; }
+        .run-tab-frame[aria-label="Hazard"] > .cards { order: 2; }
+        .run-tab-frame[aria-label="Hazard"] > .envelope-panel { order: 3; }
+        .run-tab-frame[aria-label="Hazard"] > .panel:not(.hazard-map-panel):not(.envelope-panel) { order: 4; }
+        .run-tab-frame[aria-label="Hazard"] > .artifact-drawer { order: 5; }
+        .hazard-map-layout {
+          display: grid;
+          grid-template-columns: minmax(0, 1fr) minmax(360px, 440px);
+          gap: 16px;
+          align-items: start;
+        }
+        .hazard-map-panel {
+          min-width: 0;
+        }
+        .time-player {
+          display: grid;
+          gap: 14px;
+        }
+        .hazard-inspector {
+          position: sticky;
+          top: 16px;
+          max-height: calc(100vh - 32px);
+          overflow: auto;
+        }
+        .inspector-empty {
+          min-height: 260px;
+          align-content: center;
+          gap: 8px;
+        }
         .tabs {
           display: flex;
           gap: 4px;
@@ -3258,10 +3268,13 @@ export default function RunDetails() {
           .run-progress-top { flex-direction: column; }
           .runtime-strip { grid-template-columns: 1fr; }
           .hydrograph, .figure-grid { grid-template-columns: 1fr; }
+          .hazard-map-layout { grid-template-columns: 1fr; }
+          .hazard-inspector { position: static; max-height: none; }
           .compare-picker, .compare-map-grid { grid-template-columns: 1fr; }
           .figure-card:first-child { grid-column: auto; }
         }
       `}</style>
-    </main>
+    </div>
+    </AppShell>
   );
 }

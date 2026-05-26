@@ -1,6 +1,11 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Activity, Cpu, ListChecks, RefreshCw } from "lucide-react";
+import { AppShell } from "./components/AppShell";
+import { MetricCard } from "./components/MetricCard";
+import { PageHeader } from "./components/PageHeader";
+import { ResearchNotice } from "./components/ResearchNotice";
 import { SAMPLE_SCENARIOS, type SampleScenario } from "./sampleScenarios";
 
 type User = {
@@ -1717,51 +1722,58 @@ export default function Page() {
   }
 
   return (
-    <main className="shell">
-      <header className="topbar">
-        <div className="brand-mark">
-          <div className="glyph" aria-hidden>FGN</div>
-          <div className="brand-text">
-            <p className="eyebrow">Coastal flood research console</p>
-            <h1>
-              {bundle
-                ? `${bundle.domain_name} · up to ${bundle.total_members} members · ${bundle.max_forecast_steps}-step horizon`
-                : "Loading model bundle…"}
-            </h1>
-            {bundle?.initial_condition && (
-              <p className="muted" style={{ margin: 0 }}>
-                Initial history:{" "}
-                {bundle.initial_condition.default_mode === "forcing_conditioned_baseline"
-                  ? `matched train/calibration baseline (${bundle.initial_condition.k_neighbors ?? 5} neighbors)`
-                  : "dry diagnostic baseline"}
-              </p>
-            )}
-          </div>
-        </div>
-        <div className="identity">
-          <span className="who">{user?.email ?? "Authentication required"}</span>
-          <a className="signout" href="/oauth2/sign_out">Sign out</a>
-        </div>
-      </header>
+    <AppShell active="home" userEmail={user?.email}>
+      <div className="shell">
+        <PageHeader
+          kicker="Coastal flood research console"
+          title={bundle ? bundle.domain_name : "Loading model bundle…"}
+          subtitle={
+            bundle ? (
+              <>
+                Fixed coastal bundle · up to {bundle.total_members} members · {bundle.max_forecast_steps}
+                -step horizon
+                {bundle.initial_condition ? (
+                  <>
+                    <br />
+                    Initial history:{" "}
+                    {bundle.initial_condition.default_mode === "forcing_conditioned_baseline"
+                      ? `matched train/calibration baseline (${bundle.initial_condition.k_neighbors ?? 5} neighbors)`
+                      : "dry diagnostic baseline"}
+                  </>
+                ) : null}
+              </>
+            ) : (
+              "Preparing the model contract, queue state, and research safeguards."
+            )
+          }
+          actions={
+            <>
+              <span>{user?.email ?? "Authentication required"}</span>
+              <a className="signout" href="/oauth2/sign_out">Sign out</a>
+            </>
+          }
+        />
 
-      <section className="notice" role="region" aria-label="Disclaimer">
-        <span>
-          <strong>Research only.</strong>
+        <ResearchNotice>
           {bundle?.research_disclaimer ?? "Not for emergency or operational decision use."}
-        </span>
-        {!user?.disclaimer_acknowledged && (
-          <button type="button" onClick={acknowledgeDisclaimer} disabled={busy}>
-            Acknowledge
-          </button>
-        )}
-      </section>
+          {!user?.disclaimer_acknowledged && (
+            <button type="button" onClick={acknowledgeDisclaimer} disabled={busy}>
+              Acknowledge
+            </button>
+          )}
+        </ResearchNotice>
 
-      <section className="metrics">
-        <div><span>{runs.length}</span><p>Runs</p></div>
-        <div><span>{queuedCount}</span><p>Queued</p></div>
-        <div><span>{runningCount}</span><p>Active GPU</p></div>
-        <div><span>{latestRun ? latestRun.status : "-"}</span><p>Latest status</p></div>
-      </section>
+        <section className="metric-grid home-metrics">
+          <MetricCard label="Runs" value={runs.length} detail="Current history" icon={<ListChecks size={17} />} />
+          <MetricCard label="Queued" value={queuedCount} detail="Waiting for GPU" icon={<RefreshCw size={17} />} />
+          <MetricCard label="Active GPU" value={runningCount} detail="One active job globally" icon={<Cpu size={17} />} />
+          <MetricCard
+            label="Latest status"
+            value={latestRun ? latestRun.status : "-"}
+            detail={latestRun ? latestRun.label || latestRun.run_id.slice(0, 12) : "No runs yet"}
+            icon={<Activity size={17} />}
+          />
+        </section>
 
       <section className="workspace">
         <aside className="panel input-panel">
@@ -2014,117 +2026,15 @@ export default function Page() {
                       <span style={{ width: `${progressPct}%` }} />
                     </div>
                   </button>
+                  <a className="run-open-link" href={`/runs/${encodeURIComponent(run.run_id)}`}>
+                    Open
+                  </a>
                 </li>
               );
             })}
             {runs.length === 0 && <li className="empty">No runs yet. Generate a sample scenario or upload a CSV to start.</li>}
           </ul>
         </section>
-      </section>
-
-      <section className="panel detail-panel">
-        <div className="section-head">
-          <div>
-            <p className="eyebrow">Selected run</p>
-            <h2>{selectedRun ? selectedRun.label || selectedRun.run_id : "No run selected"}</h2>
-          </div>
-          {selectedRun && !TERMINAL_STATUSES.has(selectedRun.status) && (
-            <button type="button" className="button danger" onClick={cancelSelectedRun} disabled={busy}>
-              Cancel
-            </button>
-          )}
-        </div>
-
-        {selectedRun ? (
-          (() => {
-            const progressPct = Math.round((selectedRun.progress ?? 0) * 100);
-            const stageMarks = deriveStageMarks(selectedRun.status, selectedRun.progress ?? 0);
-            return (
-              <>
-                <div className="progress-card">
-                  <div className="progress-header">
-                    <span className={`status ${statusTone(selectedRun.status)}`}>{selectedRun.status}</span>
-                    <strong>{progressPct}%</strong>
-                  </div>
-                  <div
-                    className="progress-track"
-                    role="progressbar"
-                    aria-valuenow={progressPct}
-                    aria-valuemin={0}
-                    aria-valuemax={100}
-                    aria-label={`Run progress, ${selectedRun.status}`}
-                  >
-                    <span style={{ width: `${progressPct}%` }} />
-                  </div>
-                  <div className="progress-caption">
-                    <strong>{selectedRun.progress_label || selectedRun.status}</strong>
-                    <span>
-                      {TERMINAL_STATUSES.has(selectedRun.status)
-                        ? `Runtime ${formatDuration(selectedRun.timing?.runtime_seconds ?? selectedRun.runtime_seconds)}`
-                        : `ETA ${formatDuration(selectedRun.timing?.estimated_remaining_seconds)}`}
-                    </span>
-                  </div>
-                  <div className="runtime-grid" aria-label="Run timing telemetry">
-                    <div>
-                      <span>Elapsed</span>
-                      <strong>{formatDuration(selectedRun.timing?.elapsed_seconds)}</strong>
-                    </div>
-                    <div>
-                      <span>Estimated total</span>
-                      <strong>{formatDuration(selectedRun.timing?.estimated_total_seconds)}</strong>
-                    </div>
-                    <div>
-                      <span>Average full rollout</span>
-                      <strong>{formatDuration(selectedRun.timing?.average_full_rollout_seconds)}</strong>
-                      <small>
-                        {selectedRun.timing?.average_full_rollout_sample_size
-                          ? `${selectedRun.timing.average_full_rollout_sample_size} completed full rollout(s)`
-                          : "Appears after the first completed full rollout"}
-                      </small>
-                    </div>
-                  </div>
-                  <p className="run-spec-line">
-                    Member budget: {selectedRun.spec?.ensemble_count ?? bundle?.n_checkpoints ?? 3} x{" "}
-                    {selectedRun.spec?.members_per_ensemble ?? bundle?.members_per_checkpoint ?? 20} ={" "}
-                    {(selectedRun.spec?.ensemble_count ?? bundle?.n_checkpoints ?? 3) *
-                      (selectedRun.spec?.members_per_ensemble ?? bundle?.members_per_checkpoint ?? 20)} members
-                  </p>
-                  <ol className="stage-track" aria-label="Run pipeline stages">
-                    {RUN_STAGES.map((stage, i) => {
-                      const mark = stageMarks[i];
-                      return (
-                        <li
-                          key={stage}
-                          className={mark}
-                          aria-current={mark === "current" ? "step" : undefined}
-                        >
-                          {stage}
-                        </li>
-                      );
-                    })}
-                  </ol>
-                  {selectedRun.failure_reason && <p className="failure">{selectedRun.failure_reason}</p>}
-                </div>
-
-                <div className="detail-callout">
-                  <div>
-                    <p className="eyebrow">Research console</p>
-                    <h3>Hazard, uncertainty, drivers, and run comparison</h3>
-                    <p>
-                      Completed outputs, per-cell ensemble inspection, UQ diagnostics, maps,
-                      animations, and downloads now live on the dedicated run page.
-                    </p>
-                  </div>
-                  <a className="button primary" href={`/runs/${encodeURIComponent(selectedRun.run_id)}`}>
-                    Open research console
-                  </a>
-                </div>
-              </>
-            );
-          })()
-        ) : (
-          <div className="empty">Select a run from the queue to inspect progress, maps, and downloads.</div>
-        )}
       </section>
 
       {deleteModalOpen && (
@@ -2510,7 +2420,7 @@ export default function Page() {
         .run-list { list-style: none; padding: 0; }
         .run-row {
           display: grid;
-          grid-template-columns: auto 1fr;
+          grid-template-columns: auto 1fr auto;
           align-items: stretch;
           gap: 0;
           padding: 0;
@@ -2556,6 +2466,20 @@ export default function Page() {
         .run-row-text .run-progress-label {
           color: #0f766e;
           font-weight: 650;
+        }
+        .run-open-link {
+          display: inline-flex;
+          align-items: center;
+          padding: 0 12px;
+          border-left: 1px solid var(--border);
+          color: var(--brand-strong);
+          font-size: 12px;
+          font-weight: 800;
+          text-decoration: none;
+        }
+        .run-open-link:hover {
+          background: #ffffff;
+          color: var(--brand);
         }
         .delete-toolbar {
           display: flex;
@@ -3471,6 +3395,7 @@ export default function Page() {
           .player-scrub { order: 3; flex: 1 0 100%; }
         }
       `}</style>
-    </main>
+      </div>
+    </AppShell>
   );
 }
