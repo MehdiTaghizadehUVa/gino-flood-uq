@@ -12,21 +12,23 @@ type RunHeaderProps = {
 
 export function RunHeader({ title, status, createdAt, pinned, actions }: RunHeaderProps) {
   return (
-    <PageHeader
-      kicker="Run detail console"
-      title={title}
-      subtitle={
-        status ? (
-          <>
-            <StatusBadge tone={statusTone(status)}>{status}</StatusBadge>
-            {createdAt ? <span> created {new Date(createdAt).toLocaleString()}</span> : null}
-            {pinned ? <span> · pinned</span> : null}
-          </>
-        ) : (
-          "Loading run metadata, artifacts, and monitoring reports."
-        )
-      }
-      actions={actions}
-    />
+    <div className="run-command-header">
+      <PageHeader
+        kicker="Run detail console"
+        title={title}
+        subtitle={
+          status ? (
+            <>
+              <StatusBadge tone={statusTone(status)}>{status}</StatusBadge>
+              {createdAt ? <span> created {new Date(createdAt).toLocaleString()}</span> : null}
+              {pinned ? <span> · pinned</span> : null}
+            </>
+          ) : (
+            "Loading run metadata, artifacts, and monitoring reports."
+          )
+        }
+        actions={actions}
+      />
+    </div>
   );
 }

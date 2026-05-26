@@ -1755,7 +1755,7 @@ export default function Page() {
         />
 
         <ResearchNotice>
-          {bundle?.research_disclaimer ?? "Not for emergency or operational decision use."}
+          {bundle?.research_disclaimer ?? "For research review only; not decision guidance."}
           {!user?.disclaimer_acknowledged && (
             <button type="button" onClick={acknowledgeDisclaimer} disabled={busy}>
               Acknowledge
@@ -2109,25 +2109,25 @@ export default function Page() {
       <style jsx>{`
         /* ===== Design tokens ============================================ */
         :global(:root) {
-          --bg: #f1f5f9;
+          --bg: #e7edf2;
           --surface: #ffffff;
-          --surface-muted: #f8fafc;
-          --surface-tinted: #f6faf9;
-          --border: #e2e8f0;
-          --border-strong: #cbd5e1;
-          --text: #0f172a;
-          --text-secondary: #475569;
-          --text-muted: #94a3b8;
-          --brand: #0f766e;
-          --brand-strong: #115e59;
-          --brand-soft: #f0fdfa;
-          --accent: #0ea5e9;
-          --shadow-sm: 0 1px 2px rgba(15, 23, 42, 0.04), 0 1px 1px rgba(15, 23, 42, 0.03);
-          --shadow-md: 0 4px 10px rgba(15, 23, 42, 0.04), 0 2px 4px rgba(15, 23, 42, 0.04);
-          --shadow-lg: 0 12px 32px rgba(15, 23, 42, 0.08), 0 4px 12px rgba(15, 23, 42, 0.04);
+          --surface-muted: #f7fafc;
+          --surface-tinted: #eef6f8;
+          --border: #c5d3dc;
+          --border-strong: #8ea8b6;
+          --text: #10202b;
+          --text-secondary: #395262;
+          --text-muted: #6b8390;
+          --brand: #13a395;
+          --brand-strong: #08766d;
+          --brand-soft: #e4f7f5;
+          --accent: #38bdf8;
+          --shadow-sm: 0 1px 2px rgba(7, 20, 29, 0.08), 0 1px 1px rgba(7, 20, 29, 0.06);
+          --shadow-md: 0 18px 44px rgba(7, 20, 29, 0.12);
+          --shadow-lg: 0 28px 70px rgba(7, 20, 29, 0.18);
           --radius-sm: 6px;
-          --radius: 10px;
-          --radius-lg: 14px;
+          --radius: 8px;
+          --radius-lg: 10px;
         }
         :global(body) {
           margin: 0;
@@ -2145,7 +2145,7 @@ export default function Page() {
         .shell {
           max-width: 1480px;
           margin: 0 auto;
-          padding: 0 28px 48px;
+          padding: 24px 28px 54px;
           color: var(--text);
         }
 

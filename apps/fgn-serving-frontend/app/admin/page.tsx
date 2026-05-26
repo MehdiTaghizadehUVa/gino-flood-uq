@@ -187,7 +187,7 @@ export default function AdminPage() {
           <div>
             <p className="eyebrow">Operations</p>
             <h2 className="section-title">Runs</h2>
-            <p className="section-subtitle">Deleted runs are hidden by default to keep operational history focused.</p>
+            <p className="section-subtitle">Deleted runs are hidden by default to keep run history focused.</p>
           </div>
           <label className="toggle-row">
             <input type="checkbox" checked={showDeletedRuns} onChange={(event) => setShowDeletedRuns(event.target.checked)} />

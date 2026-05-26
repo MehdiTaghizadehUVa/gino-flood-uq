@@ -1,10 +1,12 @@
 import type { ReactNode } from "react";
 import {
   Activity,
+  CircleDot,
   Database,
   Home,
   LineChart,
   ListChecks,
+  LogOut,
   ShieldCheck,
   Waves
 } from "lucide-react";
@@ -49,7 +51,7 @@ export function AppShell({ active = "home", children, userEmail }: AppShellProps
         </div>
         <nav className="app-nav">
           {navItems.map((item) => (
-            <a key={item.href} href={item.href} data-active={active === item.active}>
+            <a key={item.href} href={item.href} data-active={active === item.active} title={item.label}>
               {item.icon}
               <span>{item.label}</span>
             </a>
@@ -58,8 +60,7 @@ export function AppShell({ active = "home", children, userEmail }: AppShellProps
         <div className="app-sidebar-foot">
           <strong>Research use only.</strong>
           <br />
-          Results are calibrated uncertainty products for scientific review, not emergency or
-          operational flood guidance.
+          Results are calibrated uncertainty products for scientific review, not decision guidance.
           {userEmail ? (
             <>
               <br />
@@ -71,7 +72,31 @@ export function AppShell({ active = "home", children, userEmail }: AppShellProps
           <Database size={12} aria-hidden="true" /> Bundle-backed artifact workflow
         </div>
       </aside>
-      <main className="app-main">{children}</main>
+      <main className="app-main">
+        <header className="app-command-bar" aria-label="Application status">
+          <div className="command-left">
+            <span className="command-chip health">
+              <CircleDot size={12} aria-hidden="true" />
+              Lab server
+            </span>
+            <div className="command-title">
+              <strong>Coastal Flood-UQ Console</strong>
+              <span>Fixed-domain FGN research workspace</span>
+            </div>
+          </div>
+          <div className="command-right">
+            <span className="command-chip research">Research use only</span>
+            <span className="command-chip">
+              <Activity size={12} aria-hidden="true" />
+              {userEmail ?? "Authentication required"}
+            </span>
+            <a className="command-link" href="/oauth2/sign_out">
+              <LogOut size={13} aria-hidden="true" /> Sign out
+            </a>
+          </div>
+        </header>
+        {children}
+      </main>
     </div>
   );
 }

@@ -2003,7 +2003,7 @@ export default function RunDetails() {
             </article>
           </div>
           <p className="muted">
-            Monitoring is a research guardrail for future HEC-RAS labeling and retraining review. It is not proof of model error or operational flood guidance.
+            Monitoring is a research guardrail for future HEC-RAS labeling and retraining review. It is not proof of model error or decision guidance.
           </p>
         </section>
       )}
@@ -2880,7 +2880,19 @@ export default function RunDetails() {
       </details>
 
       <style jsx>{`
-        .shell { max-width: 1440px; margin: 0 auto; padding: 22px 0 48px; font-family: ui-sans-serif, system-ui; color: #10231f; }
+        .shell { max-width: 1540px; margin: 0 auto; padding: 24px 28px 54px; font-family: var(--font); color: var(--text); }
+        .run-command-header {
+          position: sticky;
+          top: 58px;
+          z-index: 34;
+          margin: -4px -10px 14px;
+          padding: 10px;
+          border: 1px solid rgba(197, 211, 220, 0.72);
+          border-radius: 14px;
+          background: rgba(247, 250, 252, 0.92);
+          backdrop-filter: blur(16px);
+          box-shadow: 0 14px 34px rgba(7, 20, 29, 0.08);
+        }
         .run-tab-frame {
           display: grid;
           gap: 16px;
@@ -2919,15 +2931,16 @@ export default function RunDetails() {
           gap: 4px;
           margin: 20px 0 6px;
           padding: 4px;
-          background: #f1f5f9;
-          border-radius: 12px;
-          border: 1px solid #e2e8f0;
+          background: rgba(245, 249, 251, 0.92);
+          border-radius: 10px;
+          border: 1px solid var(--border);
           width: fit-content;
+          backdrop-filter: blur(14px);
         }
         .tab {
           position: relative;
           background: transparent;
-          color: #475569;
+          color: var(--text-secondary);
           padding: 8px 16px;
           font-size: 13.5px;
           font-weight: 600;
@@ -2940,19 +2953,19 @@ export default function RunDetails() {
           align-items: center;
           gap: 8px;
         }
-        .tab:hover { background: #e2e8f0; color: #0f172a; }
-        .tab.active { background: #ffffff; color: #0f172a; box-shadow: 0 1px 3px rgba(15, 23, 42, 0.08); }
+        .tab:hover { background: #ffffff; color: var(--brand-strong); }
+        .tab.active { background: #ffffff; color: var(--brand-strong); box-shadow: 0 1px 3px rgba(7, 20, 29, 0.12); }
         .tab-intro {
-          color: #475569;
+          color: var(--text-secondary);
           font-size: 13.5px;
           line-height: 1.55;
           margin: 8px 0 22px;
           max-width: 880px;
         }
-        .tab-intro strong { color: #0f172a; }
-        .tab-stub { background: #f8fafc; }
-        .tab-stub h2 { font-size: 18px; font-weight: 700; margin: 0 0 8px; color: #0f172a; letter-spacing: -0.01em; }
-        .tab-stub p { color: #475569; font-size: 13.5px; line-height: 1.55; margin: 0; max-width: 760px; }
+        .tab-intro strong { color: var(--text); }
+        .tab-stub { background: var(--surface-muted); }
+        .tab-stub h2 { font-size: 18px; font-weight: 800; margin: 0 0 8px; color: var(--text); letter-spacing: -0.01em; }
+        .tab-stub p { color: var(--text-secondary); font-size: 13.5px; line-height: 1.55; margin: 0; max-width: 760px; }
         .driver-stack { display: grid; gap: 12px; }
         .compare-picker {
           display: grid;
@@ -2962,11 +2975,11 @@ export default function RunDetails() {
         }
         .compare-picker select {
           width: 100%;
-          border: 1px solid #cbd5e1;
-          border-radius: 10px;
+          border: 1px solid var(--border);
+          border-radius: 8px;
           padding: 10px 12px;
           background: #ffffff;
-          color: #0f172a;
+          color: var(--text);
           font-size: 13px;
         }
         .compare-map-grid {
