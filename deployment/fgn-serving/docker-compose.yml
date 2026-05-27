@@ -159,7 +159,8 @@ services:
 
   cloudflared:
     image: cloudflare/cloudflared:2025.5.0
-    command: tunnel --no-autoupdate run --token ${CLOUDFLARE_TUNNEL_TOKEN:?set CLOUDFLARE_TUNNEL_TOKEN}
+    profiles: ["public-tunnel"]
+    command: tunnel --no-autoupdate run --token ${CLOUDFLARE_TUNNEL_TOKEN:-}
     restart: unless-stopped
     depends_on:
       - proxy
