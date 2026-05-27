@@ -133,3 +133,39 @@ for key, value in mapping.items():
 PY
   )"
 }
+
+persist_image_pins() {
+  local env_file="${ENV_FILE:-${DEPLOY_DIR}/.env}"
+  require_var FGN_API_IMAGE
+  require_var FGN_WORKER_IMAGE
+  require_var FGN_CLEANUP_IMAGE
+  require_var FGN_FRONTEND_IMAGE
+
+  [[ -f "${env_file}" ]] || die "Env file not found: ${env_file}"
+  python3 - "${env_file}" <<'PY'
+import os
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+updates = {
+    "FGN_API_IMAGE": os.environ["FGN_API_IMAGE"],
+    "FGN_WORKER_IMAGE": os.environ["FGN_WORKER_IMAGE"],
+    "FGN_CLEANUP_IMAGE": os.environ["FGN_CLEANUP_IMAGE"],
+    "FGN_FRONTEND_IMAGE": os.environ["FGN_FRONTEND_IMAGE"],
+}
+seen = set()
+lines = []
+for line in path.read_text(encoding="utf-8").splitlines():
+    key = line.split("=", 1)[0] if "=" in line else ""
+    if key in updates:
+        lines.append(f"{key}={updates[key]}")
+        seen.add(key)
+    else:
+        lines.append(line)
+for key, value in updates.items():
+    if key not in seen:
+        lines.append(f"{key}={value}")
+path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+PY
+}

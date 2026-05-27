@@ -38,5 +38,6 @@ compose pull api worker-gpu cleanup-backup frontend
 compose up -d
 "${SCRIPT_DIR}/smoke_lab.sh"
 cp "${previous}" "${current}"
+persist_image_pins
 write_json_record "${root}/rollback_$(date -u +%Y%m%dT%H%M%SZ).json" "rolled_back" "Rollback completed."
 log "rollback completed."

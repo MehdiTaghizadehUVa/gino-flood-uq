@@ -111,5 +111,6 @@ fi
 
 write_json_record "${current}" "healthy" "Deployment completed."
 cp "${current}" "${root}/deployment_${stamp}.json"
+persist_image_pins
 rm -f "${pending}"
 log "deployment completed."
