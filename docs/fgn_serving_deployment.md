@@ -152,6 +152,12 @@ docker compose -f docker-compose.yml -f docker-compose.local-build.yml build
 docker compose -f docker-compose.yml -f docker-compose.local-build.yml up -d
 ```
 
+Access defaults to a gated allowlist. For an open authenticated research beta,
+keep Google OAuth enabled and set `FGN_OPEN_AUTHENTICATED_ACCESS=1`; any
+Google-authenticated user is then auto-registered as a non-admin user, must
+acknowledge the research-only disclaimer before submitting, and remains subject
+to the normal queue and GPU limits. `FGN_ADMIN_EMAILS` should stay explicit.
+
 Health checks:
 
 ```bash

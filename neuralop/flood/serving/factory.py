@@ -20,6 +20,13 @@ def split_env(name: str) -> list[str]:
     return [x.strip() for x in os.environ.get(name, "").split(",") if x.strip()]
 
 
+def env_flag(name: str, *, default: bool = False) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
 def build_repository():
     database_url = os.environ.get("DATABASE_URL")
     if database_url:
@@ -101,6 +108,7 @@ def build_orchestrator(*, queue_override=None, preload_models: bool = False) -> 
             allowed_emails=split_env("FGN_ALLOWED_EMAILS"),
             admin_emails=split_env("FGN_ADMIN_EMAILS"),
             repository=build_access_repository(),
+            open_authenticated_access=env_flag("FGN_OPEN_AUTHENTICATED_ACCESS"),
         ),
         inference_service=inference,
         calibration_adapter=CalibrationAdapter.from_files(bundle.calibration_coefficients_path, bundle.isotonic_curves_path),

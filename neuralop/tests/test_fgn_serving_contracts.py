@@ -596,6 +596,34 @@ def test_access_policy_requires_allowed_email_and_disclaimer():
     assert user.email == "a@example.com"
 
 
+def test_access_policy_open_authenticated_access_auto_registers_non_admin_user():
+    policy = AccessPolicy(
+        allowed_emails=["existing@example.com"],
+        admin_emails=["admin@example.com"],
+        open_authenticated_access=True,
+    )
+
+    user = policy.require_allowed(User(user_id="new@example.com", email="new@example.com"))
+
+    assert user.email == "new@example.com"
+    assert user.is_admin is False
+    assert policy.repository.get_user("new@example.com") is not None
+    with pytest.raises(AccessDenied, match="disclaimer"):
+        policy.require_disclaimer(User(user_id="new@example.com", email="new@example.com"))
+
+
+def test_access_policy_open_authenticated_access_preserves_disclaimer_acknowledgement():
+    policy = AccessPolicy(allowed_emails=[], open_authenticated_access=True)
+
+    user = policy.require_disclaimer(
+        User(user_id="new@example.com", email="new@example.com", disclaimer_acknowledged=True)
+    )
+
+    assert user.email == "new@example.com"
+    assert user.disclaimer_acknowledged is True
+    assert policy.repository.get_user("new@example.com").disclaimer_acknowledged is True  # type: ignore[union-attr]
+
+
 def test_artifact_store_blocks_path_traversal(tmp_path):
     store = LocalArtifactStore(tmp_path)
     with pytest.raises(ValueError):

@@ -12,7 +12,7 @@ except Exception as exc:  # pragma: no cover - optional dependency import guard
 
 from neuralop.flood.serving.api import create_app
 from neuralop.flood.serving.auth import TrustedHeaderAuth
-from neuralop.flood.serving.factory import build_orchestrator, split_env
+from neuralop.flood.serving.factory import build_orchestrator, env_flag, split_env
 from neuralop.flood.serving.model_bundle import ModelBundleError, load_model_bundle
 
 
@@ -24,8 +24,9 @@ except Exception as exc:  # Keep health endpoint alive with explicit failure.
 else:
     _startup_error = None
 
+_open_authenticated_access = env_flag("FGN_OPEN_AUTHENTICATED_ACCESS")
 _auth = TrustedHeaderAuth.from_lists(
-    allowed_emails=split_env("FGN_ALLOWED_EMAILS"),
+    allowed_emails=() if _open_authenticated_access else split_env("FGN_ALLOWED_EMAILS"),
     admin_emails=split_env("FGN_ADMIN_EMAILS"),
 )
 

@@ -101,6 +101,29 @@ def _outsider() -> User:
     return User(user_id="mallory@example.com", email="mallory@example.com", disclaimer_acknowledged=True)
 
 
+def test_open_authenticated_access_allows_new_google_user_after_disclaimer(env):
+    env["orchestrator"].access_policy.open_authenticated_access = True
+    env["provider"].current = User(
+        user_id="newuser@example.com",
+        email="newuser@example.com",
+        disclaimer_acknowledged=True,
+    )
+
+    me = env["client"].get("/api/me")
+    assert me.status_code == 200
+    assert me.json()["email"] == "newuser@example.com"
+    assert me.json()["is_admin"] is False
+
+    response = env["client"].post(
+        "/api/runs",
+        files={"file": ("forcing.csv", _valid_csv(24), "text/csv")},
+        data={"forecast_steps": "2"},
+    )
+    assert response.status_code == 200
+    record = env["repository"].get(response.json()["run_id"])
+    assert record.spec.user_id == "newuser@example.com"
+
+
 def _post_csv(client, csv_text: str, *, label: str = "smoke", data: dict[str, str] | None = None) -> "httpx.Response":
     payload = {"label": label}
     if data:

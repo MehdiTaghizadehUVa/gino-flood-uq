@@ -117,8 +117,10 @@ class AccessPolicy:
         allowed_emails: Iterable[str],
         admin_emails: Iterable[str] = (),
         repository: AccessRepository | None = None,
+        open_authenticated_access: bool = False,
     ) -> None:
         self.repository = repository or InMemoryAccessRepository()
+        self.open_authenticated_access = bool(open_authenticated_access)
         for email in allowed_emails:
             if email and email.strip():
                 self.repository.upsert_user(email, is_admin=False)
@@ -197,6 +199,18 @@ class AccessPolicy:
     def require_allowed(self, user: User) -> User:
         user = self.normalize_user(user)
         allowed = self.repository.get_user(user.email) is not None
+        if not allowed and self.open_authenticated_access:
+            record = self.repository.upsert_user(
+                user.email,
+                is_admin=user.is_admin,
+                disclaimer_acknowledged=user.disclaimer_acknowledged,
+            )
+            return User(
+                user_id=record.email,
+                email=record.email,
+                is_admin=record.is_admin,
+                disclaimer_acknowledged=record.disclaimer_acknowledged,
+            )
         if not allowed and not user.is_admin:
             raise AccessDenied(f"Email is not allowed to use this service: {user.email}")
         return user
