@@ -218,7 +218,7 @@ def test_production_inference_exposes_static_context_columns(tmp_path):
     np.testing.assert_allclose(prepared["flow_accumulation_raw_np"], [1000.0, 2000.0])
 
 
-def test_celery_worker_defers_model_preload_until_run_is_marked_running(monkeypatch):
+def test_celery_worker_honors_preload_models_env(monkeypatch):
     pytest.importorskip("celery")
     from neuralop.flood.serving import celery_app
 
@@ -232,6 +232,25 @@ def test_celery_worker_defers_model_preload_until_run_is_marked_running(monkeypa
     monkeypatch.setattr(celery_app, "_orchestrator", None)
     monkeypatch.setattr(celery_app, "build_orchestrator", fake_build_orchestrator)
     monkeypatch.setenv("FGN_PRELOAD_MODELS", "1")
+
+    assert celery_app.get_orchestrator() is sentinel
+    assert calls == [{"queue_override": None, "preload_models": True}]
+
+
+def test_celery_worker_can_keep_lazy_loading_when_preload_disabled(monkeypatch):
+    pytest.importorskip("celery")
+    from neuralop.flood.serving import celery_app
+
+    calls = []
+    sentinel = object()
+
+    def fake_build_orchestrator(*, queue_override, preload_models):
+        calls.append({"queue_override": queue_override, "preload_models": preload_models})
+        return sentinel
+
+    monkeypatch.setattr(celery_app, "_orchestrator", None)
+    monkeypatch.setattr(celery_app, "build_orchestrator", fake_build_orchestrator)
+    monkeypatch.setenv("FGN_PRELOAD_MODELS", "0")
 
     assert celery_app.get_orchestrator() is sentinel
     assert calls == [{"queue_override": None, "preload_models": False}]
@@ -268,6 +287,12 @@ def test_orchestrator_execute_records_progress_label_and_runtime(tmp_path):
     assert done.started_at is not None
     assert done.completed_at is not None
     assert done.runtime_seconds is not None
+    timing = json.loads(orchestrator.artifact_store.read_bytes(record.spec.run_id, "performance_timing.json"))
+    assert timing["phases"]["rollout"]["seconds"] >= 0.0
+    assert timing["phases"]["calibration"]["seconds"] >= 0.0
+    assert timing["phases"]["total"]["seconds"] >= 0.0
+    assert timing["inference"]["member_chunk_size"] == 1
+    assert timing["run"]["forecast_steps"] == 4
 
 
 def test_orchestrator_delete_run_tombstones_record_and_purges_artifacts(tmp_path):

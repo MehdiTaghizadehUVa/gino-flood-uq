@@ -80,7 +80,8 @@ def build_orchestrator(*, queue_override=None, preload_models: bool = False) -> 
         inference = ProductionFGNInferenceService(
             bundle,
             device=os.environ.get("FGN_DEVICE", "cuda:0"),
-            member_chunk_size=int(os.environ.get("FGN_MEMBER_CHUNK_SIZE", "4")),
+            member_chunk_size=os.environ.get("FGN_MEMBER_CHUNK_SIZE", "4"),
+            inference_dtype=os.environ.get("FGN_INFERENCE_DTYPE", "fp32"),
         )
         if preload_models:
             inference._ensure_loaded()

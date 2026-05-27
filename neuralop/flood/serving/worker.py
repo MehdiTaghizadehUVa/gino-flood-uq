@@ -25,7 +25,8 @@ def main() -> int:
     service = ProductionFGNInferenceService(
         bundle,
         device=os.environ.get("FGN_DEVICE", "cuda:0"),
-        member_chunk_size=int(os.environ.get("FGN_MEMBER_CHUNK_SIZE", "4")),
+        member_chunk_size=os.environ.get("FGN_MEMBER_CHUNK_SIZE", "4"),
+        inference_dtype=os.environ.get("FGN_INFERENCE_DTYPE", "fp32"),
     )
     if os.environ.get("FGN_PRELOAD_MODELS", "1").strip().lower() not in {"0", "false", "no"}:
         service._ensure_loaded()  # startup health check; keeps models cached in this worker process

@@ -6,6 +6,7 @@ import os
 
 try:
     from celery import Celery
+    from celery.signals import worker_process_init
 except Exception as exc:  # pragma: no cover - optional dependency guard
     raise RuntimeError("Celery serving worker requires installing neuraloperator[serve].") from exc
 
@@ -23,15 +24,21 @@ app.conf.update(
 _orchestrator = None
 
 
+def _preload_models_enabled() -> bool:
+    return os.environ.get("FGN_PRELOAD_MODELS", "1").strip().lower() not in {"0", "false", "no", "off"}
+
+
 def get_orchestrator():
     global _orchestrator
     if _orchestrator is None:
-        # Keep worker startup cheap enough that a claimed Celery task can enter
-        # the RunOrchestrator state machine first. Production model loading
-        # still happens lazily inside inference_service.run(), after the DB row
-        # has moved from QUEUED to RUNNING for honest UI/progress reporting.
-        _orchestrator = build_orchestrator(queue_override=None, preload_models=False)
+        _orchestrator = build_orchestrator(queue_override=None, preload_models=_preload_models_enabled())
     return _orchestrator
+
+
+@worker_process_init.connect
+def _preload_orchestrator_on_worker_start(**_kwargs) -> None:  # pragma: no cover - exercised in deployment
+    if _preload_models_enabled():
+        get_orchestrator()
 
 
 @app.task(name="neuralop.flood.serving.execute_run")

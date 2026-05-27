@@ -14,6 +14,7 @@ from neuralop.flood.serving.forcing import parse_forcing_csv
 from neuralop.flood.serving.inference import FGNInferenceService
 from neuralop.flood.serving.model_bundle import FGNModelBundle
 from neuralop.flood.serving.monitoring import MonitoringOrchestrator
+from neuralop.flood.serving.performance import PerformanceTimer
 from neuralop.flood.serving.products import ForecastProductBuilder, ForecastResult
 from neuralop.flood.serving.quota import QuotaPolicy
 from neuralop.flood.serving.queue import JobQueue
@@ -125,6 +126,7 @@ class RunOrchestrator:
         if self._is_terminal(run_id):
             return
         record = self.repository.transition(run_id, RunStatus.RUNNING)
+        timer = PerformanceTimer()
         self._set_progress(run_id, 0.38, "Preparing forcing and GPU tensors")
         try:
             forcing_bytes = self.artifact_store.read_bytes(run_id, "forcing.csv")
@@ -137,35 +139,38 @@ class RunOrchestrator:
                     last_inference_progress[0] = mapped
                     self._set_progress(run_id, mapped, label)
 
-            raw = self.inference_service.run(
-                record.spec,
-                forcing,
-                progress_callback=_on_inference_progress,
-            )
+            with timer.phase("rollout"):
+                raw = self.inference_service.run(
+                    record.spec,
+                    forcing,
+                    progress_callback=_on_inference_progress,
+                )
             self._write_initial_condition_selection(run_id, raw=raw)
             if self._is_terminal(run_id):
                 return
             self._set_progress(run_id, 0.78, "GPU rollout complete; applying calibration")
             self.repository.transition(run_id, RunStatus.POSTPROCESSING)
             self._set_progress(run_id, 0.82, "Applying calibration and building summaries")
-            calibrated = self.calibration_adapter.apply(raw)
+            with timer.phase("calibration"):
+                calibrated = self.calibration_adapter.apply(raw)
             product_builder = self._product_builder(record.spec.exceedance_thresholds_m)
-            raw_summary = product_builder.build_summary(raw, label="raw")
-            calibrated_summary = product_builder.build_summary(
-                calibrated,
-                label="calibrated",
-                calibration_adapter=self.calibration_adapter,
-            )
-            comparison_summary = _comparison_summary(
-                run_id=run_id,
-                bundle_id=self.bundle.bundle_id,
-                raw_summary=raw_summary,
-                calibrated_summary=calibrated_summary,
-                thresholds_m=record.spec.exceedance_thresholds_m,
-            )
-            self.artifact_store.put_json(run_id, "raw_summary", raw_summary)
-            self.artifact_store.put_json(run_id, "calibrated_summary", calibrated_summary)
-            self.artifact_store.put_json(run_id, "comparison_summary", comparison_summary)
+            with timer.phase("summary_products"):
+                raw_summary = product_builder.build_summary(raw, label="raw")
+                calibrated_summary = product_builder.build_summary(
+                    calibrated,
+                    label="calibrated",
+                    calibration_adapter=self.calibration_adapter,
+                )
+                comparison_summary = _comparison_summary(
+                    run_id=run_id,
+                    bundle_id=self.bundle.bundle_id,
+                    raw_summary=raw_summary,
+                    calibrated_summary=calibrated_summary,
+                    thresholds_m=record.spec.exceedance_thresholds_m,
+                )
+                self.artifact_store.put_json(run_id, "raw_summary", raw_summary)
+                self.artifact_store.put_json(run_id, "calibrated_summary", calibrated_summary)
+                self.artifact_store.put_json(run_id, "comparison_summary", comparison_summary)
             if self.monitoring_orchestrator is not None:
                 self.monitoring_orchestrator.evaluate_completed_run(
                     run_spec=record.spec,
@@ -176,40 +181,49 @@ class RunOrchestrator:
                     model_bundle_metadata=self.bundle.public_metadata(),
                 )
             self._set_progress(run_id, 0.86, "Rendering publication-style UQ figures")
-            self._write_figure_products(
-                run_id,
-                forcing=forcing,
-                raw_summary=raw_summary,
-                calibrated_summary=calibrated_summary,
-                comparison_summary=comparison_summary,
-                thresholds_m=record.spec.exceedance_thresholds_m,
-            )
+            with timer.phase("figures"):
+                self._write_figure_products(
+                    run_id,
+                    forcing=forcing,
+                    raw_summary=raw_summary,
+                    calibrated_summary=calibrated_summary,
+                    comparison_summary=comparison_summary,
+                    thresholds_m=record.spec.exceedance_thresholds_m,
+                )
             self._set_progress(run_id, 0.89, "Rendering map products")
-            self._write_map_products(run_id, raw=raw, calibrated=calibrated)
+            with timer.phase("maps"):
+                self._write_map_products(run_id, raw=raw, calibrated=calibrated)
             # Per-cell envelope summaries power the Hazard tab's small-multiples
             # and feed the per-cell inspector's elevation/peak/arrival readouts.
             # Cheap (one .npy per array, no rendering); failure is non-fatal.
             self._set_progress(run_id, 0.92, "Writing hazard envelope maps")
-            self._write_envelope_maps(run_id, calibrated=calibrated)
+            with timer.phase("envelope_maps"):
+                self._write_envelope_maps(run_id, calibrated=calibrated)
             # Empirical CRPS, between/within decomposition, and reliability
             # curves. Computed from the calibrated ensemble; isotonic adapter
             # passed through so the reliability card can show what calibration
             # actually did.
             self._set_progress(run_id, 0.94, "Writing uncertainty diagnostics")
-            self._write_uncertainty_diagnostics(run_id, calibrated=calibrated)
+            with timer.phase("uncertainty_diagnostics"):
+                self._write_uncertainty_diagnostics(run_id, calibrated=calibrated)
             self._set_progress(run_id, 0.955, "Writing driver diagnostics")
-            self._write_driver_products(run_id, calibrated=calibrated)
+            with timer.phase("driver_products"):
+                self._write_driver_products(run_id, calibrated=calibrated)
             if record.spec.request_animation:
                 self._set_progress(run_id, 0.965, "Rendering animations and scrub frames")
-                self._write_animation(run_id, calibrated=calibrated)
+                with timer.phase("animation_gifs"):
+                    self._write_animation(run_id, calibrated=calibrated)
                 # Frame-accurate scrub PNGs power the interactive Time Player.
                 # Generated unconditionally with the GIF so the two stay in
                 # sync; failure here is non-fatal because the run's primary
                 # products and the GIF are already on disk.
-                self._write_scrub_frames(run_id, calibrated=calibrated)
+                with timer.phase("scrub_frames"):
+                    self._write_scrub_frames(run_id, calibrated=calibrated)
             if record.spec.request_full_hdf5:
                 self._set_progress(run_id, 0.985, "Writing full ensemble HDF5 for cell inspection")
-                self._write_forecast_hdf5(run_id, raw=raw, calibrated=calibrated)
+                with timer.phase("hdf5"):
+                    self._write_forecast_hdf5(run_id, raw=raw, calibrated=calibrated)
+            self._write_performance_timing(run_id, record=record, timer=timer, raw=raw)
             if self._is_terminal(run_id):
                 return
             self.repository.transition(run_id, RunStatus.COMPLETED)
@@ -291,6 +305,47 @@ class RunOrchestrator:
             except Exception as exc:  # pragma: no cover - defensive
                 skipped.append({"run_id": run_id, "reason": "error", "detail": str(exc)})
         return {"deleted": deleted, "skipped": skipped}
+
+    def _write_performance_timing(
+        self,
+        run_id: str,
+        *,
+        record,
+        timer: PerformanceTimer,
+        raw: ForecastResult,
+    ) -> None:
+        inference = dict((raw.metadata or {}).get("performance") or {})
+        phases = timer.payload()
+        if "model_load_seconds" in inference:
+            phases["model_load"] = {"seconds": float(inference.get("model_load_seconds") or 0.0)}
+        if "initial_condition_seconds" in inference:
+            phases["initial_condition"] = {"seconds": float(inference.get("initial_condition_seconds") or 0.0)}
+        if "rollout_seconds" in inference:
+            phases["rollout"] = {"seconds": float(inference.get("rollout_seconds") or 0.0)}
+        artifact_count = len(list(self.artifact_store.list(run_id))) + 1
+        payload = {
+            "run": {
+                "run_id": run_id,
+                "bundle_id": record.spec.bundle_id,
+                "forecast_steps": int(record.spec.forecast_steps),
+                "ensemble_count": int(record.spec.ensemble_count),
+                "members_per_ensemble": int(record.spec.members_per_ensemble),
+                "request_animation": bool(record.spec.request_animation),
+                "request_full_hdf5": bool(record.spec.request_full_hdf5),
+            },
+            "inference": {
+                "configured_member_chunk_size": inference.get("configured_member_chunk_size", "unknown"),
+                "member_chunk_size": int(inference.get("member_chunk_size") or 1),
+                "expected_forward_calls": int(inference.get("expected_forward_calls") or 0),
+                "forward_calls": int(inference.get("forward_calls") or 0),
+                "inference_dtype": str(inference.get("inference_dtype") or "unknown"),
+                "device": str(inference.get("device") or "unknown"),
+                "cuda_max_memory_allocated_mb": inference.get("cuda_max_memory_allocated_mb"),
+            },
+            "phases": phases,
+            "artifacts": {"count_after_timing_artifact": artifact_count},
+        }
+        self.artifact_store.put_json(run_id, "performance_timing", payload)
 
     def expire_due_runs(self, *, retention_days: int = 30, now=None):
         from neuralop.flood.serving.retention import ExpirationResult, RetentionManager

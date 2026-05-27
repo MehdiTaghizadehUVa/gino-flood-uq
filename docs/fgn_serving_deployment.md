@@ -165,6 +165,28 @@ curl -k https://${FGN_SITE_HOSTNAME}/api/health
 curl -k https://${FGN_SITE_HOSTNAME}/api/model-bundle-health
 ```
 
+## Inference Speed Tuning
+
+Serving defaults to `FGN_MEMBER_CHUNK_SIZE=4` and
+`FGN_INFERENCE_DTYPE=fp32`. Larger chunks and AMP dtypes are opt-in and should
+be accepted with the benchmark harness before changing the lab `.env`:
+
+```bash
+python -m neuralop.flood.serving.benchmark_inference \
+  --bundle /mnt/c/FGNServing/model_bundle/coastal_fgn_bundle.json \
+  --forcing-csv /mnt/c/FGNServing/artifacts/<run_id>/forcing.csv \
+  --forecast-steps 8 \
+  --chunk-sizes 4,8,10,16,20 \
+  --dtypes fp32 \
+  --device cuda:0 \
+  --output-json /tmp/fgn-benchmark.json
+```
+
+Only promote a larger `FGN_MEMBER_CHUNK_SIZE` or `FGN_MEMBER_CHUNK_SIZE=auto`
+when the benchmark reports acceptable VRAM headroom and output deltas against
+the fp32 chunk-size-4 baseline. `FGN_INFERENCE_DTYPE=bf16` or `fp16` must stay
+disabled until its benchmark deltas are accepted for the deployed bundle.
+
 ## Remaining Production Validation
 
 The code and real bundle validation pass. The remaining environment-dependent

@@ -169,6 +169,83 @@ def test_production_fgn_service_runs_reproducible_60_member_rollout(tmp_path):
     assert first.wettable_mask.tolist() == [False, True, True, True, True, True]
 
 
+def test_production_fgn_chunk_sizes_are_equivalent_and_reported(tmp_path):
+    bundle = _bundle(tmp_path)
+    geometry = torch.stack(
+        torch.meshgrid(torch.linspace(0, 1, 3), torch.linspace(0, 1, 2), indexing="ij"),
+        dim=-1,
+    ).reshape(-1, 2)
+    static = torch.ones((geometry.shape[0], 7), dtype=torch.float32)
+    assets = DomainAssets(geometry=geometry, static=static, query_res=(4, 4))
+    normalizers = {
+        "geometry": IdentityNormalizer(2),
+        "static": IdentityNormalizer(7),
+        "boundary": IdentityNormalizer(2),
+        "dynamic": IdentityNormalizer(1),
+        "target": IdentityNormalizer(1),
+    }
+    forcing = parse_forcing_csv(_forcing_csv(), bundle=bundle, requested_forecast_steps=3)
+    spec = RunSpec.new(user_id="u", bundle_id=bundle.bundle_id, input_hash=forcing.input_hash, forecast_steps=3)
+    one = ProductionFGNInferenceService(
+        bundle,
+        device="cpu",
+        member_chunk_size=1,
+        preloaded_models=[TinyFGN(0.0), TinyFGN(0.0), TinyFGN(0.0)],
+        preloaded_normalizers=normalizers,
+        preloaded_domain_assets=assets,
+    ).run(spec, forcing)
+    four = ProductionFGNInferenceService(
+        bundle,
+        device="cpu",
+        member_chunk_size=4,
+        preloaded_models=[TinyFGN(0.0), TinyFGN(0.0), TinyFGN(0.0)],
+        preloaded_normalizers=normalizers,
+        preloaded_domain_assets=assets,
+    ).run(spec, forcing)
+
+    np.testing.assert_allclose(one.members_wd, four.members_wd)
+    assert one.metadata["performance"]["member_chunk_size"] == 1
+    assert four.metadata["performance"]["member_chunk_size"] == 4
+    assert four.metadata["performance"]["expected_forward_calls"] == 45
+
+
+def test_production_fgn_auto_chunk_selects_largest_candidate_on_cpu(tmp_path):
+    bundle = _bundle(tmp_path)
+    geometry = torch.stack(
+        torch.meshgrid(torch.linspace(0, 1, 3), torch.linspace(0, 1, 2), indexing="ij"),
+        dim=-1,
+    ).reshape(-1, 2)
+    static = torch.ones((geometry.shape[0], 7), dtype=torch.float32)
+    assets = DomainAssets(geometry=geometry, static=static, query_res=(4, 4))
+    normalizers = {
+        "geometry": IdentityNormalizer(2),
+        "static": IdentityNormalizer(7),
+        "boundary": IdentityNormalizer(2),
+        "dynamic": IdentityNormalizer(1),
+        "target": IdentityNormalizer(1),
+    }
+    forcing = parse_forcing_csv(_forcing_csv(), bundle=bundle, requested_forecast_steps=2)
+    spec = RunSpec.new(user_id="u", bundle_id=bundle.bundle_id, input_hash=forcing.input_hash, forecast_steps=2)
+
+    result = ProductionFGNInferenceService(
+        bundle,
+        device="cpu",
+        member_chunk_size="auto",
+        preloaded_models=[TinyFGN(0.0), TinyFGN(0.0), TinyFGN(0.0)],
+        preloaded_normalizers=normalizers,
+        preloaded_domain_assets=assets,
+    ).run(spec, forcing)
+
+    assert result.metadata["performance"]["configured_member_chunk_size"] == "auto"
+    assert result.metadata["performance"]["member_chunk_size"] == 20
+    assert result.metadata["performance"]["expected_forward_calls"] == 6
+
+
+def test_production_fgn_service_rejects_unknown_inference_dtype(tmp_path):
+    with pytest.raises(ValueError, match="FGN_INFERENCE_DTYPE"):
+        ProductionFGNInferenceService(_bundle(tmp_path), device="cpu", inference_dtype="int8")
+
+
 def test_production_fgn_service_rejects_wrong_model_count(tmp_path):
     bundle = _bundle(tmp_path)
     assets = DomainAssets(

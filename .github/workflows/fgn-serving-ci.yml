@@ -55,6 +55,7 @@ jobs:
         run: |
           pytest -q \
             neuralop/tests/test_fgn_serving_api.py \
+            neuralop/tests/test_fgn_serving_benchmark.py \
             neuralop/tests/test_fgn_serving_contracts.py \
             neuralop/tests/test_fgn_serving_entrypoints.py \
             neuralop/tests/test_fgn_serving_initial_conditions.py \

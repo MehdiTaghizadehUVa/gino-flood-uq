@@ -9,8 +9,10 @@ from __future__ import annotations
 
 import logging
 import os
+from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
+from time import perf_counter
 from typing import Callable, Dict, Mapping, Protocol, Sequence
 
 import numpy as np
@@ -136,7 +138,8 @@ class ProductionFGNInferenceService:
         bundle: FGNModelBundle,
         *,
         device: str = "cuda:0",
-        member_chunk_size: int = 4,
+        member_chunk_size: int | str = 4,
+        inference_dtype: str = "fp32",
         preloaded_models: Sequence[object] | None = None,
         preloaded_normalizers: Mapping[str, object] | None = None,
         preloaded_domain_assets: DomainAssets | None = None,
@@ -144,12 +147,47 @@ class ProductionFGNInferenceService:
     ) -> None:
         self.bundle = bundle
         self.device_name = str(device)
-        self.member_chunk_size = max(1, int(member_chunk_size))
+        self.member_chunk_size_config = self._parse_member_chunk_size(member_chunk_size)
+        self.member_chunk_size = 4 if self.member_chunk_size_config == "auto" else int(self.member_chunk_size_config)
+        self.inference_dtype = self._parse_inference_dtype(inference_dtype)
         self._models = list(preloaded_models) if preloaded_models is not None else None
         self._normalizers = dict(preloaded_normalizers) if preloaded_normalizers is not None else None
         self._domain_assets = preloaded_domain_assets
         self.initial_condition_provider = initial_condition_provider or initial_condition_provider_from_bundle(bundle)
         self._prepared = None
+        self._autotuned_chunk_sizes: dict[tuple[int, str], int] = {}
+
+    @staticmethod
+    def _parse_member_chunk_size(value: int | str) -> int | str:
+        if isinstance(value, str) and value.strip().lower() == "auto":
+            return "auto"
+        parsed = int(value)
+        if parsed < 1:
+            raise ValueError("FGN_MEMBER_CHUNK_SIZE must be a positive integer or 'auto'.")
+        return parsed
+
+    @staticmethod
+    def _parse_inference_dtype(value: str) -> str:
+        dtype = str(value).strip().lower()
+        if dtype not in {"fp32", "bf16", "fp16"}:
+            raise ValueError("FGN_INFERENCE_DTYPE must be one of: fp32, bf16, fp16.")
+        return dtype
+
+    @staticmethod
+    def _torch_dtype_for_inference(torch, dtype: str):
+        if dtype == "bf16":
+            return torch.bfloat16
+        if dtype == "fp16":
+            return torch.float16
+        return torch.float32
+
+    def _autocast_context(self, torch, device):
+        if self.inference_dtype == "fp32" or getattr(device, "type", "") != "cuda":
+            return nullcontext()
+        return torch.autocast(
+            device_type="cuda",
+            dtype=self._torch_dtype_for_inference(torch, self.inference_dtype),
+        )
 
     def _torch(self):
         import torch
@@ -399,6 +437,98 @@ class ProductionFGNInferenceService:
             raise ValueError("Forcing input is shorter than the requested forecast horizon.")
         return boundary_matrix[:, None, :].expand(-1, n_cells, -1).contiguous()
 
+    def _forward_chunk(
+        self,
+        *,
+        torch,
+        model,
+        geometry,
+        query_points,
+        static,
+        current_boundary,
+        current_dynamics,
+        latent_bank,
+        start_idx: int,
+        end_idx: int,
+        n_cells: int,
+    ):
+        chunk_size = int(end_idx) - int(start_idx)
+        dyn_flat = current_dynamics[start_idx:end_idx].permute(0, 2, 1, 3).reshape(chunk_size, n_cells, -1)
+        bc_flat = current_boundary.permute(1, 0, 2).reshape(1, n_cells, -1).expand(chunk_size, -1, -1)
+        x = torch.cat([static.unsqueeze(0).expand(chunk_size, -1, -1), bc_flat, dyn_flat], dim=2)
+        z = latent_bank[start_idx:end_idx, 0, :]
+        with self._autocast_context(torch, geometry.device):
+            pred = model(
+                input_geom=geometry.unsqueeze(0),
+                latent_queries=query_points.unsqueeze(0),
+                output_queries=geometry.unsqueeze(0),
+                x=x,
+                ada_in=z,
+            )
+        if pred.ndim == 4 and pred.shape[1] == 1:
+            pred = pred[:, 0]
+        if pred.ndim != 3:
+            raise ValueError(f"FGN model output must have shape [batch,n_cells,channels], got {tuple(pred.shape)}.")
+        return pred.to(dtype=torch.float32)
+
+    def _select_member_chunk_size(
+        self,
+        *,
+        torch,
+        model,
+        geometry,
+        query_points,
+        static,
+        current_boundary,
+        current_dynamics,
+        latent_bank,
+        n_per_model: int,
+        n_cells: int,
+    ) -> int:
+        if self.member_chunk_size_config != "auto":
+            return max(1, min(int(self.member_chunk_size_config), int(n_per_model)))
+        cache_key = (int(n_per_model), self.inference_dtype)
+        if cache_key in self._autotuned_chunk_sizes:
+            return self._autotuned_chunk_sizes[cache_key]
+        candidates = [20, 16, 10, 8, 4, 1]
+        usable = [candidate for candidate in candidates if candidate <= int(n_per_model)]
+        memory_fraction = float(os.environ.get("FGN_AUTOTUNE_MEMORY_FRACTION", "0.85"))
+        selected = 1
+        for candidate in usable:
+            try:
+                if geometry.device.type == "cuda":
+                    torch.cuda.empty_cache()
+                    torch.cuda.reset_peak_memory_stats(device=geometry.device)
+                pred = self._forward_chunk(
+                    torch=torch,
+                    model=model,
+                    geometry=geometry,
+                    query_points=query_points,
+                    static=static,
+                    current_boundary=current_boundary,
+                    current_dynamics=current_dynamics,
+                    latent_bank=latent_bank,
+                    start_idx=0,
+                    end_idx=candidate,
+                    n_cells=n_cells,
+                )
+                del pred
+                if geometry.device.type == "cuda":
+                    peak = float(torch.cuda.max_memory_allocated(device=geometry.device))
+                    total = float(torch.cuda.get_device_properties(geometry.device).total_memory)
+                    if total > 0.0 and peak / total > memory_fraction:
+                        continue
+                selected = candidate
+                break
+            except RuntimeError as exc:
+                if "out of memory" not in str(exc).lower():
+                    raise
+                if geometry.device.type == "cuda":
+                    torch.cuda.empty_cache()
+                continue
+        self._autotuned_chunk_sizes[cache_key] = selected
+        return selected
+
     def run(
         self,
         run_spec: RunSpec,
@@ -412,7 +542,10 @@ class ProductionFGNInferenceService:
             clamp_structural_dry_normalized_values,
         )
 
+        load_start = perf_counter()
+        was_prepared = self._prepared is not None
         prepared = self._ensure_loaded()
+        model_load_seconds = 0.0 if was_prepared else perf_counter() - load_start
         device = prepared["device"]
         normalizers = prepared["normalizers"]
         models = prepared["models"]
@@ -427,8 +560,11 @@ class ProductionFGNInferenceService:
                 f"RunSpec forecast_steps={n_time} does not match forcing forecast_steps={forcing_input.forecast_steps}."
             )
 
+        if device.type == "cuda":
+            torch.cuda.reset_peak_memory_stats(device=device)
         boundary_raw = self._boundary_tensor(forcing_input, n_cells=n_cells, device=device)
         boundary_norm = self._normalize(normalizers["boundary"], boundary_raw)
+        initial_condition_start = perf_counter()
         initial_condition = self.initial_condition_provider.resolve(
             forcing_input,
             bundle=self.bundle,
@@ -444,6 +580,7 @@ class ProductionFGNInferenceService:
             initial_dyn_raw = initial_dyn_raw.clone()
             initial_dyn_raw[:, dry_mask, :] = 0.0
         initial_dyn_norm = self._normalize(normalizers["dynamic"], initial_dyn_raw)
+        initial_condition_seconds = perf_counter() - initial_condition_start
         start = int(self.bundle.skip_before_timestep) + int(self.bundle.n_history)
         initial_boundary = boundary_norm[self.bundle.skip_before_timestep:start].clone()
         boundary_future = boundary_norm[start:start + n_time]
@@ -466,7 +603,10 @@ class ProductionFGNInferenceService:
             )
         total_rollout_steps = max(1, n_models * n_time)
         completed_rollout_steps = 0
-        with torch.no_grad():
+        rollout_start = perf_counter()
+        selected_chunk_size: int | None = None
+        forward_calls = 0
+        with torch.inference_mode():
             for model_idx, model in enumerate(models[:n_models]):
                 latent_bank = self._latent_bank(
                     n_members=n_per_model,
@@ -475,53 +615,56 @@ class ProductionFGNInferenceService:
                     device=device,
                     dtype=dtype,
                 )
-                current_dynamics = [initial_dyn_norm.clone() for _ in range(n_per_model)]
+                current_dynamics = initial_dyn_norm.unsqueeze(0).expand(n_per_model, -1, -1, -1).clone()
                 current_boundary = initial_boundary.clone()
-                model_members = []
+                chunk_size = self._select_member_chunk_size(
+                    torch=torch,
+                    model=model,
+                    geometry=geometry,
+                    query_points=query_points,
+                    static=static,
+                    current_boundary=current_boundary,
+                    current_dynamics=current_dynamics,
+                    latent_bank=latent_bank,
+                    n_per_model=n_per_model,
+                    n_cells=n_cells,
+                )
+                selected_chunk_size = chunk_size if selected_chunk_size is None else min(selected_chunk_size, chunk_size)
+                model_members = torch.empty((n_per_model, n_time, n_cells), dtype=torch.float32, device=device)
                 for t in range(n_time):
                     pred_chunks = []
-                    for start_idx in range(0, n_per_model, self.member_chunk_size):
-                        end_idx = min(n_per_model, start_idx + self.member_chunk_size)
-                        chunk_size = end_idx - start_idx
-                        dyn_flat = torch.stack(
-                            [
-                                current_dynamics[member_idx].permute(1, 0, 2).reshape(n_cells, -1)
-                                for member_idx in range(start_idx, end_idx)
-                            ],
-                            dim=0,
+                    for start_idx in range(0, n_per_model, chunk_size):
+                        end_idx = min(n_per_model, start_idx + chunk_size)
+                        pred_chunks.append(
+                            self._forward_chunk(
+                                torch=torch,
+                                model=model,
+                                geometry=geometry,
+                                query_points=query_points,
+                                static=static,
+                                current_boundary=current_boundary,
+                                current_dynamics=current_dynamics,
+                                latent_bank=latent_bank,
+                                start_idx=start_idx,
+                                end_idx=end_idx,
+                                n_cells=n_cells,
+                            )
                         )
-                        bc_flat = current_boundary.permute(1, 0, 2).reshape(1, n_cells, -1).expand(
-                            chunk_size, -1, -1
-                        )
-                        x = torch.cat([static.unsqueeze(0).expand(chunk_size, -1, -1), bc_flat, dyn_flat], dim=2)
-                        z = latent_bank[start_idx:end_idx, 0, :]
-                        pred = model(
-                            input_geom=geometry.unsqueeze(0),
-                            latent_queries=query_points.unsqueeze(0),
-                            output_queries=geometry.unsqueeze(0),
-                            x=x,
-                            ada_in=z,
-                        )
-                        if pred.ndim == 4 and pred.shape[1] == 1:
-                            pred = pred[:, 0]
-                        if pred.ndim != 3:
-                            raise ValueError(f"FGN model output must have shape [batch,n_cells,channels], got {tuple(pred.shape)}.")
-                        pred_chunks.append(pred)
+                        forward_calls += 1
                     pred_stack = torch.cat(pred_chunks, dim=0).unsqueeze(1)  # [M,1,N,1]
-                    inv_pred = normalizers["target"].inverse_transform(pred_stack.squeeze(1))
+                    inv_pred = normalizers["target"].inverse_transform(pred_stack.squeeze(1)).to(dtype=torch.float32)
                     inv_pred = apply_structural_dry_zero_mask(inv_pred, structural_dry_mask=dry_mask)
                     inv_pred = torch.clamp(inv_pred, min=0.0)
-                    model_members.append(inv_pred[..., 0].detach().cpu())
+                    model_members[:, t, :] = inv_pred[..., 0]
                     update_stack = clamp_structural_dry_normalized_values(
                         pred_stack,
                         structural_dry_mask=dry_mask,
                         normalizer=normalizers["target"],
                     )
-                    for member_idx in range(n_per_model):
-                        current_dynamics[member_idx] = torch.cat(
-                            [current_dynamics[member_idx][1:], update_stack[member_idx, 0].unsqueeze(0)],
-                            dim=0,
-                        )
+                    current_dynamics = torch.cat(
+                        [current_dynamics[:, 1:], update_stack[:, 0].unsqueeze(1)],
+                        dim=1,
+                    )
                     current_boundary = torch.cat([current_boundary[1:], boundary_future[t].unsqueeze(0)], dim=0)
                     completed_rollout_steps += 1
                     if progress_callback is not None:
@@ -533,11 +676,17 @@ class ProductionFGNInferenceService:
                                 f"lead {t + 1}/{n_time}"
                             ),
                         )
-                outputs.append(torch.stack(model_members, dim=1))  # [M,T,N]
+                outputs.append(model_members.detach().cpu())  # [M,T,N]
                 member_model_id.extend([f"model_{model_idx}"] * n_per_model)
                 member_sample_id.extend(list(range(n_per_model)))
 
+        rollout_seconds = perf_counter() - rollout_start
         members = torch.cat(outputs, dim=0).numpy().astype(np.float32, copy=False)
+        selected_chunk_size = int(selected_chunk_size or min(max(1, self.member_chunk_size), n_per_model))
+        expected_forward_calls = int(n_models * n_time * ((n_per_model + selected_chunk_size - 1) // selected_chunk_size))
+        cuda_peak_mb = None
+        if device.type == "cuda":
+            cuda_peak_mb = float(torch.cuda.max_memory_allocated(device=device)) / (1024.0 * 1024.0)
         lead_hours = (np.arange(1, n_time + 1, dtype=np.float32) * float(self.bundle.dt_seconds)) / 3600.0
         wettable = None
         if dry_mask is not None:
@@ -564,5 +713,17 @@ class ProductionFGNInferenceService:
                 "initial_condition": initial_condition.selection,
                 "fgn_latent_temporal_mode": "persistent",
                 "fgn_ar_state_update": "member_feedback",
+                "performance": {
+                    "model_load_seconds": float(model_load_seconds),
+                    "initial_condition_seconds": float(initial_condition_seconds),
+                    "rollout_seconds": float(rollout_seconds),
+                    "configured_member_chunk_size": str(self.member_chunk_size_config),
+                    "member_chunk_size": int(selected_chunk_size),
+                    "expected_forward_calls": int(expected_forward_calls),
+                    "forward_calls": int(forward_calls),
+                    "inference_dtype": self.inference_dtype,
+                    "device": str(device),
+                    "cuda_max_memory_allocated_mb": cuda_peak_mb,
+                },
             },
         ).validate()
