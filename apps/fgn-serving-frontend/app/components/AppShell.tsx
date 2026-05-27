@@ -25,8 +25,8 @@ const navItems: Array<{
   active: AppSection;
   icon: ReactNode;
 }> = [
-  { href: "/", label: "New run", active: "home", icon: <Home size={16} /> },
-  { href: "/#runs", label: "Run queue", active: "runs", icon: <ListChecks size={16} /> },
+  { href: "/?workspace=new", label: "New run", active: "home", icon: <Home size={16} /> },
+  { href: "/?workspace=runs#runs", label: "Run queue", active: "runs", icon: <ListChecks size={16} /> },
   { href: "/admin", label: "Admin", active: "admin", icon: <ShieldCheck size={16} /> },
   {
     href: "/admin/monitoring",

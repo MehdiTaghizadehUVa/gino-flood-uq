@@ -109,6 +109,8 @@ type RunStatus =
   | "EXPIRED"
   | "DELETED";
 
+type HomeWorkspace = "new" | "runs";
+
 const DESCRIPTOR_LABELS: Record<string, string> = {
   stage_max: "Peak coastal stage",
   stage_min: "Minimum coastal stage",
@@ -160,6 +162,14 @@ const TERMINAL_STATUSES: ReadonlySet<RunStatus> = new Set(["COMPLETED", "FAILED"
 const TERMINAL_FAILED: ReadonlySet<RunStatus> = new Set(["FAILED", "CANCELED", "EXPIRED", "DELETED"]);
 const POLL_INTERVAL_ACTIVE_MS = 4000;
 const POLL_INTERVAL_IDLE_MS = 20000;
+
+function workspaceFromLocation(): HomeWorkspace {
+  if (typeof window === "undefined") return "new";
+  const params = new URLSearchParams(window.location.search);
+  const requested = params.get("workspace");
+  if (requested === "runs" || window.location.hash === "#runs") return "runs";
+  return "new";
+}
 
 type StageMark = "done" | "current" | "pending" | "failed" | "canceled";
 
@@ -1262,6 +1272,7 @@ function buildScenarioCsv(bundle: Bundle | null, scenario: SampleScenario) {
 }
 
 export default function Page() {
+  const [workspaceMode, setWorkspaceMode] = useState<HomeWorkspace>("new");
   const [user, setUser] = useState<User | null>(null);
   const [bundle, setBundle] = useState<Bundle | null>(null);
   const [runs, setRuns] = useState<RunRow[]>([]);
@@ -1287,6 +1298,17 @@ export default function Page() {
   const [validation, setValidation] = useState<ValidationState | null>(null);
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    const syncWorkspaceMode = () => setWorkspaceMode(workspaceFromLocation());
+    syncWorkspaceMode();
+    window.addEventListener("popstate", syncWorkspaceMode);
+    window.addEventListener("hashchange", syncWorkspaceMode);
+    return () => {
+      window.removeEventListener("popstate", syncWorkspaceMode);
+      window.removeEventListener("hashchange", syncWorkspaceMode);
+    };
+  }, []);
 
   const refresh = useCallback(async () => {
     const [meRes, bundleRes, runsRes] = await Promise.all([
@@ -1722,7 +1744,7 @@ export default function Page() {
   }
 
   return (
-    <AppShell active="home" userEmail={user?.email}>
+    <AppShell active={workspaceMode === "runs" ? "runs" : "home"} userEmail={user?.email}>
       <div className="shell">
         <PageHeader
           kicker="Coastal flood research console"
@@ -1775,7 +1797,8 @@ export default function Page() {
           />
         </section>
 
-      <section className="workspace">
+      <section className={`workspace workspace-${workspaceMode}`} id={workspaceMode === "runs" ? "runs" : "new-run"}>
+        {workspaceMode === "new" && (
         <aside className="panel input-panel">
           <div className="section-head">
             <div>
@@ -1928,8 +1951,10 @@ export default function Page() {
           </button>
           {message && <p className="message">{message}</p>}
         </aside>
+        )}
 
-        <section className="panel run-panel">
+        {workspaceMode === "runs" && (
+        <section className="panel run-panel" id="runs">
           <div className="section-head">
             <div>
               <p className="eyebrow">Operations</p>
@@ -2035,6 +2060,7 @@ export default function Page() {
             {runs.length === 0 && <li className="empty">No runs yet. Generate a sample scenario or upload a CSV to start.</li>}
           </ul>
         </section>
+        )}
       </section>
 
       {deleteModalOpen && (
@@ -2232,6 +2258,8 @@ export default function Page() {
           padding: 20px;
         }
         .workspace { display: grid; grid-template-columns: minmax(340px, 420px) 1fr; gap: 16px; align-items: start; }
+        .workspace-new, .workspace-runs { grid-template-columns: minmax(0, 1fr); }
+        .workspace-new .input-panel { max-width: 760px; }
         .section-head { display: flex; justify-content: space-between; align-items: center; gap: 16px; margin-bottom: 8px; }
         .section-head h2 { font-size: 16px; font-weight: 700; letter-spacing: -0.01em; color: var(--text); margin: 0; }
         .section-head .eyebrow { color: var(--text-muted); font-size: 10.5px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.08em; margin: 0 0 2px; }
@@ -3053,6 +3081,13 @@ export default function Page() {
         .workspace {
           grid-template-columns: minmax(360px, 420px) minmax(0, 1fr);
           gap: 18px;
+        }
+        .workspace-new,
+        .workspace-runs {
+          grid-template-columns: minmax(0, 1fr);
+        }
+        .workspace-new .input-panel {
+          max-width: 760px;
         }
         .panel {
           border-color: var(--border);
