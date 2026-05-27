@@ -212,6 +212,7 @@ def _rollout_prediction_per_hydrograph(
     forecast_artifact_dir: Optional[str] = None,
     calibration_model: Optional[Mapping[str, Any]] = None,
     calibration_metadata: Optional[Mapping[str, Any]] = None,
+    write_visualizations: bool = True,
 ) -> None:
     """
     Evaluate per hydrograph using all reference simulations as ground-truth uncertainty.
@@ -977,29 +978,30 @@ def _rollout_prediction_per_hydrograph(
             )
             logger.info("Saved calibration forecast artifact for hydrograph %s to %s", hydro_id, artifact_path)
 
-        _save_hydrograph_uq_figures_and_animation(
-            geometry=sample.get("geometry_raw", geometry),
-            pred_mean_by_channel=pred_mean_by_channel,
-            pred_std_by_channel=pred_std_by_channel,
-            gt_mean_by_channel=gt_mean_by_channel,
-            gt_std_by_channel=gt_std_by_channel,
-            target_variables=target_variables,
-            out_dir=out_dir,
-            hydrograph_id=hydro_id,
-            dt_seconds=dt,
-            n_ref_sims=n_ref,
-            n_ens=n_ens,
-            pred_prob_wd=pred_prob_wd,
-            gt_prob_wd=gt_prob_wd,
-            crps_map_wd=crps_map_wd,
-            boundary_series_raw=sample.get("boundary_series_raw"),
-            boundary_ensemble_series_raw=sample.get("boundary_ensemble_series_raw"),
-            boundary_channel_names=sample.get("boundary_channel_names"),
-            relative_l2_by_channel=relative_l2_by_channel,
-            rollout_start_index=start_pred_t,
-            elevation_raw=sample.get("elevation_raw"),
-            visualization_config=visualization_config,
-        )
+        if write_visualizations:
+            _save_hydrograph_uq_figures_and_animation(
+                geometry=sample.get("geometry_raw", geometry),
+                pred_mean_by_channel=pred_mean_by_channel,
+                pred_std_by_channel=pred_std_by_channel,
+                gt_mean_by_channel=gt_mean_by_channel,
+                gt_std_by_channel=gt_std_by_channel,
+                target_variables=target_variables,
+                out_dir=out_dir,
+                hydrograph_id=hydro_id,
+                dt_seconds=dt,
+                n_ref_sims=n_ref,
+                n_ens=n_ens,
+                pred_prob_wd=pred_prob_wd,
+                gt_prob_wd=gt_prob_wd,
+                crps_map_wd=crps_map_wd,
+                boundary_series_raw=sample.get("boundary_series_raw"),
+                boundary_ensemble_series_raw=sample.get("boundary_ensemble_series_raw"),
+                boundary_channel_names=sample.get("boundary_channel_names"),
+                relative_l2_by_channel=relative_l2_by_channel,
+                rollout_start_index=start_pred_t,
+                elevation_raw=sample.get("elevation_raw"),
+                visualization_config=visualization_config,
+            )
 
         if impact_metrics_enabled and run_pred_wd_ens and run_gt_wd_ref:
             run_impact_metrics = compute_flood_impact_crps_metrics(

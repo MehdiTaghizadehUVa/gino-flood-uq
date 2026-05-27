@@ -91,6 +91,34 @@ def _normalize_config_rollout_out_dir(config) -> Path:
     return out_dir
 
 
+def _as_bool(value, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "y", "on"}:
+        return True
+    if text in {"0", "false", "no", "n", "off"}:
+        return False
+    return default
+
+
+def _optional_path(value) -> Path | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text or text.lower() in {"none", "null"}:
+        return None
+    path = Path(text).expanduser()
+    if not path.is_absolute():
+        path = path.resolve()
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
 def main() -> int:
     """Run post-training one-step and/or rollout evaluation."""
     args = _parse_args()
@@ -106,6 +134,8 @@ def main() -> int:
     if not checkpoint_path.is_absolute():
         checkpoint_path = checkpoint_path.resolve()
     rollout_out_dir = _normalize_config_rollout_out_dir(config)
+    forecast_artifact_dir = _optional_path(_opt(config, "rollout", "forecast_artifact_dir", None))
+    write_visualizations = _as_bool(_opt(config, "rollout", "write_visualizations", True), True)
     preferred_checkpoint_alias = _preferred_checkpoint_alias(config)
     try:
         checkpoint_runs = _discover_checkpoint_runs(
@@ -378,6 +408,10 @@ def main() -> int:
             "Hydrograph-grouped mode enabled: %d hydrographs with reference ensembles.",
             len(hydrograph_samples),
         )
+    if forecast_artifact_dir is not None:
+        logger.info("Forecast-member HDF5 artifact writing enabled: %s", forecast_artifact_dir)
+    if not write_visualizations:
+        logger.info("Rollout visualization rendering disabled by rollout.write_visualizations=false.")
     with _PhaseTimer(logger, "Rollout evaluation + plotting"):
         if hydrograph_samples:
             _rollout_prediction_per_hydrograph(
@@ -406,6 +440,8 @@ def main() -> int:
                 mc_dropout_seed=mc_dropout_cfg.seed,
                 visualization_config=_opt(config, None, "visualization", None),
                 impact_metrics_config=_opt(config, "rollout", "impact_metrics", None),
+                forecast_artifact_dir=str(forecast_artifact_dir) if forecast_artifact_dir is not None else None,
+                write_visualizations=write_visualizations,
             )
         else:
             _rollout_prediction_generic(
