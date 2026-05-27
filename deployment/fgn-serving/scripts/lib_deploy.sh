@@ -17,10 +17,25 @@ die() {
 load_lab_env() {
   local env_file="${ENV_FILE:-${DEPLOY_DIR}/.env}"
   if [[ -f "${env_file}" ]]; then
+    local preserved_deploy_commit="${FGN_DEPLOY_COMMIT:-}"
+    local preserved_api_image="${FGN_API_IMAGE:-}"
+    local preserved_worker_image="${FGN_WORKER_IMAGE:-}"
+    local preserved_cleanup_image="${FGN_CLEANUP_IMAGE:-}"
+    local preserved_frontend_image="${FGN_FRONTEND_IMAGE:-}"
+
     set -a
     # shellcheck disable=SC1090
     source "${env_file}"
     set +a
+
+    # GitHub Actions injects immutable image tags for deployments. Preserve those
+    # over local .env pins so automation can deploy a newly-built commit without
+    # rewriting the lab secrets/config file.
+    [[ -n "${preserved_deploy_commit}" ]] && export FGN_DEPLOY_COMMIT="${preserved_deploy_commit}"
+    [[ -n "${preserved_api_image}" ]] && export FGN_API_IMAGE="${preserved_api_image}"
+    [[ -n "${preserved_worker_image}" ]] && export FGN_WORKER_IMAGE="${preserved_worker_image}"
+    [[ -n "${preserved_cleanup_image}" ]] && export FGN_CLEANUP_IMAGE="${preserved_cleanup_image}"
+    [[ -n "${preserved_frontend_image}" ]] && export FGN_FRONTEND_IMAGE="${preserved_frontend_image}"
   fi
 }
 
