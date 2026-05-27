@@ -3,7 +3,7 @@ ruamel.yaml
 configmypy
 tensorly
 tensorly-torch
-torch-harmonics
+torch-harmonics==0.7.4
 matplotlib
 pillow
 opt-einsum
