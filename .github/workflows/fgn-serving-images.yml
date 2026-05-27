@@ -14,7 +14,7 @@ permissions:
 jobs:
   build-and-push:
     if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
-    runs-on: [self-hosted, fgn-lab, linux, gpu]
+    runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
@@ -53,11 +53,13 @@ jobs:
         with:
           context: .
           file: deployment/fgn-serving/python.Dockerfile
+          platforms: linux/amd64
           push: true
           tags: ${{ steps.meta.outputs.python_tags }}
       - name: Build and push frontend image
         uses: docker/build-push-action@v6
         with:
           context: apps/fgn-serving-frontend
+          platforms: linux/amd64
           push: true
           tags: ${{ steps.meta.outputs.frontend_tags }}
