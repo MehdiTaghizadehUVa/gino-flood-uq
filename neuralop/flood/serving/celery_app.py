@@ -14,11 +14,33 @@ from neuralop.flood.serving.factory import build_orchestrator
 
 _broker = os.environ.get("CELERY_BROKER_URL") or os.environ.get("REDIS_URL", "redis://redis:6379/0")
 _backend = os.environ.get("CELERY_RESULT_BACKEND", _broker)
+
+
+def _int_env(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        return default
+    return value if value > 0 else default
+
+
+# Recycle the prefork child after a bounded number of tasks so any
+# matplotlib / CUDA / cartopy global-state drift (notably the RcParams
+# corruption that produced the ``unhashable type: 'RcParams'`` failure in
+# render.py::_plot_spatial_field) cannot accumulate indefinitely. The
+# ``worker_process_init`` handler below reloads model bundles after each
+# recycle so the cost is one model-load (~30s) per ~20 inferences.
+_max_tasks_per_child = _int_env("FGN_WORKER_MAX_TASKS_PER_CHILD", 20)
+
 app = Celery("fgn_serving", broker=_broker, backend=_backend)
 app.conf.update(
     task_track_started=True,
     worker_prefetch_multiplier=1,
     task_acks_late=False,
+    worker_max_tasks_per_child=_max_tasks_per_child,
 )
 
 _orchestrator = None

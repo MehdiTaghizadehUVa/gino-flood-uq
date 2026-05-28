@@ -176,12 +176,20 @@ def write_rivanna_style_map_png(
         raise ValueError(f"values length {arr.shape[0]} does not match geometry cells {xy.shape[0]}.")
 
     import matplotlib
+    import matplotlib as mpl
 
     matplotlib.use("Agg", force=True)
     import matplotlib.pyplot as plt
     from neuralop.flood.eval import render as eval_render
 
-    plt.rcParams.update(
+    x = xy[:, 0]
+    y = xy[:, 1]
+    fig_size = (7.2, 6.1)
+    dpi = int(dpi)
+    # rc_context isolates rcParams mutations to this render so any corruption
+    # (see render._plot_spatial_field for the matplotlib RcParams gotcha)
+    # cannot leak across runs in the long-running Celery worker.
+    with mpl.rc_context(
         {
             "font.family": "DejaVu Sans",
             "font.size": 9,
@@ -191,60 +199,55 @@ def write_rivanna_style_map_png(
             "xtick.labelsize": 8,
             "ytick.labelsize": 8,
         }
-    )
-
-    x = xy[:, 0]
-    y = xy[:, 1]
-    fig_size = (7.2, 6.1)
-    dpi = int(dpi)
-    renderer = eval_render._build_spatial_renderer(x, y, figsize=fig_size, dpi=dpi, n_rows=1, n_cols=1)
-    context = eval_render._cartographic_context(
-        x=x,
-        y=y,
-        elevation_raw=elevation_raw,
-        out_dir=str(Path(output_path).parent),
-        visualization_config=visualization_config or DEFAULT_SERVING_VISUALIZATION_CONFIG,
-    )
-    if vmax is None:
-        vmax = eval_render._wd_spatial_vmax(arr) if is_wd_depth else eval_render._robust_nonnegative_vmax(arr)
-    if not np.isfinite(vmax) or vmax <= 0.0:
-        vmax = 1.0
-
-    out_path = Path(output_path)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    fig, ax = plt.subplots(
-        1,
-        1,
-        figsize=fig_size,
-        dpi=dpi,
-        constrained_layout=True,
-        facecolor="#f7fafb",
-    )
-    try:
-        ax.set_facecolor("#f7fafb")
-        artist, _ = eval_render._plot_spatial_panel(
-            ax=ax,
+    ):
+        renderer = eval_render._build_spatial_renderer(x, y, figsize=fig_size, dpi=dpi, n_rows=1, n_cols=1)
+        context = eval_render._cartographic_context(
             x=x,
             y=y,
-            arr=arr,
-            renderer=renderer,
-            context=context,
-            cmap=cmap,
-            vmin=float(vmin),
-            vmax=float(vmax),
-            is_wd_depth=is_wd_depth,
-            zero_transparent=zero_transparent,
-            annotate=annotate,
+            elevation_raw=elevation_raw,
+            out_dir=str(Path(output_path).parent),
+            visualization_config=visualization_config or DEFAULT_SERVING_VISUALIZATION_CONFIG,
         )
-        ax.set_title(title, loc="left", color="#102027", pad=8)
-        ax.set_aspect("equal")
-        ax.axis("off")
-        cbar = fig.colorbar(artist, ax=ax, fraction=0.046, pad=0.02)
-        cbar.set_label(colorbar_label)
-        cbar.ax.tick_params(labelsize=8, colors="#3f535b")
-        cbar.outline.set_edgecolor("#aebfc7")
-        cbar.set_label(colorbar_label, color="#102027", fontsize=8.5)
-        fig.savefig(out_path, bbox_inches="tight", pad_inches=0.08, facecolor=fig.get_facecolor())
-    finally:
-        plt.close(fig)
-    return out_path
+        if vmax is None:
+            vmax = eval_render._wd_spatial_vmax(arr) if is_wd_depth else eval_render._robust_nonnegative_vmax(arr)
+        if not np.isfinite(vmax) or vmax <= 0.0:
+            vmax = 1.0
+
+        out_path = Path(output_path)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        fig, ax = plt.subplots(
+            1,
+            1,
+            figsize=fig_size,
+            dpi=dpi,
+            constrained_layout=True,
+            facecolor="#f7fafb",
+        )
+        try:
+            ax.set_facecolor("#f7fafb")
+            artist, _ = eval_render._plot_spatial_panel(
+                ax=ax,
+                x=x,
+                y=y,
+                arr=arr,
+                renderer=renderer,
+                context=context,
+                cmap=cmap,
+                vmin=float(vmin),
+                vmax=float(vmax),
+                is_wd_depth=is_wd_depth,
+                zero_transparent=zero_transparent,
+                annotate=annotate,
+            )
+            ax.set_title(title, loc="left", color="#102027", pad=8)
+            ax.set_aspect("equal")
+            ax.axis("off")
+            cbar = fig.colorbar(artist, ax=ax, fraction=0.046, pad=0.02)
+            cbar.set_label(colorbar_label)
+            cbar.ax.tick_params(labelsize=8, colors="#3f535b")
+            cbar.outline.set_edgecolor("#aebfc7")
+            cbar.set_label(colorbar_label, color="#102027", fontsize=8.5)
+            fig.savefig(out_path, bbox_inches="tight", pad_inches=0.08, facecolor=fig.get_facecolor())
+        finally:
+            plt.close(fig)
+        return out_path

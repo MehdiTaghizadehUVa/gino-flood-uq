@@ -1240,47 +1240,71 @@ def _plot_spatial_field(
         except TypeError as exc:
             if "RcParams" not in str(exc):
                 raise
+            # Root cause (reproduced standalone): some rcParam validated as
+            # ``str | Colormap`` (notably ``image.cmap``) has been silently
+            # replaced by an ``RcParams`` instance in the long-running Celery
+            # worker. Matplotlib's ``cm._ensure_cmap`` then evaluates
+            # ``rcParams["image.cmap"] not in _colormaps`` which hashes the
+            # corrupted value → ``TypeError: unhashable type: 'RcParams'``.
+            # We can't fix the upstream corruption from here, but a fresh
+            # ``rc_context`` snapshot restores known-good defaults for the
+            # retry without clobbering the worker's customised rcParams
+            # outside this call (which the previous ``mpl.rcdefaults()``
+            # workaround did). The cleanup loop strips any half-attached
+            # collections left by the failed ``tripcolor``.
+            import logging as _logging
+            import matplotlib as _mpl
+
+            _logger = _logging.getLogger(__name__)
+            _logger.warning(
+                "matplotlib rcParams corruption detected inside _plot_spatial_field; "
+                "retrying tripcolor with an isolated rc_context (rcParams keys with "
+                "RcParams-typed values: %s)",
+                [
+                    k
+                    for k in _mpl.rcParams
+                    if isinstance(_mpl.rcParams._get(k), _mpl.RcParams)
+                ],
+            )
             while len(ax.collections) > before_collections:
                 ax.collections[-1].remove()
-            # Matplotlib 3.10 can occasionally leave RcParams in a bad state
-            # inside long-lived Celery fork workers after heavy CUDA inference.
-            # Reset and retry the smooth triangular renderer before degrading
-            # to the scatter fallback.
-            import matplotlib as mpl
-
-            mpl.rcdefaults()
-            try:
-                return ax.tripcolor(
-                    renderer["triangulation"],
-                    np.ma.masked_invalid(np.asarray(arr, dtype=np.float64)),
-                    shading="gouraud",
-                    edgecolors="none",
-                    linewidths=0.0,
-                    antialiaseds=False,
-                    rasterized=True,
-                    **kwargs,
-                )
-            except TypeError as retry_exc:
-                if "RcParams" not in str(retry_exc):
-                    raise
-                while len(ax.collections) > before_collections:
-                    ax.collections[-1].remove()
-                marker_size = _adaptive_marker_size(
-                    x,
-                    y,
-                    figsize=tuple(ax.figure.get_size_inches()),
-                    dpi=int(ax.figure.dpi),
-                    n_rows=1,
-                    n_cols=1,
-                    fill_factor=1.20,
-                )
-                return ax.scatter(
-                    x,
-                    y,
-                    c=np.ma.masked_invalid(np.asarray(arr, dtype=np.float64)),
-                    **_scatter_style(float(marker_size)),
-                    **kwargs,
-                )
+            with _mpl.rc_context():
+                try:
+                    return ax.tripcolor(
+                        renderer["triangulation"],
+                        np.ma.masked_invalid(np.asarray(arr, dtype=np.float64)),
+                        shading="gouraud",
+                        edgecolors="none",
+                        linewidths=0.0,
+                        antialiaseds=False,
+                        rasterized=True,
+                        **kwargs,
+                    )
+                except TypeError as retry_exc:
+                    if "RcParams" not in str(retry_exc):
+                        raise
+                    _logger.warning(
+                        "tripcolor still failed inside rc_context; falling back "
+                        "to scatter renderer for this frame"
+                    )
+                    while len(ax.collections) > before_collections:
+                        ax.collections[-1].remove()
+                    marker_size = _adaptive_marker_size(
+                        x,
+                        y,
+                        figsize=tuple(ax.figure.get_size_inches()),
+                        dpi=int(ax.figure.dpi),
+                        n_rows=1,
+                        n_cols=1,
+                        fill_factor=1.20,
+                    )
+                    return ax.scatter(
+                        x,
+                        y,
+                        c=np.ma.masked_invalid(np.asarray(arr, dtype=np.float64)),
+                        **_scatter_style(float(marker_size)),
+                        **kwargs,
+                    )
     return ax.scatter(
         x,
         y,
@@ -2236,6 +2260,11 @@ def _save_hydrograph_uq_figures_and_animation(
     """Generate publication-ready UQ figures and animations per hydrograph."""
     import matplotlib as mpl
 
+    # Note: the bare ``mpl.rc("font", ...)`` below mutates global rcParams.
+    # That is safe because serving-side entry points (e.g. ``ProductsWriter``,
+    # ``write_rivanna_style_map_png``) already wrap calls into this module in
+    # ``mpl.rc_context`` so the mutation is scoped. Direct callers from the
+    # research/eval CLI accept global state changes.
     mpl.rc("font", family="serif", size=11)
     x, y = _geometry_xy(geometry)
     cartographic_context = _cartographic_context(

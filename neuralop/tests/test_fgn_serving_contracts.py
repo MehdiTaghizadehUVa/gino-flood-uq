@@ -467,11 +467,24 @@ def test_serving_renderer_depends_on_eval_render_private_helpers():
     )
 
 
-def test_tri_renderer_recovers_from_rcparams_typeerror(monkeypatch):
-    """Regression guard for Matplotlib RcParams failures in Celery workers."""
+def test_tri_renderer_recovers_from_rcparams_typeerror(monkeypatch, caplog):
+    """Regression guard for Matplotlib RcParams failures in Celery workers.
+
+    Root cause (reproduced standalone in 2026-05 diagnosis): inside long-running
+    Celery prefork workers, a validated rcParam like ``image.cmap`` can be
+    silently replaced by an ``RcParams`` instance. Matplotlib's
+    ``cm._ensure_cmap`` then evaluates ``rcParams["image.cmap"] not in
+    _colormaps`` which hashes the corrupted value and raises
+    ``TypeError: unhashable type: 'RcParams'`` mid-``tripcolor``. This test
+    forces that error on the first call and asserts the renderer recovers
+    inside its ``rc_context`` retry without leaking rcParams changes.
+    """
+    import logging
+
     import matplotlib
 
     matplotlib.use("Agg", force=True)
+    import matplotlib as mpl
     import matplotlib.pyplot as plt
     from matplotlib.tri import Triangulation
     from neuralop.flood.eval import render as eval_render
@@ -491,21 +504,72 @@ def test_tri_renderer_recovers_from_rcparams_typeerror(monkeypatch):
         return original_tripcolor(*args, **kwargs)
 
     monkeypatch.setattr(ax, "tripcolor", flaky_tripcolor)
+    # Capture a known custom rcParam outside the call to prove the workaround
+    # no longer clobbers the worker's rcParams when it recovers.
+    monkeypatch.setitem(mpl.rcParams, "figure.dpi", 137.0)
     try:
-        artist = eval_render._plot_spatial_field(
-            ax=ax,
-            x=x,
-            y=y,
-            arr=arr,
-            renderer=renderer,
-            cmap="viridis",
-            vmin=0.0,
-            vmax=1.0,
-        )
+        with caplog.at_level(logging.WARNING, logger=eval_render.__name__):
+            artist = eval_render._plot_spatial_field(
+                ax=ax,
+                x=x,
+                y=y,
+                arr=arr,
+                renderer=renderer,
+                cmap="viridis",
+                vmin=0.0,
+                vmax=1.0,
+            )
         assert artist is not None
         assert calls["n"] == 2
+        # Worker's custom rcParams must survive the retry path.
+        assert mpl.rcParams["figure.dpi"] == 137.0
+        # And the recovery must be observable in logs.
+        assert any(
+            "rcParams corruption" in record.getMessage() for record in caplog.records
+        ), "expected warning when the RcParams workaround fires"
     finally:
         plt.close(fig)
+
+
+def test_serving_renderers_isolate_rcparams_with_rc_context():
+    """rcParams.update inside serving renderers must not leak globally.
+
+    After 2026-05's diagnosis, all ``rcParams.update`` calls in
+    ``serving/products.py``, ``serving/map_rendering.py`` and
+    ``serving/figures.py`` are wrapped in ``mpl.rc_context``. This test
+    asserts the source-level invariant so the protection cannot regress
+    silently.
+    """
+    import re
+    from pathlib import Path
+
+    repo_root = Path(__file__).resolve().parents[2]
+    targets = [
+        repo_root / "neuralop" / "flood" / "serving" / "products.py",
+        repo_root / "neuralop" / "flood" / "serving" / "map_rendering.py",
+        repo_root / "neuralop" / "flood" / "serving" / "figures.py",
+    ]
+    for path in targets:
+        text = path.read_text(encoding="utf-8")
+        # rcParams.update must always appear inside a mpl.rc_context block.
+        # We use a simple heuristic: every occurrence of "rcParams.update("
+        # must be preceded (within the same file, lexically) by a matching
+        # "rc_context" block opener that is not closed before it.
+        if "rcParams.update(" not in text:
+            continue
+        for match in re.finditer(r"rcParams\.update\(", text):
+            preceding = text[: match.start()]
+            # Find the nearest enclosing 'with mpl.rc_context' or
+            # 'with rc_context' before this point.
+            last_ctx = max(
+                preceding.rfind("with mpl.rc_context"),
+                preceding.rfind("rc_context("),
+            )
+            assert last_ctx != -1, (
+                f"{path.name}: rcParams.update() at offset {match.start()} "
+                f"is not enclosed in mpl.rc_context — this would leak rcParams "
+                f"globally and re-introduce the unhashable-RcParams class of bug"
+            )
 
 
 def test_forcing_rejects_bad_timestep(tmp_path):
