@@ -1225,16 +1225,62 @@ def _plot_spatial_field(
             **kwargs,
         )
     if renderer["mode"] == "tri":
-        return ax.tripcolor(
-            renderer["triangulation"],
-            np.ma.masked_invalid(np.asarray(arr, dtype=np.float64)),
-            shading="gouraud",
-            edgecolors="none",
-            linewidths=0.0,
-            antialiaseds=False,
-            rasterized=True,
-            **kwargs,
-        )
+        before_collections = len(ax.collections)
+        try:
+            return ax.tripcolor(
+                renderer["triangulation"],
+                np.ma.masked_invalid(np.asarray(arr, dtype=np.float64)),
+                shading="gouraud",
+                edgecolors="none",
+                linewidths=0.0,
+                antialiaseds=False,
+                rasterized=True,
+                **kwargs,
+            )
+        except TypeError as exc:
+            if "RcParams" not in str(exc):
+                raise
+            while len(ax.collections) > before_collections:
+                ax.collections[-1].remove()
+            # Matplotlib 3.10 can occasionally leave RcParams in a bad state
+            # inside long-lived Celery fork workers after heavy CUDA inference.
+            # Reset and retry the smooth triangular renderer before degrading
+            # to the scatter fallback.
+            import matplotlib as mpl
+
+            mpl.rcdefaults()
+            try:
+                return ax.tripcolor(
+                    renderer["triangulation"],
+                    np.ma.masked_invalid(np.asarray(arr, dtype=np.float64)),
+                    shading="gouraud",
+                    edgecolors="none",
+                    linewidths=0.0,
+                    antialiaseds=False,
+                    rasterized=True,
+                    **kwargs,
+                )
+            except TypeError as retry_exc:
+                if "RcParams" not in str(retry_exc):
+                    raise
+                while len(ax.collections) > before_collections:
+                    ax.collections[-1].remove()
+                marker_size = _adaptive_marker_size(
+                    x,
+                    y,
+                    figsize=tuple(ax.figure.get_size_inches()),
+                    dpi=int(ax.figure.dpi),
+                    n_rows=1,
+                    n_cols=1,
+                    fill_factor=1.20,
+                )
+                return ax.scatter(
+                    x,
+                    y,
+                    c=np.ma.masked_invalid(np.asarray(arr, dtype=np.float64)),
+                    **_scatter_style(float(marker_size)),
+                    **kwargs,
+                )
     return ax.scatter(
         x,
         y,

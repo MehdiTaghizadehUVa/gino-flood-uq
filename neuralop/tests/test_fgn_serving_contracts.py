@@ -467,6 +467,47 @@ def test_serving_renderer_depends_on_eval_render_private_helpers():
     )
 
 
+def test_tri_renderer_recovers_from_rcparams_typeerror(monkeypatch):
+    """Regression guard for Matplotlib RcParams failures in Celery workers."""
+    import matplotlib
+
+    matplotlib.use("Agg", force=True)
+    import matplotlib.pyplot as plt
+    from matplotlib.tri import Triangulation
+    from neuralop.flood.eval import render as eval_render
+
+    x = np.asarray([0.0, 1.0, 0.0, 1.0], dtype=np.float64)
+    y = np.asarray([0.0, 0.0, 1.0, 1.0], dtype=np.float64)
+    arr = np.asarray([0.0, 0.4, 0.7, 1.0], dtype=np.float64)
+    renderer = {"mode": "tri", "triangulation": Triangulation(x, y)}
+    fig, ax = plt.subplots(figsize=(2, 2), dpi=80)
+    original_tripcolor = ax.tripcolor
+    calls = {"n": 0}
+
+    def flaky_tripcolor(*args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise TypeError("unhashable type: 'RcParams'")
+        return original_tripcolor(*args, **kwargs)
+
+    monkeypatch.setattr(ax, "tripcolor", flaky_tripcolor)
+    try:
+        artist = eval_render._plot_spatial_field(
+            ax=ax,
+            x=x,
+            y=y,
+            arr=arr,
+            renderer=renderer,
+            cmap="viridis",
+            vmin=0.0,
+            vmax=1.0,
+        )
+        assert artist is not None
+        assert calls["n"] == 2
+    finally:
+        plt.close(fig)
+
+
 def test_forcing_rejects_bad_timestep(tmp_path):
     bundle = _bundle(tmp_path)
     csv = "time_seconds,stage,precipitation\n0,1,0\n900,1,0\n1700,1,0\n"
