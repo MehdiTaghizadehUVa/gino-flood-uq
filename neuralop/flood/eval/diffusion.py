@@ -108,6 +108,21 @@ def _resolve_device(config: Any) -> torch.device:
     return torch.device("cpu")
 
 
+def _as_bool(value: Any, default: bool = False) -> bool:
+    if value is None:
+        return bool(default)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "y", "on"}:
+        return True
+    if text in {"0", "false", "no", "n", "off"}:
+        return False
+    return bool(default)
+
+
 def _resolve_normalizer_path(config: Any, fallback: Optional[Path] = None) -> Optional[Path]:
     """
     Resolve evaluation normalizer path from training-data location.
@@ -428,6 +443,8 @@ def main() -> int:
     if not out_dir.is_absolute():
         out_dir = (_SCRIPT_DIR / out_dir).resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
+    write_visualizations = _as_bool(_opt(config, "rollout", "write_visualizations", True), True)
+    logger.info("Diffusion rollout write_visualizations=%s", write_visualizations)
 
     rollout_norm_ds, hydrograph_samples = _build_rollout_normalized_dataset(
         config=config,
@@ -493,6 +510,7 @@ def main() -> int:
             impact_metrics_config=_opt(config, "rollout", "impact_metrics", None),
             forecast_artifact_dir=forecast_artifact_dir,
             calibration_metadata={"artifact_role": "diffusion_rollout_raw"},
+            write_visualizations=write_visualizations,
         )
     else:
         _rollout_prediction_generic(
