@@ -1717,13 +1717,14 @@ class ForecastProductBuilder:
         out_path = Path(output_path)
         out_path.parent.mkdir(parents=True, exist_ok=True)
         import matplotlib
+        import matplotlib as mpl
 
         matplotlib.use("Agg", force=True)
         import matplotlib.pyplot as plt
         from matplotlib.animation import PillowWriter
         from neuralop.flood.eval import render as eval_render
 
-        plt.rcParams.update(
+        with mpl.rc_context(
             {
                 "font.family": "DejaVu Sans",
                 "font.size": 9,
@@ -1733,77 +1734,76 @@ class ForecastProductBuilder:
                 "xtick.labelsize": 8,
                 "ytick.labelsize": 8,
             }
-        )
-
-        x = xy[:, 0]
-        y = xy[:, 1]
-        fig_size = (7.2, 6.1)
-        dpi = 180
-        renderer = eval_render._build_spatial_renderer(x, y, figsize=fig_size, dpi=dpi, n_rows=1, n_cols=1)
-        elevation_raw = metadata.get("elevation_raw")
-        visualization_config = metadata.get("visualization_config")
-        context = eval_render._cartographic_context(
-            x=x,
-            y=y,
-            elevation_raw=np.asarray(elevation_raw, dtype=np.float64) if elevation_raw is not None else None,
-            out_dir=str(out_path.parent),
-            visualization_config=visualization_config,
-        )
-        vmax = eval_render._wd_spatial_vmax(mean_by_time)
-        if not np.isfinite(vmax) or vmax <= 0.0:
-            vmax = 1.0
-        options = context.get("options", {})
-        wet_threshold = float(options.get("wet_edge_threshold_m", 0.05))
-        initial_idx = next(
-            (idx for idx in range(n_time) if float(np.nanmax(mean_by_time[idx])) > wet_threshold),
-            0,
-        )
-        fig, ax = plt.subplots(
-            1,
-            1,
-            figsize=fig_size,
-            dpi=dpi,
-            constrained_layout=True,
-            facecolor="#f7fafb",
-        )
-        try:
-            ax.set_facecolor("#f7fafb")
-            artist, _ = eval_render._plot_spatial_panel(
-                ax=ax,
+        ):
+            x = xy[:, 0]
+            y = xy[:, 1]
+            fig_size = (7.2, 6.1)
+            dpi = 180
+            renderer = eval_render._build_spatial_renderer(x, y, figsize=fig_size, dpi=dpi, n_rows=1, n_cols=1)
+            elevation_raw = metadata.get("elevation_raw")
+            visualization_config = metadata.get("visualization_config")
+            context = eval_render._cartographic_context(
                 x=x,
                 y=y,
-                arr=mean_by_time[initial_idx],
-                renderer=renderer,
-                context=context,
-                cmap="viridis",
-                vmin=0.0,
-                vmax=float(vmax),
-                is_wd_depth=True,
-                zero_transparent=False,
-                annotate=False,
+                elevation_raw=np.asarray(elevation_raw, dtype=np.float64) if elevation_raw is not None else None,
+                out_dir=str(out_path.parent),
+                visualization_config=visualization_config,
             )
-            ax.set_aspect("equal")
-            ax.axis("off")
-            title = ax.set_title(
-                f"{label} mean WD | lead {lead[initial_idx]:.2f} h",
-                loc="left",
-                color="#102027",
-                pad=8,
+            vmax = eval_render._wd_spatial_vmax(mean_by_time)
+            if not np.isfinite(vmax) or vmax <= 0.0:
+                vmax = 1.0
+            options = context.get("options", {})
+            wet_threshold = float(options.get("wet_edge_threshold_m", 0.05))
+            initial_idx = next(
+                (idx for idx in range(n_time) if float(np.nanmax(mean_by_time[idx])) > wet_threshold),
+                0,
             )
-            cbar = fig.colorbar(artist, ax=ax, fraction=0.046, pad=0.02)
-            cbar.ax.tick_params(labelsize=8, colors="#3f535b")
-            cbar.outline.set_edgecolor("#aebfc7")
-            cbar.set_label("Mean WD (m)", color="#102027", fontsize=8.5)
-            writer = PillowWriter(fps=int(max(1, fps)))
-            with writer.saving(fig, str(out_path), dpi=dpi):
-                for t_idx in range(n_time):
-                    frame = eval_render._mask_wd_dry_for_overlay(mean_by_time[t_idx], wet_threshold)
-                    eval_render._update_spatial_artist(artist, frame, renderer)
-                    title.set_text(f"{label} mean WD | lead {lead[t_idx]:.2f} h")
-                    writer.grab_frame()
-        finally:
-            plt.close(fig)
-        return out_path
+            fig, ax = plt.subplots(
+                1,
+                1,
+                figsize=fig_size,
+                dpi=dpi,
+                constrained_layout=True,
+                facecolor="#f7fafb",
+            )
+            try:
+                ax.set_facecolor("#f7fafb")
+                artist, _ = eval_render._plot_spatial_panel(
+                    ax=ax,
+                    x=x,
+                    y=y,
+                    arr=mean_by_time[initial_idx],
+                    renderer=renderer,
+                    context=context,
+                    cmap="viridis",
+                    vmin=0.0,
+                    vmax=float(vmax),
+                    is_wd_depth=True,
+                    zero_transparent=False,
+                    annotate=False,
+                )
+                ax.set_aspect("equal")
+                ax.axis("off")
+                title = ax.set_title(
+                    f"{label} mean WD | lead {lead[initial_idx]:.2f} h",
+                    loc="left",
+                    color="#102027",
+                    pad=8,
+                )
+                cbar = fig.colorbar(artist, ax=ax, fraction=0.046, pad=0.02)
+                cbar.ax.tick_params(labelsize=8, colors="#3f535b")
+                cbar.outline.set_edgecolor("#aebfc7")
+                cbar.set_label("Mean WD (m)", color="#102027", fontsize=8.5)
+                writer = PillowWriter(fps=int(max(1, fps)))
+                with writer.saving(fig, str(out_path), dpi=dpi):
+                    for t_idx in range(n_time):
+                        frame = eval_render._mask_wd_dry_for_overlay(mean_by_time[t_idx], wet_threshold)
+                        eval_render._update_spatial_artist(artist, frame, renderer)
+                        title.set_text(f"{label} mean WD | lead {lead[t_idx]:.2f} h")
+                        writer.grab_frame()
+            finally:
+                plt.close(fig)
+            return out_path
 
     def write_exceedance_animation_gif(
         self,
@@ -1846,13 +1846,14 @@ class ForecastProductBuilder:
         out_path = Path(output_path)
         out_path.parent.mkdir(parents=True, exist_ok=True)
         import matplotlib
+        import matplotlib as mpl
 
         matplotlib.use("Agg", force=True)
         import matplotlib.pyplot as plt
         from matplotlib.animation import PillowWriter
         from neuralop.flood.eval import render as eval_render
 
-        plt.rcParams.update(
+        with mpl.rc_context(
             {
                 "font.family": "DejaVu Sans",
                 "font.size": 9,
@@ -1862,65 +1863,64 @@ class ForecastProductBuilder:
                 "xtick.labelsize": 8,
                 "ytick.labelsize": 8,
             }
-        )
-
-        x = xy[:, 0]
-        y = xy[:, 1]
-        fig_size = (7.2, 6.1)
-        dpi = 180
-        renderer = eval_render._build_spatial_renderer(x, y, figsize=fig_size, dpi=dpi, n_rows=1, n_cols=1)
-        elevation_raw = metadata.get("elevation_raw")
-        visualization_config = metadata.get("visualization_config")
-        context = eval_render._cartographic_context(
-            x=x,
-            y=y,
-            elevation_raw=np.asarray(elevation_raw, dtype=np.float64) if elevation_raw is not None else None,
-            out_dir=str(out_path.parent),
-            visualization_config=visualization_config,
-        )
-        initial_idx = next((idx for idx in range(n_time) if float(np.nanmax(prob_full[idx])) > 0.0), 0)
-        fig, ax = plt.subplots(
-            1,
-            1,
-            figsize=fig_size,
-            dpi=dpi,
-            constrained_layout=True,
-            facecolor="#f7fafb",
-        )
-        try:
-            ax.set_facecolor("#f7fafb")
-            artist, _ = eval_render._plot_spatial_panel(
-                ax=ax,
+        ):
+            x = xy[:, 0]
+            y = xy[:, 1]
+            fig_size = (7.2, 6.1)
+            dpi = 180
+            renderer = eval_render._build_spatial_renderer(x, y, figsize=fig_size, dpi=dpi, n_rows=1, n_cols=1)
+            elevation_raw = metadata.get("elevation_raw")
+            visualization_config = metadata.get("visualization_config")
+            context = eval_render._cartographic_context(
                 x=x,
                 y=y,
-                arr=prob_full[initial_idx],
-                renderer=renderer,
-                context=context,
-                cmap="viridis",
-                vmin=0.0,
-                vmax=1.0,
-                is_wd_depth=False,
-                zero_transparent=True,
-                annotate=False,
+                elevation_raw=np.asarray(elevation_raw, dtype=np.float64) if elevation_raw is not None else None,
+                out_dir=str(out_path.parent),
+                visualization_config=visualization_config,
             )
-            ax.set_aspect("equal")
-            ax.axis("off")
-            title = ax.set_title(
-                f"{label} P(WD > {threshold_m:g} m) | lead {lead[initial_idx]:.2f} h",
-                loc="left",
-                color="#102027",
-                pad=8,
+            initial_idx = next((idx for idx in range(n_time) if float(np.nanmax(prob_full[idx])) > 0.0), 0)
+            fig, ax = plt.subplots(
+                1,
+                1,
+                figsize=fig_size,
+                dpi=dpi,
+                constrained_layout=True,
+                facecolor="#f7fafb",
             )
-            cbar = fig.colorbar(artist, ax=ax, fraction=0.046, pad=0.02)
-            cbar.ax.tick_params(labelsize=8, colors="#3f535b")
-            cbar.outline.set_edgecolor("#aebfc7")
-            cbar.set_label(f"P(WD > {threshold_m:g} m)", color="#102027", fontsize=8.5)
-            writer = PillowWriter(fps=int(max(1, fps)))
-            with writer.saving(fig, str(out_path), dpi=dpi):
-                for t_idx in range(n_time):
-                    eval_render._update_spatial_artist(artist, prob_full[t_idx], renderer)
-                    title.set_text(f"{label} P(WD > {threshold_m:g} m) | lead {lead[t_idx]:.2f} h")
-                    writer.grab_frame()
-        finally:
-            plt.close(fig)
-        return out_path
+            try:
+                ax.set_facecolor("#f7fafb")
+                artist, _ = eval_render._plot_spatial_panel(
+                    ax=ax,
+                    x=x,
+                    y=y,
+                    arr=prob_full[initial_idx],
+                    renderer=renderer,
+                    context=context,
+                    cmap="viridis",
+                    vmin=0.0,
+                    vmax=1.0,
+                    is_wd_depth=False,
+                    zero_transparent=True,
+                    annotate=False,
+                )
+                ax.set_aspect("equal")
+                ax.axis("off")
+                title = ax.set_title(
+                    f"{label} P(WD > {threshold_m:g} m) | lead {lead[initial_idx]:.2f} h",
+                    loc="left",
+                    color="#102027",
+                    pad=8,
+                )
+                cbar = fig.colorbar(artist, ax=ax, fraction=0.046, pad=0.02)
+                cbar.ax.tick_params(labelsize=8, colors="#3f535b")
+                cbar.outline.set_edgecolor("#aebfc7")
+                cbar.set_label(f"P(WD > {threshold_m:g} m)", color="#102027", fontsize=8.5)
+                writer = PillowWriter(fps=int(max(1, fps)))
+                with writer.saving(fig, str(out_path), dpi=dpi):
+                    for t_idx in range(n_time):
+                        eval_render._update_spatial_artist(artist, prob_full[t_idx], renderer)
+                        title.set_text(f"{label} P(WD > {threshold_m:g} m) | lead {lead[t_idx]:.2f} h")
+                        writer.grab_frame()
+            finally:
+                plt.close(fig)
+            return out_path

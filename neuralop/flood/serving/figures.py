@@ -37,42 +37,56 @@ class ForecastFigureBuilder:
     ) -> list[Path]:
         out_dir = Path(output_dir)
         out_dir.mkdir(parents=True, exist_ok=True)
-        return [
-            self._write_forcing_hydrograph(forcing, out_dir / "forcing_hydrograph.svg"),
-            self._write_extent_by_time(calibrated_summary, out_dir / "uq_extent_by_time.svg"),
-            self._write_exceedance_bars(calibrated_summary, out_dir / "uq_exceedance_bars.svg"),
-            self._write_uncertainty_width(calibrated_summary, out_dir / "uq_uncertainty_width.svg"),
-            self._write_calibration_effect(raw_summary, calibrated_summary, comparison_summary, out_dir / "calibration_effect.svg"),
-        ]
+        import matplotlib as mpl
 
-    @staticmethod
-    def _setup_matplotlib():
+        # rc_context isolates every figure in this run from the worker's
+        # global matplotlib state. Required to keep rcParams corruption
+        # contained — see _plot_spatial_field in eval.render for context.
+        with mpl.rc_context(self._SERVING_RC_OVERRIDES):
+            return [
+                self._write_forcing_hydrograph(forcing, out_dir / "forcing_hydrograph.svg"),
+                self._write_extent_by_time(calibrated_summary, out_dir / "uq_extent_by_time.svg"),
+                self._write_exceedance_bars(calibrated_summary, out_dir / "uq_exceedance_bars.svg"),
+                self._write_uncertainty_width(calibrated_summary, out_dir / "uq_uncertainty_width.svg"),
+                self._write_calibration_effect(raw_summary, calibrated_summary, comparison_summary, out_dir / "calibration_effect.svg"),
+            ]
+
+    # Style overrides applied inside ``mpl.rc_context`` in ``write_figures``
+    # so they cannot leak across serving runs in long-running Celery workers
+    # (see the ``_plot_spatial_field`` comment in eval.render for context).
+    _SERVING_RC_OVERRIDES = {
+        "font.family": "DejaVu Sans",
+        "font.size": 10,
+        "axes.titlesize": 12,
+        "axes.titleweight": "semibold",
+        "axes.labelsize": 10,
+        "xtick.labelsize": 9,
+        "ytick.labelsize": 9,
+        "legend.fontsize": 9,
+        "figure.facecolor": "#ffffff",
+        "axes.facecolor": "#ffffff",
+        "axes.edgecolor": "#b7c9d0",
+        "axes.labelcolor": "#102027",
+        "xtick.color": "#465b63",
+        "ytick.color": "#465b63",
+        "grid.color": "#dfe7ea",
+        "grid.linewidth": 0.8,
+        "svg.hashsalt": "fgn-serving-uq",
+    }
+
+    @classmethod
+    def _setup_matplotlib(cls):
+        """Return ``plt`` with the Agg backend ensured.
+
+        Called inside an ``mpl.rc_context`` scope established by
+        ``write_figures``; individual ``_write_*`` methods inherit the
+        scoped rcParams from that context.
+        """
         import matplotlib
 
         matplotlib.use("Agg", force=True)
         import matplotlib.pyplot as plt
 
-        plt.rcParams.update(
-            {
-                "font.family": "DejaVu Sans",
-                "font.size": 10,
-                "axes.titlesize": 12,
-                "axes.titleweight": "semibold",
-                "axes.labelsize": 10,
-                "xtick.labelsize": 9,
-                "ytick.labelsize": 9,
-                "legend.fontsize": 9,
-                "figure.facecolor": "#ffffff",
-                "axes.facecolor": "#ffffff",
-                "axes.edgecolor": "#b7c9d0",
-                "axes.labelcolor": "#102027",
-                "xtick.color": "#465b63",
-                "ytick.color": "#465b63",
-                "grid.color": "#dfe7ea",
-                "grid.linewidth": 0.8,
-                "svg.hashsalt": "fgn-serving-uq",
-            }
-        )
         return plt
 
     @staticmethod
