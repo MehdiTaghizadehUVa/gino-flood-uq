@@ -15,6 +15,7 @@ from torch.utils.data.distributed import DistributedSampler
 
 from neuralop import get_model
 from neuralop.data.transforms.normalizers import load_normalizers, save_normalizers
+from neuralop.flood.data.normalizer_lifecycle import resolve_normalizer_artifact
 from neuralop.flood.data.structural_dry import (
     build_structural_dry_artifact,
     load_structural_dry_artifact,
@@ -323,61 +324,50 @@ def main():
     force_load_cached_normalizers = bool(
         _cfg_get(config.data, "force_load_normalizers", False)
     )
-    metadata_matches = (
-        metadata_path is not None
-        and metadata_path.exists()
-        and normalizer_metadata_matches(
-            expected_normalizer_metadata,
-            load_normalizer_metadata(metadata_path),
-        )
+    # The operator trainer detects "I am resuming" the same way it always has:
+    # by the presence of a resume_from_dir in the checkpoint config. We don't
+    # require the file to actually be present yet — the lifecycle's conservative
+    # rule is "any resume intent means keep a fingerprint-mismatched cache",
+    # which prevents silent miscalibration even on a misconfigured resume.
+    is_resuming = bool(_cfg_get(config.checkpoint, "resume_from_dir", None))
+
+    # NOTE: the operator trainer historically had every rank redundantly fit
+    # and save the normalizer (no rank-0 split). Preserving rank0=True here
+    # keeps that behavior unchanged; a future PR can introduce rank-0-only
+    # writes if/when distributed operator training is hardened.
+    resolution = resolve_normalizer_artifact(
+        train_data_raw=train_data_raw,
+        normalizer_path=normalizer_path,
+        metadata_path=metadata_path,
+        expected_metadata=expected_normalizer_metadata,
+        fit_method=normalizer_fit_method,
+        structural_dry_policy=structural_dry_policy["policy"],
+        chunk_size=int(_cfg_get(config.data, "normalizer_chunk_size", 10000)),
+        expect_target=True,
+        is_resuming=is_resuming,
+        force_load=force_load_cached_normalizers,
+        rank0=True,
+        logger=logger,
+        fit_normalizers_fn=fit_normalizers,
+        save_normalizers_fn=save_normalizers,
+        load_normalizers_fn=load_normalizers,
+        save_normalizer_metadata_fn=save_normalizer_metadata,
+        load_normalizer_metadata_fn=load_normalizer_metadata,
     )
-    can_load_cached_normalizers = (
-        normalizer_path is not None
-        and normalizer_path.exists()
-        and (force_load_cached_normalizers or metadata_matches)
-    )
-    if can_load_cached_normalizers:
-        normalizers = load_normalizers(normalizer_path, device=None)
-        if force_load_cached_normalizers and not metadata_matches:
-            logger.warning(
-                "Loaded normalizers from %s with metadata validation bypassed "
-                "(force_load_normalizers=true, method=%s)",
-                normalizer_path,
-                normalizer_fit_method,
-            )
-        else:
-            logger.info(
-                "Loaded normalizers from %s (method=%s)",
-                normalizer_path,
-                normalizer_fit_method,
-            )
-    else:
-        norm_chunk_size = _cfg_get(config.data, "normalizer_chunk_size", 10000)
-        normalizers, normalizer_fit_method = fit_normalizers(
-            train_data_raw,
-            chunk_size=norm_chunk_size,
-            expect_target=True,
-            structural_dry_policy=structural_dry_policy["policy"],
-            method=normalizer_fit_method,
-            return_method=True,
+    normalizers = resolution.normalizers
+    normalizer_fit_method = resolution.fit_method
+    if resolution.snapshot_path is not None:
+        logger.info(
+            "Snapshotted previous normalizer artifact to %s before refit "
+            "(mismatch_keys=%s).",
+            resolution.snapshot_path,
+            list(resolution.mismatch_keys),
         )
-        if normalizer_path is not None:
-            save_normalizers(normalizers, normalizer_path)
-            if metadata_path is not None:
-                save_normalizer_metadata(
-                    metadata_path,
-                    build_normalizer_metadata(
-                        train_data_raw,
-                        structural_dry_policy=structural_dry_policy["policy"],
-                        fit_method=normalizer_fit_method,
-                    ),
-                )
-            logger.info(
-                "Saved normalizers to %s (method=%s)",
-                normalizer_path,
-                normalizer_fit_method,
-            )
-    logger.info("normalizer_fit_method=%s", normalizer_fit_method)
+    logger.info(
+        "normalizer_fit_method=%s (source=%s)",
+        normalizer_fit_method,
+        resolution.source.value,
+    )
 
     train_normalized_dataset = NormalizedDatasetOnTheFly(
         train_data_raw, normalizers, query_res=config.data.query_res
