@@ -191,13 +191,26 @@ def prepare_training_artifacts(
     normalizer_status = "computed"
     if normalizer_path.exists():
         actual_metadata = load_normalizer_metadata(metadata_path)
+        # CLI prep tool: legitimate strict equality use of the deprecated
+        # primitive (see normalizer_metadata_matches docstring). Suppress
+        # the deprecation noise here because this is a standalone batch
+        # script, not a training loop that needs the lifecycle helper.
+        import warnings as _warnings
+
+        _matches_existing = False
+        if actual_metadata is not None:
+            with _warnings.catch_warnings():
+                _warnings.simplefilter("ignore", DeprecationWarning)
+                _matches_existing = normalizer_metadata_matches(
+                    expected_metadata, actual_metadata
+                )
         if actual_metadata is None:
             if not overwrite:
                 raise RuntimeError(
                     f"Existing normalizer metadata missing for {normalizer_path}. "
                     "Use --overwrite to recompute."
                 )
-        elif normalizer_metadata_matches(expected_metadata, actual_metadata):
+        elif _matches_existing:
             normalizer_status = "reused"
         elif not overwrite:
             raise RuntimeError(

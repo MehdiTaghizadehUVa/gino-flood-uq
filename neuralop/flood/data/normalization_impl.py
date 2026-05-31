@@ -370,6 +370,32 @@ def build_normalizer_metadata(
 
 
 def normalizer_metadata_matches(expected: dict[str, Any], actual: dict[str, Any] | None) -> bool:
+    """Low-level "do these two normalizer-metadata dicts agree" predicate.
+
+    .. deprecated::
+        Use :func:`neuralop.flood.data.normalizer_lifecycle.resolve_normalizer_artifact`
+        for the full cached-or-refit-or-keep-on-resume decision. That helper
+        owns the resume-safety contract end-to-end; calling
+        ``normalizer_metadata_matches`` directly from training code lost the
+        ``is_resuming`` context and was the root cause of the May 2026
+        ens02/ens03 silent miscalibration incident.
+
+        Callers that legitimately need a strict equality check (e.g., the
+        diffusion ``_wait_for_normalizer_artifacts`` strict-mode opt-in, and
+        the standalone normalizer-prep CLIs) may continue to call this
+        function but should wrap with ``warnings.catch_warnings()`` to
+        suppress the deprecation noise.
+    """
+    import warnings
+
+    warnings.warn(
+        "normalizer_metadata_matches() is a low-level primitive; prefer "
+        "neuralop.flood.data.normalizer_lifecycle.resolve_normalizer_artifact() "
+        "for trainer code paths. See its docstring for the resume-safe "
+        "decision matrix.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     if actual is None:
         return False
     stable_keys = (
