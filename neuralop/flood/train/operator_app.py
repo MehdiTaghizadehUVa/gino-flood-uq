@@ -36,7 +36,6 @@ from neuralop.flood.data.wv import (
     collect_all_fields,
     fit_normalizers,
     load_normalizer_metadata,
-    normalizer_metadata_matches,
     resolve_normalizer_fit_method,
     resolve_normalizer_metadata_path,
     save_normalizer_metadata,

@@ -81,13 +81,24 @@ def _wait_for_normalizer_artifacts(
                         f"Normalizer metadata at {metadata_path} is unreadable; "
                         "may still be mid-write."
                     )
-                if expected_metadata is not None and not normalizer_metadata_matches(
-                    expected_metadata, metadata
-                ):
-                    raise RuntimeError(
-                        f"Normalizer metadata at {metadata_path} does not match the "
-                        "current diffusion run (caller requested strict match)."
-                    )
+                if expected_metadata is not None:
+                    # normalizer_metadata_matches is deprecated for trainer use
+                    # but legitimately remains as a primitive for strict-mode
+                    # waiting (the caller explicitly opted in). Suppress the
+                    # deprecation noise locally; this wait helper is the
+                    # intended internal consumer of the predicate.
+                    import warnings as _warnings
+
+                    with _warnings.catch_warnings():
+                        _warnings.simplefilter("ignore", DeprecationWarning)
+                        _matches = normalizer_metadata_matches(
+                            expected_metadata, metadata
+                        )
+                    if not _matches:
+                        raise RuntimeError(
+                            f"Normalizer metadata at {metadata_path} does not match the "
+                            "current diffusion run (caller requested strict match)."
+                        )
                 # We deliberately do NOT call load_normalizers here: the caller
                 # owns the actual load, and the lifecycle helper (rank-0 side)
                 # decides which on-disk artifact is acceptable. Our job is only

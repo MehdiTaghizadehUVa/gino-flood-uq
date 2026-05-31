@@ -148,11 +148,20 @@ def prepare_normalizers(
 
     normalizer_status = "computed"
     existing_metadata = load_normalizer_metadata(metadata_path) if normalizer_path.exists() else None
-    if (
-        normalizer_path.exists()
-        and existing_metadata is not None
-        and normalizer_metadata_matches(expected_metadata, existing_metadata)
-    ):
+    # CLI prep tool: legitimate strict equality use of the deprecated
+    # primitive. The lifecycle helper is the right answer inside a
+    # training loop; this script is a standalone batch tool that only
+    # cares whether the on-disk artifact matches the requested split.
+    _existing_matches = False
+    if normalizer_path.exists() and existing_metadata is not None:
+        import warnings as _warnings
+
+        with _warnings.catch_warnings():
+            _warnings.simplefilter("ignore", DeprecationWarning)
+            _existing_matches = normalizer_metadata_matches(
+                expected_metadata, existing_metadata
+            )
+    if _existing_matches:
         normalizer_status = "reused"
     elif normalizer_path.exists() and not overwrite:
         raise RuntimeError(

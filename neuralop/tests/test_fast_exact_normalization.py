@@ -402,8 +402,15 @@ def test_normalizer_metadata_tracks_subset_fingerprint_and_sidecar_path(tmp_path
 
     save_normalizer_metadata(metadata_path, meta_a)
     loaded = load_normalizer_metadata(metadata_path)
-    assert normalizer_metadata_matches(meta_a, loaded)
-    assert not normalizer_metadata_matches(meta_b, loaded)
+    # normalizer_metadata_matches is now deprecated; the test still exercises
+    # the primitive behavior, so suppress the deprecation warning locally
+    # rather than rewriting the assertion.
+    import warnings as _warnings
+
+    with _warnings.catch_warnings():
+        _warnings.simplefilter("ignore", DeprecationWarning)
+        assert normalizer_metadata_matches(meta_a, loaded)
+        assert not normalizer_metadata_matches(meta_b, loaded)
 
 
 def test_auto_falls_back_to_streaming_for_masked_primary():
