@@ -16,8 +16,17 @@ from tqdm import tqdm
 
 from neuralop import get_model
 from neuralop.diffusion import ConditioningConfig, ConditionalDDOForecaster, PointRFFGaussianProcessSampler
+from neuralop.flood.data.wv import (
+    load_normalizer_metadata,
+    resolve_normalizer_metadata_path,
+)
 from neuralop.flood.train.diffusion_data import _prepare_batch, _prepare_datasets
 from neuralop.flood.train.diffusion_loop import _evaluate_validation, _resolve_resume_checkpoint, _save_checkpoint
+from neuralop.flood.utils.checkpoint_compat import (
+    assert_normalizer_matches_checkpoint,
+    read_normalizer_fingerprint_sidecar,
+    write_normalizer_fingerprint_sidecar,
+)
 from neuralop.flood.train.diffusion_runtime import (
     DEFAULT_MAX_VAL_BATCHES,
     DEFAULT_PRINT_EVERY,
@@ -405,6 +414,31 @@ def main() -> int:
         ckpt_dir = (_SCRIPT_DIR / ckpt_dir).resolve()
     ckpt_dir.mkdir(parents=True, exist_ok=True)
 
+    # Pin the normalizer fingerprint into the checkpoint dir so a future
+    # resume can hard-fail if the on-disk normalizer has drifted. Written
+    # only on rank-0 to avoid concurrent-write races. Absent or unreadable
+    # on-disk metadata is logged but not fatal (legacy artifacts may lack
+    # the sidecar metadata file).
+    if dist_ctx.is_rank0 and normalizer_path is not None:
+        _norm_meta_path = resolve_normalizer_metadata_path(normalizer_path)
+        if _norm_meta_path is not None and _norm_meta_path.exists():
+            _on_disk_norm_meta = load_normalizer_metadata(_norm_meta_path)
+            if _on_disk_norm_meta is not None:
+                _sidecar = write_normalizer_fingerprint_sidecar(
+                    ckpt_dir, normalizer_metadata=_on_disk_norm_meta
+                )
+                logger.info(
+                    "Wrote normalizer fingerprint sidecar at %s "
+                    "(resume safety contract for normalizer-checkpoint pairing)",
+                    _sidecar,
+                )
+            else:
+                logger.warning(
+                    "Could not read normalizer metadata at %s; skipping fingerprint "
+                    "sidecar write. Resume code will fall back to legacy behavior.",
+                    _norm_meta_path,
+                )
+
     allow_unsafe_legacy_load = bool(
         safe_get(safe_get(config, "checkpoint", {}), "allow_unsafe_legacy_load", True)
     )
@@ -426,6 +460,39 @@ def main() -> int:
 
     resume_checkpoint = _resolve_resume_checkpoint(config)
     if resume_checkpoint is not None:
+        # Resume safety contract: if the resume checkpoint dir has a
+        # normalizer fingerprint sidecar, it MUST agree with the normalizer
+        # currently on disk (which the lifecycle helper just loaded). A
+        # mismatch is exactly the failure mode that burned the May 2026
+        # ens02/ens03 production training — refuse to continue rather than
+        # silently miscalibrate.
+        _resume_dir = resume_checkpoint.parent
+        _resume_fp = read_normalizer_fingerprint_sidecar(_resume_dir)
+        if _resume_fp is not None and normalizer_path is not None:
+            _norm_meta_path = resolve_normalizer_metadata_path(normalizer_path)
+            _on_disk_meta = (
+                load_normalizer_metadata(_norm_meta_path)
+                if _norm_meta_path is not None and _norm_meta_path.exists()
+                else None
+            )
+            if _on_disk_meta is None:
+                logger.warning(
+                    "Resume checkpoint %s recorded a normalizer fingerprint but "
+                    "the on-disk normalizer metadata is unreadable; skipping "
+                    "the compatibility assertion. Verify normalizer artifacts.",
+                    resume_checkpoint,
+                )
+            else:
+                assert_normalizer_matches_checkpoint(
+                    checkpoint_fingerprint=_resume_fp,
+                    on_disk_metadata=_on_disk_meta,
+                    logger=logger,
+                    strict=True,
+                )
+                logger.info(
+                    "Resume normalizer fingerprint matches checkpoint sidecar (%s).",
+                    _resume_dir,
+                )
         resume_bundle = load_checkpoint_bundle(
             resume_checkpoint,
             map_location="cpu",

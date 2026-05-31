@@ -132,3 +132,89 @@ def test_assert_passes_when_checkpoint_has_no_fingerprint():
         on_disk_metadata=_full_metadata(),
         logger=logging.getLogger("test"),
     )
+
+
+# ----------------------------------------------------------------------------
+# Sidecar helpers (PR-4 addition)
+# ----------------------------------------------------------------------------
+
+from pathlib import Path  # noqa: E402  (kept local; tests above don't need it)
+
+from neuralop.flood.utils.checkpoint_compat import (
+    NORMALIZER_FINGERPRINT_SIDECAR,
+    read_normalizer_fingerprint_sidecar,
+    write_normalizer_fingerprint_sidecar,
+)
+
+
+def test_sidecar_round_trip_preserves_fingerprint(tmp_path: Path):
+    metadata = _full_metadata()
+    sidecar_path = write_normalizer_fingerprint_sidecar(
+        tmp_path, normalizer_metadata=metadata
+    )
+    assert sidecar_path.name == NORMALIZER_FINGERPRINT_SIDECAR
+    assert sidecar_path.exists()
+
+    loaded = read_normalizer_fingerprint_sidecar(tmp_path)
+    assert loaded == normalizer_fingerprint(metadata)
+
+
+def test_sidecar_round_trip_drops_non_fingerprint_keys(tmp_path: Path):
+    """The sidecar must NOT carry code_version, dataset_class, etc. — only the
+    contract subset. Otherwise a code-version bump on its own would falsely
+    fail every resume."""
+    metadata = _full_metadata(code_version="changed-after-save")
+    write_normalizer_fingerprint_sidecar(tmp_path, normalizer_metadata=metadata)
+    loaded = read_normalizer_fingerprint_sidecar(tmp_path)
+    assert "code_version" not in loaded
+    assert "dataset_class" not in loaded
+    # Required fingerprint keys are all present.
+    assert set(loaded.keys()) >= {
+        "split_fingerprint",
+        "boundary_spec_fingerprint",
+        "hdf_paths_fingerprint",
+        "split_sample_count",
+    }
+
+
+def test_sidecar_read_returns_none_when_absent(tmp_path: Path):
+    """Legacy checkpoint dirs with no sidecar must be readable as None — the
+    'no fingerprint recorded' state. assert_normalizer_matches_checkpoint
+    accepts this silently."""
+    assert read_normalizer_fingerprint_sidecar(tmp_path) is None
+
+
+def test_sidecar_write_is_atomic_across_concurrent_readers(tmp_path: Path):
+    """Sidecar must be written via temp+rename so a reader that polls the file
+    never observes a half-written JSON. The simplest reliable proof: confirm
+    no .tmp file is left over after a normal write."""
+    write_normalizer_fingerprint_sidecar(tmp_path, normalizer_metadata=_full_metadata())
+    leftovers = list(tmp_path.glob(f"{NORMALIZER_FINGERPRINT_SIDECAR}.tmp"))
+    assert leftovers == [], f"unexpected leftover temp files: {leftovers}"
+
+
+def test_sidecar_read_returns_none_on_corrupted_json(tmp_path: Path):
+    """A partially-written sidecar (corrupted JSON on disk) is treated as
+    'no fingerprint' rather than crashing the resume path. The bug we are
+    fixing is silent miscalibration; a corrupted sidecar should at worst
+    degrade to legacy behavior, never block training."""
+    sidecar = tmp_path / NORMALIZER_FINGERPRINT_SIDECAR
+    sidecar.write_text("{ not valid json")
+    assert read_normalizer_fingerprint_sidecar(tmp_path) is None
+
+
+def test_sidecar_round_trip_then_assert_against_drifted_metadata_raises(tmp_path: Path):
+    """End-to-end contract: save fingerprint, then later assert against a
+    drifted on-disk metadata -> mismatch error with the named key."""
+    original = _full_metadata(split_fingerprint="ORIGINAL")
+    write_normalizer_fingerprint_sidecar(tmp_path, normalizer_metadata=original)
+    cp_fp = read_normalizer_fingerprint_sidecar(tmp_path)
+
+    drifted_metadata = _full_metadata(split_fingerprint="DIFFERENT")
+    with pytest.raises(NormalizerCheckpointMismatchError) as exc_info:
+        assert_normalizer_matches_checkpoint(
+            checkpoint_fingerprint=cp_fp,
+            on_disk_metadata=drifted_metadata,
+            logger=logging.getLogger("test"),
+        )
+    assert exc_info.value.changed_keys == ("split_fingerprint",)

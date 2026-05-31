@@ -17,8 +17,10 @@ stack without pulling torch.
 
 from __future__ import annotations
 
+import json
 import logging
-from typing import Any, Mapping
+from pathlib import Path
+from typing import Any, Mapping, Optional
 
 
 #: Subset of normalizer metadata that defines model-normalizer compatibility.
@@ -127,3 +129,57 @@ def assert_normalizer_matches_checkpoint(
             missing_keys=missing,
         )
     logger.warning(message)
+
+
+# ---------------------------------------------------------------------------
+# Sidecar file helpers (so the contract can be enforced without modifying the
+# base Trainer's checkpoint format).
+# ---------------------------------------------------------------------------
+
+#: Filename used for the normalizer-fingerprint sidecar inside a checkpoint dir.
+NORMALIZER_FINGERPRINT_SIDECAR: str = "normalizer_fingerprint.json"
+
+
+def write_normalizer_fingerprint_sidecar(
+    checkpoint_dir: Path,
+    *,
+    normalizer_metadata: Mapping[str, Any],
+    sidecar_name: str = NORMALIZER_FINGERPRINT_SIDECAR,
+) -> Path:
+    """Write the fingerprint subset of ``normalizer_metadata`` to a JSON sidecar.
+
+    The sidecar lives next to the model checkpoint files in ``checkpoint_dir``
+    so that resume code can locate and assert it without modifying the model
+    payload format.
+
+    Returns the path of the written sidecar.
+    """
+    fingerprint = normalizer_fingerprint(normalizer_metadata)
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    sidecar_path = checkpoint_dir / sidecar_name
+    # Atomic-ish write: dump to a temp then rename, so a concurrent reader
+    # never observes a half-written JSON.
+    tmp_path = sidecar_path.with_suffix(sidecar_path.suffix + ".tmp")
+    tmp_path.write_text(json.dumps(fingerprint, sort_keys=True, indent=2))
+    tmp_path.replace(sidecar_path)
+    return sidecar_path
+
+
+def read_normalizer_fingerprint_sidecar(
+    checkpoint_dir: Path,
+    *,
+    sidecar_name: str = NORMALIZER_FINGERPRINT_SIDECAR,
+) -> Optional[dict[str, Any]]:
+    """Read and return a fingerprint sidecar from ``checkpoint_dir``.
+
+    Returns ``None`` when the sidecar is absent — the documented "legacy
+    checkpoint" state that ``assert_normalizer_matches_checkpoint`` treats as
+    "accept silently" so existing checkpoints don't suddenly stop resuming.
+    """
+    sidecar_path = checkpoint_dir / sidecar_name
+    if not sidecar_path.exists():
+        return None
+    try:
+        return json.loads(sidecar_path.read_text())
+    except (OSError, ValueError):
+        return None

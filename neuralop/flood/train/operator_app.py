@@ -16,6 +16,11 @@ from torch.utils.data.distributed import DistributedSampler
 from neuralop import get_model
 from neuralop.data.transforms.normalizers import load_normalizers, save_normalizers
 from neuralop.flood.data.normalizer_lifecycle import resolve_normalizer_artifact
+from neuralop.flood.utils.checkpoint_compat import (
+    assert_normalizer_matches_checkpoint,
+    read_normalizer_fingerprint_sidecar,
+    write_normalizer_fingerprint_sidecar,
+)
 from neuralop.flood.data.structural_dry import (
     build_structural_dry_artifact,
     load_structural_dry_artifact,
@@ -933,6 +938,59 @@ def main():
     checkpoint_resume_dir = _cfg_get(config.checkpoint, "resume_from_dir", None)
     if is_logger:
         save_effective_config_snapshot(config, checkpoint_save_dir, logger=logger)
+
+    # ------------------------------------------------------------------
+    # Resume safety contract (PR-4): pair this checkpoint dir with the
+    # current normalizer fingerprint so a future resume can hard-fail on
+    # silent normalizer drift. Wire applies to FGN, MC-dropout, and
+    # Gaussian operator trainers (they all share this entry point).
+    # ------------------------------------------------------------------
+    _ckpt_save_path = Path(str(checkpoint_save_dir))
+    if normalizer_path is not None:
+        from neuralop.flood.data.wv import (  # local import to keep the top-level set tight
+            load_normalizer_metadata,
+            resolve_normalizer_metadata_path,
+        )
+        _norm_meta_path = resolve_normalizer_metadata_path(normalizer_path)
+        _on_disk_norm_meta = (
+            load_normalizer_metadata(_norm_meta_path)
+            if _norm_meta_path is not None and _norm_meta_path.exists()
+            else None
+        )
+        # Assert at resume BEFORE the trainer touches the model state.
+        if checkpoint_resume_dir is not None:
+            _resume_sidecar = read_normalizer_fingerprint_sidecar(Path(str(checkpoint_resume_dir)))
+            if _resume_sidecar is not None:
+                if _on_disk_norm_meta is None:
+                    logger.warning(
+                        "Resume dir %s recorded a normalizer fingerprint but "
+                        "current normalizer metadata is unreadable; skipping "
+                        "the compatibility assertion.",
+                        checkpoint_resume_dir,
+                    )
+                else:
+                    assert_normalizer_matches_checkpoint(
+                        checkpoint_fingerprint=_resume_sidecar,
+                        on_disk_metadata=_on_disk_norm_meta,
+                        logger=logger,
+                        strict=True,
+                    )
+                    logger.info(
+                        "Resume normalizer fingerprint matches sidecar at %s.",
+                        checkpoint_resume_dir,
+                    )
+        # Write the sidecar for the *current* training run so future resumes
+        # are protected. Single-write before training; the normalizer is
+        # fixed for the lifetime of the run.
+        if _on_disk_norm_meta is not None:
+            _sidecar = write_normalizer_fingerprint_sidecar(
+                _ckpt_save_path, normalizer_metadata=_on_disk_norm_meta
+            )
+            logger.info(
+                "Wrote normalizer fingerprint sidecar at %s "
+                "(resume safety contract for normalizer-checkpoint pairing)",
+                _sidecar,
+            )
 
     trainer.train(
         train_loader=train_loader,
