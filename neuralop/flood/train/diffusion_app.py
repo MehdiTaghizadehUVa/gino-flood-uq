@@ -270,6 +270,7 @@ def main() -> int:
         target_variables=target_variables,
         logger=logger,
         dist_ctx=dist_ctx,
+        is_resuming=_resolve_resume_checkpoint(config) is not None,
     )
     _rank0_info(
         logger,

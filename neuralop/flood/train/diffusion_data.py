@@ -11,6 +11,7 @@ from torch.utils.data import DataLoader, Subset, random_split
 from torch.utils.data.distributed import DistributedSampler
 
 from neuralop.data.transforms.normalizers import load_normalizers, save_normalizers
+from neuralop.flood.data.normalizer_lifecycle import resolve_normalizer_artifact
 from neuralop.flood.data.structural_dry import (
     build_structural_dry_artifact,
     dry_mask_to_wettable_mask,
@@ -53,22 +54,44 @@ def _wait_for_normalizer_artifacts(
     normalizer_path: Path,
     *,
     metadata_path: Path,
-    expected_metadata: Dict[str, Any],
     timeout_seconds: float,
     poll_interval_seconds: float = 5.0,
+    expected_metadata: Optional[Dict[str, Any]] = None,
 ) -> None:
-    """Wait for rank-0-produced normalizer and metadata files to appear and match."""
+    """Wait for rank-0-produced normalizer and metadata files to appear.
+
+    Used by non-rank-0 workers in distributed runs. The default behavior only
+    waits for both files to exist and for the metadata to parse successfully;
+    the lifecycle helper (rank-0 side) authoritatively decides whether the
+    on-disk artifact is acceptable, and non-rank-0 ranks must respect that
+    decision — including the CACHED_FOR_RESUME outcome where on-disk metadata
+    deliberately disagrees with ``expected_metadata``.
+
+    Callers that want the historical strict check (on-disk metadata must equal
+    ``expected_metadata``) can opt in by passing ``expected_metadata``.
+    """
     deadline = time.monotonic() + timeout_seconds
     last_error: Exception | None = None
     while time.monotonic() < deadline:
         if normalizer_path.exists() and metadata_path.exists():
             try:
                 metadata = load_normalizer_metadata(metadata_path)
-                if metadata is None or not normalizer_metadata_matches(expected_metadata, metadata):
+                if metadata is None:
                     raise RuntimeError(
-                        f"Normalizer metadata at {metadata_path} does not match the current diffusion run."
+                        f"Normalizer metadata at {metadata_path} is unreadable; "
+                        "may still be mid-write."
                     )
-                load_normalizers(normalizer_path, device=None)
+                if expected_metadata is not None and not normalizer_metadata_matches(
+                    expected_metadata, metadata
+                ):
+                    raise RuntimeError(
+                        f"Normalizer metadata at {metadata_path} does not match the "
+                        "current diffusion run (caller requested strict match)."
+                    )
+                # We deliberately do NOT call load_normalizers here: the caller
+                # owns the actual load, and the lifecycle helper (rank-0 side)
+                # decides which on-disk artifact is acceptable. Our job is only
+                # to wait until rank-0 has finished writing both files.
                 return
             except Exception as exc:  # file may exist but still be mid-write
                 last_error = exc
@@ -86,6 +109,8 @@ def _prepare_datasets(
     target_variables: list[str],
     logger,
     dist_ctx: DistContext,
+    *,
+    is_resuming: bool = False,
 ) -> Tuple[
     DataLoader,
     DataLoader,
@@ -96,6 +121,15 @@ def _prepare_datasets(
     int,
     int,
 ]:
+    """Build train/test loaders, samplers, normalizers, and channel counts.
+
+    Args:
+        is_resuming: True when the caller will load a resume checkpoint after
+            this returns. Forwarded to ``resolve_normalizer_artifact`` so that
+            a fingerprint-mismatched cache is preserved (the model on disk is
+            calibrated to it) rather than silently refit. See the May 2026
+            ens02/ens03 incident for the failure mode this guards against.
+    """
     data_cfg = safe_get(config, "data", {})
     seed = int(safe_get(safe_get(config, "distributed", {}), "seed", 123))
     static_text_files = list(safe_get(data_cfg, "static_text_files", ["M40_CS.txt", "M40_CU.txt", "M40_FA.txt"]))
@@ -214,76 +248,78 @@ def _prepare_datasets(
         if normalizer_path is not None
         else None
     )
-    can_load_cached_normalizers = (
-        normalizer_path is not None
-        and normalizer_path.exists()
-        and metadata_path is not None
-        and metadata_path.exists()
-        and normalizer_metadata_matches(
-            expected_normalizer_metadata,
-            load_normalizer_metadata(metadata_path),
+    if dist_ctx.use_distributed and normalizer_path is None:
+        raise RuntimeError(
+            "Distributed diffusion training requires data.normalizer_path so non-rank0 "
+            "processes can wait for rank0-produced normalizers without long-lived NCCL collectives."
         )
+    force_load_cached_normalizers = bool(safe_get(data_cfg, "force_load_normalizers", False))
+
+    # Rank-0 authoritatively resolves the normalizer for this run via the
+    # shared lifecycle helper. Outcomes covered: refit (fresh or replaced),
+    # cached-exact, cached-for-resume, cached-force-loaded. The lifecycle
+    # owns the save-or-keep decision; non-rank-0 ranks load the resulting
+    # artifact below.
+    resolution = resolve_normalizer_artifact(
+        train_data_raw=train_raw,
+        normalizer_path=normalizer_path,
+        metadata_path=metadata_path,
+        expected_metadata=expected_normalizer_metadata,
+        fit_method=normalizer_fit_method,
+        structural_dry_policy=structural_dry_policy["policy"],
+        chunk_size=int(safe_get(data_cfg, "normalizer_chunk_size", 10000)),
+        expect_target=True,
+        is_resuming=bool(is_resuming),
+        force_load=force_load_cached_normalizers,
+        rank0=dist_ctx.is_rank0,
+        logger=logger,
+        fit_normalizers_fn=fit_normalizers,
+        save_normalizers_fn=save_normalizers,
+        load_normalizers_fn=load_normalizers,
+        save_normalizer_metadata_fn=save_normalizer_metadata,
+        load_normalizer_metadata_fn=load_normalizer_metadata,
     )
-    if can_load_cached_normalizers:
-        normalizers = load_normalizers(normalizer_path, device=None)
+    normalizers = resolution.normalizers
+    normalizer_fit_method = resolution.fit_method
+    if dist_ctx.is_rank0 and resolution.snapshot_path is not None:
+        # The lifecycle helper already logged the snapshot path; emit a second
+        # rank-0 info entry so it shows up in standard training logs too.
         _rank0_info(
             logger,
             dist_ctx,
-            "Loaded normalizers from %s (method=%s)",
-            normalizer_path,
-            normalizer_fit_method,
+            "Snapshotted previous normalizer artifact to %s before refit "
+            "(mismatch_keys=%s).",
+            resolution.snapshot_path,
+            list(resolution.mismatch_keys),
         )
-    else:
-        normalizers = None
-        if dist_ctx.use_distributed and normalizer_path is None:
-            raise RuntimeError(
-                "Distributed diffusion training requires data.normalizer_path so non-rank0 "
-                "processes can wait for rank0-produced normalizers without long-lived NCCL collectives."
+
+    if dist_ctx.use_distributed:
+        if not dist_ctx.is_rank0:
+            wait_timeout_min = float(
+                safe_get(data_cfg, "normalizer_wait_timeout_min", 120)
             )
-        if dist_ctx.is_rank0:
-            normalizers, normalizer_fit_method = fit_normalizers(
-                train_raw,
-                chunk_size=int(safe_get(data_cfg, "normalizer_chunk_size", 10000)),
-                expect_target=True,
-                structural_dry_policy=structural_dry_policy["policy"],
-                method=normalizer_fit_method,
-                return_method=True,
+            # Do NOT pass expected_metadata here: rank-0 may legitimately have
+            # kept a fingerprint-mismatched cache (CACHED_FOR_RESUME). Non-rank-0
+            # waits only for file presence + readable metadata.
+            _wait_for_normalizer_artifacts(
+                normalizer_path,
+                metadata_path=metadata_path,
+                timeout_seconds=wait_timeout_min * 60.0,
             )
-            if normalizer_path is not None:
-                save_normalizers(normalizers, normalizer_path)
-                if metadata_path is not None:
-                    save_normalizer_metadata(
-                        metadata_path,
-                        build_normalizer_metadata(
-                            train_raw,
-                            structural_dry_policy=structural_dry_policy["policy"],
-                            fit_method=normalizer_fit_method,
-                        ),
-                    )
-                logger.info(
-                    "Saved normalizers to %s (method=%s)",
-                    normalizer_path,
-                    normalizer_fit_method,
-                )
-        if dist_ctx.use_distributed:
-            if not dist_ctx.is_rank0:
-                wait_timeout_min = float(
-                    safe_get(data_cfg, "normalizer_wait_timeout_min", 120)
-                )
-                _wait_for_normalizer_artifacts(
-                    normalizer_path,
-                    metadata_path=metadata_path,
-                    expected_metadata=expected_normalizer_metadata,
-                    timeout_seconds=wait_timeout_min * 60.0,
-                )
-                normalizers = load_normalizers(normalizer_path, device=None)
-                metadata = load_normalizer_metadata(metadata_path) if metadata_path is not None else None
-                if metadata is not None:
-                    normalizer_fit_method = str(metadata.get("fit_method", normalizer_fit_method))
-            _dist_barrier(dist_ctx)
-        if normalizers is None:
-            raise RuntimeError("Failed to initialize normalizers in distributed setup.")
-    _rank0_info(logger, dist_ctx, "normalizer_fit_method=%s", normalizer_fit_method)
+            normalizers = load_normalizers(normalizer_path, device=None)
+            metadata = load_normalizer_metadata(metadata_path) if metadata_path is not None else None
+            if metadata is not None:
+                normalizer_fit_method = str(metadata.get("fit_method", normalizer_fit_method))
+        _dist_barrier(dist_ctx)
+    if normalizers is None:
+        raise RuntimeError("Failed to initialize normalizers in distributed setup.")
+    _rank0_info(
+        logger,
+        dist_ctx,
+        "normalizer_fit_method=%s (source=%s)",
+        normalizer_fit_method,
+        resolution.source.value,
+    )
 
     query_res = list(safe_get(data_cfg, "query_res", [48, 48]))
     train_norm = NormalizedDatasetOnTheFly(train_raw, normalizers, query_res=query_res)
