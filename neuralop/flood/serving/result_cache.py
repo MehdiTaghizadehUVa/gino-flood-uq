@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import json
 import shutil
+import time
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from enum import Enum
@@ -284,10 +285,12 @@ class ResultCache:
         for ref in self.run_artifact_store.list(producer_run_id):
             if not _is_cacheable_artifact(ref.artifact_id):
                 continue
-            self.cache_artifact_store.put_bytes(
-                link.cache_key,
-                ref.artifact_id,
-                self.run_artifact_store.read_bytes(producer_run_id, ref.artifact_id),
+            _copy_artifact_between_stores(
+                source_store=self.run_artifact_store,
+                target_store=self.cache_artifact_store,
+                source_run_id=producer_run_id,
+                target_run_id=link.cache_key,
+                artifact_id=ref.artifact_id,
                 content_type=ref.content_type,
             )
             copied.append(ref.artifact_id)
@@ -306,13 +309,19 @@ class ResultCache:
         return manifest
 
     def materialize_hit(self, target_run_id: str, cache_key: str, *, role: ResultCacheRunRole) -> tuple[str, ...]:
+        started = time.perf_counter()
         entry = self.repository.entry_for_key(cache_key)
         if entry is None or entry.status != ResultCacheEntryStatus.READY:
             raise RuntimeError(f"Result cache entry is not ready for key {cache_key[:12]}.")
+        cache_refs = {ref.artifact_id: ref for ref in self.cache_artifact_store.list(cache_key)}
         copied: list[str] = []
         for artifact_id in entry.artifact_manifest:
-            self._copy_cache_artifact(cache_key, target_run_id, artifact_id)
+            content_type = (
+                cache_refs[artifact_id].content_type if artifact_id in cache_refs else "application/octet-stream"
+            )
+            self._copy_cache_artifact(cache_key, target_run_id, artifact_id, content_type=content_type)
             copied.append(artifact_id)
+        elapsed = time.perf_counter() - started
         self.run_artifact_store.put_json(
             target_run_id,
             "cache_manifest",
@@ -334,7 +343,7 @@ class ResultCache:
                     "cache_key_prefix": cache_key[:12],
                     "materialized_artifact_count": len(copied),
                 },
-                "phases": {"cache_materialization": {"seconds": 0.0}},
+                "phases": {"cache_materialization": {"seconds": elapsed}},
             },
         )
         self.repository.mark_materialized(target_run_id, cache_key, role=role)
@@ -372,13 +381,20 @@ class ResultCache:
             payload["producer_run_id"] = entry.producer_run_id if entry else None
         return payload
 
-    def _copy_cache_artifact(self, cache_key: str, target_run_id: str, artifact_id: str) -> ArtifactRef:
-        refs = {ref.artifact_id: ref for ref in self.cache_artifact_store.list(cache_key)}
-        content_type = refs[artifact_id].content_type if artifact_id in refs else "application/octet-stream"
-        return self.run_artifact_store.put_bytes(
-            target_run_id,
-            artifact_id,
-            self.cache_artifact_store.read_bytes(cache_key, artifact_id),
+    def _copy_cache_artifact(
+        self,
+        cache_key: str,
+        target_run_id: str,
+        artifact_id: str,
+        *,
+        content_type: str,
+    ) -> ArtifactRef:
+        return _copy_artifact_between_stores(
+            source_store=self.cache_artifact_store,
+            target_store=self.run_artifact_store,
+            source_run_id=cache_key,
+            target_run_id=target_run_id,
+            artifact_id=artifact_id,
             content_type=content_type,
         )
 
@@ -462,6 +478,46 @@ def _path_identity(path: str | Path) -> str:
 
 def _is_cacheable_artifact(artifact_id: str) -> bool:
     return artifact_id not in _USER_SCOPED_ARTIFACTS and not artifact_id.startswith("monitoring_")
+
+
+def _copy_artifact_between_stores(
+    *,
+    source_store: ArtifactStore,
+    target_store: ArtifactStore,
+    source_run_id: str,
+    target_run_id: str,
+    artifact_id: str,
+    content_type: str,
+) -> ArtifactRef:
+    """Copy a cached artifact without routing large files through Python bytes.
+
+    Local production stores keep run artifacts and cache artifacts on the same
+    data root. In that case a hardlink is effectively instant and still safe:
+    deleting a user's run path only unlinks that user's directory entry, while
+    the shared cache package remains available. If hardlinks are unavailable
+    (different filesystems, Windows mount limits, permissions), fall back to
+    shutil.copy2. Non-local test stores keep the byte-oriented protocol path.
+    """
+    source_path_fn = getattr(source_store, "_artifact_path", None)
+    target_path_fn = getattr(target_store, "_artifact_path", None)
+    if callable(source_path_fn) and callable(target_path_fn):
+        source_path = Path(source_path_fn(source_run_id, artifact_id))
+        target_path = Path(target_path_fn(target_run_id, artifact_id))
+        if not source_path.exists() or not source_path.is_file():
+            raise FileNotFoundError(f"Cache source artifact not found: {artifact_id}")
+        if target_path.exists():
+            target_path.unlink()
+        try:
+            target_path.hardlink_to(source_path)
+        except OSError:
+            shutil.copy2(source_path, target_path)
+        return ArtifactRef(target_run_id, artifact_id, target_path, content_type, target_path.stat().st_size)
+    return target_store.put_bytes(
+        target_run_id,
+        artifact_id,
+        source_store.read_bytes(source_run_id, artifact_id),
+        content_type=content_type,
+    )
 
 
 class LocalCacheArtifactStore:

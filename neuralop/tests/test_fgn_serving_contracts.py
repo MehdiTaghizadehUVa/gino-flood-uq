@@ -18,6 +18,7 @@ from neuralop.flood.serving.result_cache import (
     InMemoryResultCacheRepository,
     LocalCacheArtifactStore,
     ResultCache,
+    ResultCacheRunRole,
     build_result_cache_key,
 )
 from neuralop.flood.serving.run_spec import RunSpec, RunStateError, RunStatus
@@ -793,6 +794,33 @@ def test_sql_result_cache_repository_records_hits_and_waiters(tmp_path):
     assert hit.status == ResultCacheLookupStatus.HIT
     repo.mark_materialized("third", "cache-a", role=repo.link_for_run("third").role)
     assert repo.link_for_run("third").status.value == "MATERIALIZED"
+
+
+def test_result_cache_materialization_replaces_partial_local_artifact(tmp_path):
+    repo = InMemoryResultCacheRepository()
+    run_store = LocalArtifactStore(tmp_path / "runs")
+    cache_store = LocalCacheArtifactStore(tmp_path / "cache")
+    result_cache = ResultCache(
+        repository=repo,
+        run_artifact_store=run_store,
+        cache_artifact_store=cache_store,
+    )
+
+    repo.reserve_or_find("cache-a", "producer")
+    run_store.put_bytes("producer", "map.png", b"complete map", content_type="image/png")
+    ready = result_cache.publish_completed("producer")
+    assert ready is not None
+    assert ready.artifact_manifest == ("map.png",)
+
+    run_store.put_bytes("target", "map.png", b"partial", content_type="image/png")
+    materialized = result_cache.materialize_hit("target", "cache-a", role=ResultCacheRunRole.HIT)
+
+    assert materialized == ("map.png",)
+    assert run_store.read_bytes("target", "map.png") == b"complete map"
+    timing = json.loads(run_store.read_bytes("target", "performance_timing.json"))
+    assert timing["cache"]["materialized_artifact_count"] == 1
+    assert timing["phases"]["cache_materialization"]["seconds"] >= 0
+    assert repo.link_for_run("target").status.value == "MATERIALIZED"
 
 
 def test_run_spec_rejects_unsupported_thresholds():
