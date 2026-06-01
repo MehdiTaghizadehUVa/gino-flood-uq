@@ -24,6 +24,10 @@ Calibration means applying CRPS member-by-member water-depth calibration and iso
 
 An Artifact is a downloadable run output such as uploaded CSV, summary JSON, map PNG, GIF animation, optional HDF5 ensemble, or reproducibility manifest. Large forecast arrays live in Artifact storage, not Postgres.
 
+## Result Cache
+
+The Result Cache is a shared server-side store for scientifically identical completed runs. It is keyed by canonical parsed forcing values, model/calibration/initial-condition identity, seed and ensemble settings, forecast horizon, output options, and product schema version. Cache hits create a new private Run for the submitting user and materialize scientific artifacts without exposing the source Run owner.
+
 ## Lab PC Server
 
 The Lab PC Server is the Windows 11 RTX 4090 machine that hosts V1 through WSL2 and Docker Compose. It is intended for VPN/LAN research access, Google OAuth, internal TLS, and local data storage rooted at `FGN_DATA_ROOT`.

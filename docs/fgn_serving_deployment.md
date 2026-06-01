@@ -20,6 +20,7 @@ The serving layer is intentionally split into deep modules:
 - `ModelBundle`: versioned scientific deployment contract and startup validation.
 - `ForcingInput`: CSV parsing, timestep validation, range checks, and input hash.
 - `RunSpec`: immutable run contract used by queue, worker, artifacts, and reports.
+- `ResultCache`: exact-match reuse of completed scientific artifacts without sharing user run ownership.
 - `FGNInferenceService`: fixed-domain FGN rollout seam.
 - `CalibrationAdapter`: CRPS-MBM (member-by-member) calibration of WD members and isotonic calibration of per-cell exceedance probability maps.
 - `ForecastProductBuilder`: no-ground-truth user products.
@@ -108,6 +109,12 @@ Postgres, reverse proxy, and daily cleanup services. The cleanup service expires
 unpinned terminal run artifacts after `FGN_RETENTION_DAYS` while preserving SQL
 audit metadata. On the lab PC, Compose must run inside WSL2/Docker Desktop with
 GPU support enabled.
+
+The Result Cache is enabled by default with `FGN_RESULT_CACHE_ENABLED=1`. It
+stores shared scientific result packages under `FGN_CACHE_ROOT`, or
+`FGN_ARTIFACT_ROOT/_result_cache` when that variable is unset. Cache packages are
+separate from user-owned Run artifact directories and survive normal per-run
+deletion/retention. Disable it only for debugging exact GPU re-execution.
 
 Production Compose now pulls published GHCR images by default. Local source
 builds are still available through `docker-compose.local-build.yml`; see

@@ -24,6 +24,7 @@ from neuralop.flood.serving.orchestrator import RunOrchestrator
 from neuralop.flood.serving.products import ForecastProductBuilder
 from neuralop.flood.serving.queue import InMemoryJobQueue
 from neuralop.flood.serving.repository import InMemoryRunRepository
+from neuralop.flood.serving.result_cache import InMemoryResultCacheRepository, LocalCacheArtifactStore, ResultCache
 from neuralop.flood.serving.storage import LocalArtifactStore
 
 from neuralop.tests.test_fgn_serving_contracts import _bundle, _valid_csv
@@ -76,6 +77,8 @@ def env(tmp_path):
         "provider": provider,
         "orchestrator": orchestrator,
         "repository": repository,
+        "queue": queue,
+        "artifacts": artifacts,
         "policy": policy,
     }
 
@@ -207,6 +210,51 @@ def test_create_run_succeeds_for_allowlisted_user_and_returns_queued(env):
     run_id = body["run_id"]
     record = env["repository"].get(run_id)
     assert record.spec.user_id == "alice@example.com"
+
+
+def test_create_run_reports_completed_cache_hit_without_source_owner_leak(env, tmp_path):
+    env["orchestrator"].result_cache = ResultCache(
+        repository=InMemoryResultCacheRepository(),
+        run_artifact_store=env["artifacts"],
+        cache_artifact_store=LocalCacheArtifactStore(tmp_path / "result-cache"),
+    )
+    env["provider"].current = _alice()
+    first = _post_csv(env["client"], _valid_csv(24), data={"forecast_steps": "4"})
+    assert first.status_code == 200
+    env["queue"].drain(env["orchestrator"].execute)
+
+    env["provider"].current = _bob()
+    second = _post_csv(env["client"], _valid_csv(24), data={"forecast_steps": "4"})
+
+    assert second.status_code == 200
+    body = second.json()
+    assert body["status"] == "COMPLETED"
+    assert body["cache_status"] == "HIT"
+    owner_view = env["client"].get(f"/api/runs/{body['run_id']}").json()
+    assert owner_view["cache"]["materialized_from_cache"] is True
+    assert "producer_run_id" not in owner_view["cache"]
+
+    env["provider"].current = _admin()
+    admin_view = env["client"].get(f"/api/runs/{body['run_id']}").json()
+    assert admin_view["cache"]["producer_run_id"] == first.json()["run_id"]
+
+
+def test_create_run_reports_waiting_cache_duplicate_without_second_queue_job(env, tmp_path):
+    env["orchestrator"].result_cache = ResultCache(
+        repository=InMemoryResultCacheRepository(),
+        run_artifact_store=env["artifacts"],
+        cache_artifact_store=LocalCacheArtifactStore(tmp_path / "result-cache"),
+    )
+    env["provider"].current = _alice()
+    first = _post_csv(env["client"], _valid_csv(24), data={"forecast_steps": "4"})
+    env["provider"].current = _bob()
+    second = _post_csv(env["client"], _valid_csv(24), data={"forecast_steps": "4"})
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert second.json()["status"] == "WAITING_FOR_CACHE"
+    assert second.json()["cache_status"] == "WAITING_FOR_SOURCE"
+    assert [job.run_id for job in env["queue"].jobs] == [first.json()["run_id"]]
 
 
 def test_create_run_accepts_valid_member_budget(env):

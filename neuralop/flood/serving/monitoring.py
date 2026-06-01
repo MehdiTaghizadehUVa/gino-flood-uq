@@ -578,7 +578,7 @@ class MonitoringOrchestrator:
         ))
         self.run_artifact_store.put_json(run_spec.run_id, "forcing_descriptors", descriptors)
         self.run_artifact_store.put_json(run_spec.run_id, "monitoring_report_pre_run", report.public_payload())
-        if report.candidate_recommended:
+        if report.candidate_recommended and not self._candidate_exists_for_input(run_spec):
             self._preserve_candidate_package(
                 run_spec=run_spec,
                 owner_email=owner_email,
@@ -624,7 +624,7 @@ class MonitoringOrchestrator:
         ))
         self.run_artifact_store.put_json(run_spec.run_id, "forecast_descriptors", descriptors)
         self.run_artifact_store.put_json(run_spec.run_id, "monitoring_report_post_run", report.public_payload())
-        if report.candidate_recommended:
+        if report.candidate_recommended and not self._candidate_exists_for_input(run_spec):
             self._preserve_candidate_package(
                 run_spec=run_spec,
                 owner_email=owner_email,
@@ -643,6 +643,20 @@ class MonitoringOrchestrator:
                 ),
             )
         return report
+
+    def _candidate_exists_for_input(self, run_spec: RunSpec) -> bool:
+        try:
+            candidates = self.repository.list_candidates()
+        except Exception:
+            return False
+        for candidate in candidates:
+            if (
+                candidate.input_hash == run_spec.input_hash
+                and candidate.model_bundle_id == run_spec.bundle_id
+                and candidate.monitoring_bundle_id == self.bundle.bundle_id
+            ):
+                return True
+        return False
 
     def monitoring_payload_for_run(self, run_id: str) -> dict[str, object]:
         reports = self.repository.list_reports_for_run(run_id)

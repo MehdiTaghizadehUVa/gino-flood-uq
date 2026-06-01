@@ -20,7 +20,11 @@ class QuotaPolicy:
 
     def validate_submit(self, repository: RunRepository, user_id: str) -> None:
         records = list(repository.list_for_user(user_id))
-        queued = sum(1 for r in records if r.status in {RunStatus.SUBMITTED, RunStatus.VALIDATING, RunStatus.QUEUED})
+        queued = sum(
+            1
+            for r in records
+            if r.status in {RunStatus.SUBMITTED, RunStatus.VALIDATING, RunStatus.WAITING_FOR_CACHE, RunStatus.QUEUED}
+        )
         running = sum(1 for r in records if r.status in {RunStatus.RUNNING, RunStatus.POSTPROCESSING})
         if queued >= int(self.max_user_queued):
             raise QuotaError(f"User already has {queued} queued jobs; limit is {self.max_user_queued}.")

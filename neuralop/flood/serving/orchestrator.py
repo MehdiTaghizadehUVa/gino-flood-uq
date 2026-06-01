@@ -19,6 +19,12 @@ from neuralop.flood.serving.products import ForecastProductBuilder, ForecastResu
 from neuralop.flood.serving.quota import QuotaPolicy
 from neuralop.flood.serving.queue import JobQueue
 from neuralop.flood.serving.repository import RunRepository
+from neuralop.flood.serving.result_cache import (
+    ResultCache,
+    ResultCacheLookupStatus,
+    ResultCacheRunRole,
+    build_result_cache_key,
+)
 from neuralop.flood.serving.run_spec import TERMINAL_STATUSES, RunSpec, RunStatus
 from neuralop.flood.serving.storage import ArtifactStore
 
@@ -35,6 +41,7 @@ class RunOrchestrator:
     product_builder: ForecastProductBuilder
     quota_policy: QuotaPolicy = QuotaPolicy()
     monitoring_orchestrator: MonitoringOrchestrator | None = None
+    result_cache: ResultCache | None = None
 
     def submit(
         self,
@@ -74,8 +81,8 @@ class RunOrchestrator:
             members_per_ensemble=members_per_ensemble,
             exceedance_thresholds_m=exceedance_thresholds_m,
         )
-        self.repository.create(spec)
         payload = forcing_csv if isinstance(forcing_csv, bytes) else str(forcing_csv).encode("utf-8")
+        self.repository.create(spec)
         self.artifact_store.put_bytes(spec.run_id, "forcing.csv", payload, content_type="text/csv")
         self.artifact_store.put_json(
             spec.run_id,
@@ -91,6 +98,17 @@ class RunOrchestrator:
                 model_bundle_metadata=self.bundle.public_metadata(),
             )
         self.repository.transition(spec.run_id, RunStatus.VALIDATING)
+        if self.result_cache is not None:
+            cache_key = build_result_cache_key(run_spec=spec, forcing_input=forcing, bundle=self.bundle)
+            reservation = self.result_cache.reserve_or_find(cache_key, spec.run_id)
+            if reservation.status == ResultCacheLookupStatus.HIT:
+                self.result_cache.materialize_hit(spec.run_id, cache_key, role=ResultCacheRunRole.HIT)
+                self._evaluate_cached_monitoring(spec, owner_email=user.email)
+                self.repository.transition(spec.run_id, RunStatus.COMPLETED)
+                return self.repository.get(spec.run_id)
+            if reservation.status == ResultCacheLookupStatus.WAITING:
+                self.repository.transition(spec.run_id, RunStatus.WAITING_FOR_CACHE)
+                return self.repository.get(spec.run_id)
         self.repository.transition(spec.run_id, RunStatus.QUEUED)
         self.queue.enqueue(spec.run_id)
         return self.repository.get(spec.run_id)
@@ -224,14 +242,21 @@ class RunOrchestrator:
                 with timer.phase("hdf5"):
                     self._write_forecast_hdf5(run_id, raw=raw, calibrated=calibrated)
             self._write_performance_timing(run_id, record=record, timer=timer, raw=raw)
+            cache_entry = None
+            if self.result_cache is not None:
+                cache_entry = self.result_cache.publish_completed(run_id)
             if self._is_terminal(run_id):
                 return
             self.repository.transition(run_id, RunStatus.COMPLETED)
+            if self.result_cache is not None and cache_entry is not None:
+                self._materialize_waiting_cache_runs(cache_entry.cache_key)
         except Exception as exc:
             if self._is_terminal(run_id):
                 return
             try:
                 self.repository.transition(run_id, RunStatus.FAILED, failure_reason=_safe_failure_reason(exc))
+                if self.result_cache is not None:
+                    self._requeue_cache_waiters_after_failure(run_id)
             finally:
                 raise
 
@@ -245,7 +270,19 @@ class RunOrchestrator:
             RunStatus.DELETED,
         }:
             return record
-        return self.repository.transition(run_id, RunStatus.CANCELED)
+        canceled = self.repository.transition(run_id, RunStatus.CANCELED)
+        self._requeue_cache_waiters_after_failure(run_id)
+        return canceled
+
+    def cache_payload_for_run(self, run_id: str, *, include_admin: bool = False) -> dict[str, object]:
+        if self.result_cache is None:
+            return {
+                "enabled": False,
+                "mode": "disabled",
+                "materialized_from_cache": False,
+                "waiting_for_cached_result": False,
+            }
+        return self.result_cache.metadata_for_run(run_id, include_admin=include_admin)
 
     def _is_terminal(self, run_id: str) -> bool:
         return self.repository.get(run_id).status in TERMINAL_STATUSES
@@ -281,6 +318,53 @@ class RunOrchestrator:
             )
         self.artifact_store.delete_run_artifacts(run_id)
         return self.repository.transition(run_id, RunStatus.DELETED)
+
+    def _materialize_waiting_cache_runs(self, cache_key: str) -> None:
+        if self.result_cache is None:
+            return
+        waiters = list(self.result_cache.waiting_runs_for_key(cache_key))
+        for waiter in waiters:
+            try:
+                record = self.repository.get(waiter.run_id)
+            except KeyError:
+                continue
+            if record.status != RunStatus.WAITING_FOR_CACHE:
+                continue
+            self.result_cache.materialize_hit(waiter.run_id, cache_key, role=ResultCacheRunRole.WAITER)
+            self._evaluate_cached_monitoring(record.spec, owner_email=record.spec.user_id)
+            self.repository.transition(waiter.run_id, RunStatus.COMPLETED)
+
+    def _requeue_cache_waiters_after_failure(self, producer_run_id: str) -> None:
+        if self.result_cache is None:
+            return
+        resolution = self.result_cache.handle_producer_failed(producer_run_id)
+        if resolution.promoted_run_id is None:
+            return
+        try:
+            record = self.repository.get(resolution.promoted_run_id)
+        except KeyError:
+            return
+        if record.status == RunStatus.WAITING_FOR_CACHE:
+            self.repository.transition(resolution.promoted_run_id, RunStatus.QUEUED)
+            self.queue.enqueue(resolution.promoted_run_id)
+
+    def _evaluate_cached_monitoring(self, spec: RunSpec, *, owner_email: str) -> None:
+        if self.monitoring_orchestrator is None:
+            return
+        try:
+            raw_summary = json.loads(self.artifact_store.read_bytes(spec.run_id, "raw_summary.json"))
+            calibrated_summary = json.loads(self.artifact_store.read_bytes(spec.run_id, "calibrated_summary.json"))
+            comparison_summary = json.loads(self.artifact_store.read_bytes(spec.run_id, "comparison_summary.json"))
+        except Exception:
+            return
+        self.monitoring_orchestrator.evaluate_completed_run(
+            run_spec=spec,
+            owner_email=owner_email,
+            raw_summary=raw_summary,
+            calibrated_summary=calibrated_summary,
+            comparison_summary=comparison_summary,
+            model_bundle_metadata=self.bundle.public_metadata(),
+        )
 
     def delete_runs(self, run_ids, *, user) -> dict:
         """Best-effort batch delete; per-run outcomes are returned not raised.
