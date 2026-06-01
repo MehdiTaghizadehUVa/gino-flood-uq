@@ -62,6 +62,12 @@ type RunRow = {
   pinned: boolean;
   failure_reason?: string | null;
   result_availability?: Record<string, boolean>;
+  cache?: {
+    mode?: string;
+    materialized_from_cache?: boolean;
+    waiting_for_cached_result?: boolean;
+    cache_key_prefix?: string | null;
+  };
   spec?: {
     forecast_steps?: number;
     request_animation?: boolean;
@@ -100,6 +106,7 @@ type ValidationState = {
 type RunStatus =
   | "SUBMITTED"
   | "VALIDATING"
+  | "WAITING_FOR_CACHE"
   | "QUEUED"
   | "RUNNING"
   | "POSTPROCESSING"
@@ -150,10 +157,11 @@ function formatScreeningFlag(flag: { code: string; message: string; descriptor?:
   }
 }
 
-const RUN_STAGES: RunStatus[] = ["SUBMITTED", "VALIDATING", "QUEUED", "RUNNING", "POSTPROCESSING", "COMPLETED"];
+const RUN_STAGES: RunStatus[] = ["SUBMITTED", "VALIDATING", "WAITING_FOR_CACHE", "QUEUED", "RUNNING", "POSTPROCESSING", "COMPLETED"];
 const ACTIVE_STATUSES: ReadonlySet<RunStatus> = new Set([
   "SUBMITTED",
   "VALIDATING",
+  "WAITING_FOR_CACHE",
   "QUEUED",
   "RUNNING",
   "POSTPROCESSING",
@@ -1546,7 +1554,7 @@ export default function Page() {
   const scrubFrames = scrubFramesByProduct.mean;
   const latestRun = runs[0];
   const runningCount = runs.filter((run) => ["RUNNING", "POSTPROCESSING"].includes(run.status)).length;
-  const queuedCount = runs.filter((run) => ["SUBMITTED", "VALIDATING", "QUEUED"].includes(run.status)).length;
+  const queuedCount = runs.filter((run) => ["SUBMITTED", "VALIDATING", "WAITING_FOR_CACHE", "QUEUED"].includes(run.status)).length;
   // UQ snapshot derivation. Completed-run cards are intentionally area- and
   // probability-first; legacy cell-count fields remain only for old JSON.
   const peakDepthM = asNumber(calibratedSummary?.max_mean_wd_m);
@@ -2038,6 +2046,8 @@ export default function Page() {
                   <div className="run-row-text">
                     <strong>{run.label || run.run_id.slice(0, 12)}</strong>
                     <span>{new Date(run.created_at).toLocaleString()}</span>
+                    {run.cache?.materialized_from_cache && <span className="run-progress-label">Loaded from verified cache</span>}
+                    {run.cache?.waiting_for_cached_result && <span className="run-progress-label">Waiting for matching run to finish</span>}
                     {run.progress_label && <span className="run-progress-label">{run.progress_label}</span>}
                   </div>
                     <span className={`status ${statusTone(run.status)}`}>{run.status}</span>

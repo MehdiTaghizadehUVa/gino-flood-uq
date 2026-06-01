@@ -7,10 +7,14 @@ type RunHeaderProps = {
   status?: string | null;
   createdAt?: string | null;
   pinned?: boolean;
+  cache?: {
+    materialized_from_cache?: boolean;
+    waiting_for_cached_result?: boolean;
+  } | null;
   actions?: ReactNode;
 };
 
-export function RunHeader({ title, status, createdAt, pinned, actions }: RunHeaderProps) {
+export function RunHeader({ title, status, createdAt, pinned, cache, actions }: RunHeaderProps) {
   return (
     <div className="run-command-header">
       <PageHeader
@@ -20,6 +24,12 @@ export function RunHeader({ title, status, createdAt, pinned, actions }: RunHead
           status ? (
             <>
               <StatusBadge tone={statusTone(status)}>{status}</StatusBadge>
+              {cache?.materialized_from_cache ? (
+                <StatusBadge tone="success">Loaded from verified cache</StatusBadge>
+              ) : null}
+              {cache?.waiting_for_cached_result ? (
+                <StatusBadge tone="active">Waiting for matching run</StatusBadge>
+              ) : null}
               {createdAt ? <span> created {new Date(createdAt).toLocaleString()}</span> : null}
               {pinned ? <span> · pinned</span> : null}
             </>

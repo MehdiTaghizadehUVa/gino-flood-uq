@@ -13,6 +13,7 @@ from neuralop.flood.serving.monitoring import InMemoryMonitoringRepository, Moni
 from neuralop.flood.serving.orchestrator import RunOrchestrator
 from neuralop.flood.serving.products import ForecastProductBuilder
 from neuralop.flood.serving.queue import InMemoryJobQueue
+from neuralop.flood.serving.result_cache import InMemoryResultCacheRepository, LocalCacheArtifactStore, ResultCache
 from neuralop.flood.serving.storage import LocalArtifactStore
 
 
@@ -67,6 +68,15 @@ def build_monitoring_repository():
     return InMemoryMonitoringRepository()
 
 
+def build_result_cache_repository():
+    database_url = os.environ.get("DATABASE_URL")
+    if database_url:
+        from neuralop.flood.serving.sql_result_cache import SqlResultCacheRepository
+
+        return SqlResultCacheRepository(database_url)
+    return InMemoryResultCacheRepository()
+
+
 def build_orchestrator(*, queue_override=None, preload_models: bool = False) -> RunOrchestrator:
     bundle_path = os.environ.get("FGN_MODEL_BUNDLE_PATH")
     if not bundle_path:
@@ -88,6 +98,14 @@ def build_orchestrator(*, queue_override=None, preload_models: bool = False) -> 
     else:
         raise RuntimeError(f"Unknown FGN_INFERENCE_MODE={inference_mode!r}.")
     run_artifact_store = LocalArtifactStore(artifact_root)
+    result_cache = None
+    if env_flag("FGN_RESULT_CACHE_ENABLED", default=True):
+        cache_root = Path(os.environ.get("FGN_CACHE_ROOT", str(artifact_root / "_result_cache")))
+        result_cache = ResultCache(
+            repository=build_result_cache_repository(),
+            run_artifact_store=run_artifact_store,
+            cache_artifact_store=LocalCacheArtifactStore(cache_root),
+        )
     monitoring_orchestrator = None
     monitoring_bundle_path = os.environ.get("FGN_MONITORING_BUNDLE_PATH")
     if monitoring_bundle_path:
@@ -115,4 +133,5 @@ def build_orchestrator(*, queue_override=None, preload_models: bool = False) -> 
         calibration_adapter=CalibrationAdapter.from_files(bundle.calibration_coefficients_path, bundle.isotonic_curves_path),
         product_builder=ForecastProductBuilder(),
         monitoring_orchestrator=monitoring_orchestrator,
+        result_cache=result_cache,
     )

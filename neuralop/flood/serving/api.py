@@ -269,13 +269,17 @@ def create_app(orchestrator: RunOrchestrator, *, current_user: Callable[[], User
     def _as_aware_datetime(value: datetime) -> datetime:
         return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value
 
-    def _run_payload(record):
+    def _run_payload(record, *, include_admin_cache: bool = False):
         progress = (
             float(record.progress)
             if isinstance(record.progress, (int, float))
             else default_progress_for_status(record.status)
         )
         progress = max(0.0, min(1.0, progress))
+        cache_payload = orchestrator.cache_payload_for_run(
+            record.spec.run_id,
+            include_admin=include_admin_cache,
+        )
         return {
             "run_id": record.spec.run_id,
             "label": record.spec.label,
@@ -293,7 +297,20 @@ def create_app(orchestrator: RunOrchestrator, *, current_user: Callable[[], User
             "validation_messages": [],
             "result_availability": _artifact_availability(record.spec.run_id),
             "spec": record.spec.manifest(),
+            "cache": cache_payload,
         }
+
+    def _submit_cache_status(record) -> dict[str, object]:
+        cache = orchestrator.cache_payload_for_run(record.spec.run_id, include_admin=False)
+        if not cache.get("enabled"):
+            return {}
+        if cache.get("waiting_for_cached_result"):
+            status = "WAITING_FOR_SOURCE"
+        elif cache.get("materialized_from_cache"):
+            status = "HIT"
+        else:
+            status = "MISS"
+        return {"cache_status": status, "cache_key_prefix": cache.get("cache_key_prefix")}
 
     def _parse_thresholds(raw: str | None):
         if raw is None or not str(raw).strip():
@@ -408,7 +425,7 @@ def create_app(orchestrator: RunOrchestrator, *, current_user: Callable[[], User
                 ensemble_count=ensemble_count,
                 members_per_ensemble=members_per_ensemble,
             )
-            return {"run_id": record.spec.run_id, "status": record.status.value}
+            return {"run_id": record.spec.run_id, "status": record.status.value, **_submit_cache_status(record)}
         except PermissionError as exc:
             raise HTTPException(status_code=403, detail=str(exc)) from exc
         except Exception as exc:
@@ -427,7 +444,7 @@ def create_app(orchestrator: RunOrchestrator, *, current_user: Callable[[], User
     def get_run(run_id: str, user: User = Depends(_current_user)):
         record = orchestrator.repository.get(run_id)
         _require_run_read(user, record)
-        return _run_payload(record)
+        return _run_payload(record, include_admin_cache=bool(user.is_admin))
 
     @app.get("/api/runs/{run_id}/monitoring")
     def get_run_monitoring(run_id: str, user: User = Depends(_current_user)):
@@ -519,7 +536,7 @@ def create_app(orchestrator: RunOrchestrator, *, current_user: Callable[[], User
     def cancel_run(run_id: str, user: User = Depends(_current_user)):
         record = orchestrator.repository.get(run_id)
         _require_run_read(user, record)
-        return _run_payload(orchestrator.cancel(run_id))
+        return _run_payload(orchestrator.cancel(run_id), include_admin_cache=bool(user.is_admin))
 
     @app.get("/api/runs/{run_id}/cell/{cell_index}/timeseries")
     def get_cell_timeseries(run_id: str, cell_index: int, user: User = Depends(_current_user)):

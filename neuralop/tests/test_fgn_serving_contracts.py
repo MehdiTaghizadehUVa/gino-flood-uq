@@ -14,6 +14,12 @@ from neuralop.flood.serving.orchestrator import RunOrchestrator
 from neuralop.flood.serving.products import ForecastProductBuilder, ForecastResult
 from neuralop.flood.serving.queue import InMemoryJobQueue
 from neuralop.flood.serving.repository import InMemoryRunRepository
+from neuralop.flood.serving.result_cache import (
+    InMemoryResultCacheRepository,
+    LocalCacheArtifactStore,
+    ResultCache,
+    build_result_cache_key,
+)
 from neuralop.flood.serving.run_spec import RunSpec, RunStateError, RunStatus
 from neuralop.flood.serving.storage import LocalArtifactStore
 
@@ -84,6 +90,37 @@ def _fake_orchestrator(tmp_path: Path) -> RunOrchestrator:
     )
 
 
+def _cached_orchestrator(tmp_path: Path) -> tuple[RunOrchestrator, InMemoryJobQueue]:
+    bundle = _bundle(tmp_path)
+    queue = InMemoryJobQueue()
+    run_store = LocalArtifactStore(tmp_path / "artifacts")
+    coeff = {
+        "lead_time_hours": [0.0, 999.0],
+        "wet_frequency_edges": [0.0, 1.0],
+        "wet_frequency_by_cell": [1.0] * 8,
+        "coefficients": [[[0.0, 1.0, 0.5]]],
+    }
+    result_cache = ResultCache(
+        repository=InMemoryResultCacheRepository(),
+        run_artifact_store=run_store,
+        cache_artifact_store=LocalCacheArtifactStore(tmp_path / "result-cache"),
+    )
+    return (
+        RunOrchestrator(
+            bundle=bundle,
+            repository=InMemoryRunRepository(),
+            queue=queue,
+            artifact_store=run_store,
+            access_policy=AccessPolicy(allowed_emails=["alice@example.com", "bob@example.com"]),
+            inference_service=FakeFGNInferenceService(bundle, n_cells=8),
+            calibration_adapter=CalibrationAdapter(crps_mbm=coeff),
+            product_builder=ForecastProductBuilder(),
+            result_cache=result_cache,
+        ),
+        queue,
+    )
+
+
 def test_model_bundle_rejects_missing_calibration(tmp_path):
     bundle = _bundle(tmp_path, paths=False)
     with pytest.raises(ModelBundleError, match="missing required files"):
@@ -110,6 +147,108 @@ def test_forcing_template_is_valid_for_bundle(tmp_path):
     forcing = parse_forcing_csv(build_forcing_template_csv(bundle), bundle=bundle)
     assert forcing.n_rows == bundle.min_required_forcing_rows
     assert forcing.forecast_steps == 1
+
+
+def test_result_cache_key_uses_scientific_fingerprint_not_csv_bytes(tmp_path):
+    bundle = _bundle(tmp_path)
+    csv_a = _valid_csv(24)
+    csv_b = "precipitation,stage,time_seconds\n" + "\n".join(
+        f"0.2,{1.0 + i*0.01},{i*900}" for i in range(24)
+    ) + "\n"
+    forcing_a = parse_forcing_csv(csv_a, bundle=bundle, requested_forecast_steps=4)
+    forcing_b = parse_forcing_csv(csv_b, bundle=bundle, requested_forecast_steps=4)
+    spec_a = RunSpec.new(
+        user_id="alice@example.com",
+        bundle_id=bundle.bundle_id,
+        input_hash=forcing_a.input_hash,
+        forecast_steps=forcing_a.forecast_steps,
+        label="A",
+    )
+    spec_b = RunSpec.new(
+        user_id="bob@example.com",
+        bundle_id=bundle.bundle_id,
+        input_hash=forcing_b.input_hash,
+        forecast_steps=forcing_b.forecast_steps,
+        label="B",
+    )
+
+    assert forcing_a.input_hash != forcing_b.input_hash
+    assert build_result_cache_key(run_spec=spec_a, forcing_input=forcing_a, bundle=bundle) == (
+        build_result_cache_key(run_spec=spec_b, forcing_input=forcing_b, bundle=bundle)
+    )
+
+    changed = RunSpec.new(
+        user_id="alice@example.com",
+        bundle_id=bundle.bundle_id,
+        input_hash=forcing_a.input_hash,
+        forecast_steps=forcing_a.forecast_steps,
+        exceedance_thresholds_m=(0.01, 0.05),
+    )
+    assert build_result_cache_key(run_spec=changed, forcing_input=forcing_a, bundle=bundle) != (
+        build_result_cache_key(run_spec=spec_a, forcing_input=forcing_a, bundle=bundle)
+    )
+
+
+def test_completed_duplicate_materializes_private_run_from_result_cache(tmp_path):
+    orchestrator, queue = _cached_orchestrator(tmp_path)
+    alice = User(user_id="alice@example.com", email="alice@example.com", disclaimer_acknowledged=True)
+    bob = User(user_id="bob@example.com", email="bob@example.com", disclaimer_acknowledged=True)
+
+    first = orchestrator.submit(user=alice, forcing_csv=_valid_csv(24), forecast_steps=4, label="source")
+    queue.drain(orchestrator.execute)
+    assert orchestrator.repository.get(first.spec.run_id).status == RunStatus.COMPLETED
+
+    second = orchestrator.submit(user=bob, forcing_csv=_valid_csv(24), forecast_steps=4, label="private-copy")
+
+    assert second.status == RunStatus.COMPLETED
+    assert second.spec.run_id != first.spec.run_id
+    assert second.spec.user_id == "bob@example.com"
+    assert len(queue.jobs) == 0
+    artifact_ids = {ref.artifact_id for ref in orchestrator.artifact_store.list(second.spec.run_id)}
+    assert {"cache_manifest.json", "calibrated_summary.json", "forcing.csv", "run_manifest.json"}.issubset(artifact_ids)
+    cache_payload = orchestrator.cache_payload_for_run(second.spec.run_id)
+    assert cache_payload["materialized_from_cache"] is True
+    assert "producer_run_id" not in cache_payload
+
+
+def test_in_flight_duplicate_waits_for_source_and_never_enqueues_gpu_twice(tmp_path):
+    orchestrator, queue = _cached_orchestrator(tmp_path)
+    alice = User(user_id="alice@example.com", email="alice@example.com", disclaimer_acknowledged=True)
+    bob = User(user_id="bob@example.com", email="bob@example.com", disclaimer_acknowledged=True)
+
+    source = orchestrator.submit(user=alice, forcing_csv=_valid_csv(24), forecast_steps=4)
+    waiter = orchestrator.submit(user=bob, forcing_csv=_valid_csv(24), forecast_steps=4)
+
+    assert source.status == RunStatus.QUEUED
+    assert waiter.status == RunStatus.WAITING_FOR_CACHE
+    assert [job.run_id for job in queue.jobs] == [source.spec.run_id]
+
+    queue.drain(orchestrator.execute)
+
+    assert orchestrator.repository.get(source.spec.run_id).status == RunStatus.COMPLETED
+    assert orchestrator.repository.get(waiter.spec.run_id).status == RunStatus.COMPLETED
+    assert len(queue.jobs) == 0
+    assert orchestrator.cache_payload_for_run(waiter.spec.run_id)["materialized_from_cache"] is True
+
+
+def test_waiting_cache_run_is_requeued_when_source_is_canceled(tmp_path):
+    orchestrator, queue = _cached_orchestrator(tmp_path)
+    alice = User(user_id="alice@example.com", email="alice@example.com", disclaimer_acknowledged=True)
+    bob = User(user_id="bob@example.com", email="bob@example.com", disclaimer_acknowledged=True)
+
+    source = orchestrator.submit(user=alice, forcing_csv=_valid_csv(24), forecast_steps=4)
+    waiter = orchestrator.submit(user=bob, forcing_csv=_valid_csv(24), forecast_steps=4)
+
+    orchestrator.cancel(source.spec.run_id)
+
+    assert orchestrator.repository.get(source.spec.run_id).status == RunStatus.CANCELED
+    assert orchestrator.repository.get(waiter.spec.run_id).status == RunStatus.QUEUED
+    assert queue.jobs[-1].run_id == waiter.spec.run_id
+
+    queue.drain(orchestrator.execute)
+
+    assert orchestrator.repository.get(waiter.spec.run_id).status == RunStatus.COMPLETED
+    assert orchestrator.cache_payload_for_run(waiter.spec.run_id)["mode"] == "producer"
 
 
 class _FakeCudaUnavailable:
@@ -630,6 +769,30 @@ def test_sql_run_repository_persists_live_progress_and_runtime(tmp_path):
     done = repo.transition(spec.run_id, RunStatus.COMPLETED)
     assert done.progress == 1.0
     assert done.runtime_seconds is not None
+
+
+def test_sql_result_cache_repository_records_hits_and_waiters(tmp_path):
+    pytest.importorskip("sqlalchemy")
+    from neuralop.flood.serving.result_cache import ResultCacheLookupStatus
+    from neuralop.flood.serving.sql_result_cache import SqlResultCacheRepository
+
+    repo = SqlResultCacheRepository(f"sqlite:///{tmp_path / 'result_cache.sqlite'}")
+
+    miss = repo.reserve_or_find("cache-a", "producer")
+    assert miss.status == ResultCacheLookupStatus.MISS
+
+    waiting = repo.reserve_or_find("cache-a", "waiter")
+    assert waiting.status == ResultCacheLookupStatus.WAITING
+    assert [link.run_id for link in repo.list_waiting_runs("cache-a")] == ["waiter"]
+
+    ready = repo.publish_ready("producer", ["calibrated_summary.json", "map.png"])
+    assert ready is not None
+    assert ready.artifact_manifest == ("calibrated_summary.json", "map.png")
+
+    hit = repo.reserve_or_find("cache-a", "third")
+    assert hit.status == ResultCacheLookupStatus.HIT
+    repo.mark_materialized("third", "cache-a", role=repo.link_for_run("third").role)
+    assert repo.link_for_run("third").status.value == "MATERIALIZED"
 
 
 def test_run_spec_rejects_unsupported_thresholds():

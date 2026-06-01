@@ -12,6 +12,7 @@ from uuid import uuid4
 class RunStatus(str, Enum):
     SUBMITTED = "SUBMITTED"
     VALIDATING = "VALIDATING"
+    WAITING_FOR_CACHE = "WAITING_FOR_CACHE"
     QUEUED = "QUEUED"
     RUNNING = "RUNNING"
     POSTPROCESSING = "POSTPROCESSING"
@@ -36,7 +37,14 @@ ALLOWED_OUTPUT_DETAILS = {"standard", "full"}
 
 _ALLOWED_TRANSITIONS = {
     RunStatus.SUBMITTED: {RunStatus.VALIDATING, RunStatus.CANCELED},
-    RunStatus.VALIDATING: {RunStatus.QUEUED, RunStatus.FAILED, RunStatus.CANCELED},
+    RunStatus.VALIDATING: {
+        RunStatus.WAITING_FOR_CACHE,
+        RunStatus.QUEUED,
+        RunStatus.COMPLETED,
+        RunStatus.FAILED,
+        RunStatus.CANCELED,
+    },
+    RunStatus.WAITING_FOR_CACHE: {RunStatus.QUEUED, RunStatus.COMPLETED, RunStatus.FAILED, RunStatus.CANCELED},
     RunStatus.QUEUED: {RunStatus.RUNNING, RunStatus.CANCELED, RunStatus.FAILED},
     RunStatus.RUNNING: {RunStatus.POSTPROCESSING, RunStatus.FAILED, RunStatus.CANCELED},
     RunStatus.POSTPROCESSING: {RunStatus.COMPLETED, RunStatus.FAILED, RunStatus.CANCELED},

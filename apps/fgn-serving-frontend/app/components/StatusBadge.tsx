@@ -10,7 +10,7 @@ type StatusBadgeProps = {
 export function statusTone(status?: string | null): StatusTone {
   const normalized = (status || "").toUpperCase();
   if (["COMPLETED", "READY", "PASSED", "SIMULATED"].includes(normalized)) return "success";
-  if (["RUNNING", "POSTPROCESSING", "VALIDATING", "QUEUED", "SUBMITTED"].includes(normalized)) {
+  if (["RUNNING", "POSTPROCESSING", "VALIDATING", "WAITING_FOR_CACHE", "QUEUED", "SUBMITTED"].includes(normalized)) {
     return "active";
   }
   if (["FAILED", "CANCELED", "EXPIRED", "DELETED", "REJECTED"].includes(normalized)) return "danger";

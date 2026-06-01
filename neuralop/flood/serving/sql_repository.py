@@ -153,6 +153,9 @@ class SqlRunRepository:
         now = datetime.now(timezone.utc)
         started_at = current.started_at or (now if status == RunStatus.RUNNING else None)
         completed_at = current.completed_at
+        if status == RunStatus.COMPLETED and current.status == RunStatus.WAITING_FOR_CACHE:
+            started_at = started_at or now
+            completed_at = completed_at or now
         if status in {RunStatus.COMPLETED, RunStatus.FAILED, RunStatus.CANCELED} and started_at is not None:
             completed_at = completed_at or now
         values = {

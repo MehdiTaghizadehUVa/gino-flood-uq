@@ -13,6 +13,7 @@ from neuralop.flood.serving.run_spec import RunSpec, RunStatus, ensure_transitio
 DEFAULT_PROGRESS_BY_STATUS = {
     RunStatus.SUBMITTED: 0.05,
     RunStatus.VALIDATING: 0.15,
+    RunStatus.WAITING_FOR_CACHE: 0.30,
     RunStatus.QUEUED: 0.25,
     RunStatus.RUNNING: 0.40,
     RunStatus.POSTPROCESSING: 0.82,
@@ -26,6 +27,7 @@ DEFAULT_PROGRESS_BY_STATUS = {
 DEFAULT_PROGRESS_LABEL_BY_STATUS = {
     RunStatus.SUBMITTED: "Submission received",
     RunStatus.VALIDATING: "Validating forcing input",
+    RunStatus.WAITING_FOR_CACHE: "Waiting for matching cached result",
     RunStatus.QUEUED: "Waiting for the GPU worker",
     RunStatus.RUNNING: "GPU inference is running",
     RunStatus.POSTPROCESSING: "Post-processing forecast products",
@@ -121,6 +123,9 @@ class InMemoryRunRepository:
             now = datetime.now(timezone.utc)
             started_at = record.started_at or (now if status == RunStatus.RUNNING else None)
             completed_at = record.completed_at
+            if status == RunStatus.COMPLETED and record.status == RunStatus.WAITING_FOR_CACHE:
+                started_at = started_at or now
+                completed_at = completed_at or now
             if status in {RunStatus.COMPLETED, RunStatus.FAILED, RunStatus.CANCELED} and started_at is not None:
                 completed_at = completed_at or now
             updated = replace(

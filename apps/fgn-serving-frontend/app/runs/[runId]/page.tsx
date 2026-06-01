@@ -54,6 +54,12 @@ type RunData = {
   completed_at?: string | null;
   runtime_seconds?: number | null;
   timing?: RunTiming;
+  cache?: {
+    mode?: string;
+    materialized_from_cache?: boolean;
+    waiting_for_cached_result?: boolean;
+    cache_key_prefix?: string | null;
+  };
 };
 
 type CurrentUser = {
@@ -1864,6 +1870,7 @@ export default function RunDetails() {
         status={run?.status}
         createdAt={run?.created_at}
         pinned={run?.pinned}
+        cache={run?.cache}
         actions={
           run ? (
             <div className="hero-actions" aria-label="Run actions">
