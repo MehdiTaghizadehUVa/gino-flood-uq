@@ -5,6 +5,7 @@ x-fgn-env: &fgn-env
 services:
   api:
     image: ${FGN_API_IMAGE:-ghcr.io/mehditaghizadehuva/gino-flood-uq/fgn-serving-python:main}
+    restart: unless-stopped
     command: uvicorn neuralop.flood.serving.api_app:app --host 0.0.0.0 --port 8000
     env_file: *fgn-env
     volumes:
@@ -24,6 +25,7 @@ services:
 
   worker-gpu:
     image: ${FGN_WORKER_IMAGE:-ghcr.io/mehditaghizadehuva/gino-flood-uq/fgn-serving-python:main}
+    restart: unless-stopped
     command: celery -A neuralop.flood.serving.celery_app worker --loglevel=INFO --concurrency=1
     env_file: *fgn-env
     volumes:
@@ -50,6 +52,7 @@ services:
 
   frontend:
     image: ${FGN_FRONTEND_IMAGE:-ghcr.io/mehditaghizadehuva/gino-flood-uq/fgn-serving-frontend:main}
+    restart: unless-stopped
     env_file: *fgn-env
     depends_on:
       - api
@@ -62,6 +65,7 @@ services:
 
   oauth2-proxy:
     image: quay.io/oauth2-proxy/oauth2-proxy:v7.6.0
+    restart: unless-stopped
     env_file: *fgn-env
     command:
       - --provider=google
@@ -84,6 +88,7 @@ services:
 
   cleanup-backup:
     image: ${FGN_CLEANUP_IMAGE:-ghcr.io/mehditaghizadehuva/gino-flood-uq/fgn-serving-python:main}
+    restart: unless-stopped
     command: sh -c 'while true; do python -m neuralop.flood.serving.cleanup; python -m neuralop.flood.serving.drift_runner --database-url "$DATABASE_URL"; sleep 86400; done'
     env_file: *fgn-env
     volumes:
@@ -95,6 +100,7 @@ services:
 
   postgres-backup:
     image: postgres:16-alpine
+    restart: unless-stopped
     env_file: *fgn-env
     volumes:
       - ${FGN_DATA_ROOT:?set FGN_DATA_ROOT}/backups:/backups
@@ -118,6 +124,7 @@ services:
 
   redis:
     image: redis:7-alpine
+    restart: unless-stopped
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
@@ -127,6 +134,7 @@ services:
 
   postgres:
     image: postgres:16-alpine
+    restart: unless-stopped
     environment:
       POSTGRES_DB: fgn_serving
       POSTGRES_USER: fgn_serving
@@ -142,6 +150,7 @@ services:
 
   proxy:
     image: caddy:2-alpine
+    restart: unless-stopped
     env_file: *fgn-env
     ports:
       - "80:80"
