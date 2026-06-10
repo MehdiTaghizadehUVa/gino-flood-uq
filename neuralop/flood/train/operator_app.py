@@ -946,10 +946,6 @@ def main():
     # ------------------------------------------------------------------
     _ckpt_save_path = Path(str(checkpoint_save_dir))
     if normalizer_path is not None:
-        from neuralop.flood.data.wv import (  # local import to keep the top-level set tight
-            load_normalizer_metadata,
-            resolve_normalizer_metadata_path,
-        )
         _norm_meta_path = resolve_normalizer_metadata_path(normalizer_path)
         _on_disk_norm_meta = (
             load_normalizer_metadata(_norm_meta_path)

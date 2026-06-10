@@ -127,6 +127,93 @@ def test_early_stopping_tracks_scheduler_monitor_and_saves_last_epoch():
     assert trainer.checkpoints[-1] == "model"
 
 
+def test_staged_training_preserves_global_best_metric_across_resume():
+    model = nn.Linear(1, 1)
+    optimizer = torch.optim.SGD(model.parameters(), lr=1.0)
+    trainer = _ScriptedTrainer(
+        [1.2, 0.9],
+        model=model,
+        n_epochs=4,
+        device="cpu",
+        scheduler_monitor="test_l2",
+    )
+    trainer.start_epoch = 2
+    trainer._best_metric_value = 1.0
+
+    trainer.train(
+        _Loader(),
+        {"test": _Loader()},
+        optimizer,
+        scheduler=None,
+        training_loss=_sum_l2,
+        eval_losses={"l2": _sum_l2},
+        save_best="test_l2",
+    )
+
+    assert trainer.epochs_run == [2, 3]
+    assert trainer.checkpoints == ["best_model"]
+    assert trainer._best_metric_value == pytest.approx(0.9)
+
+
+def test_staged_training_preserves_early_stopping_patience_across_resume():
+    model = nn.Linear(1, 1)
+    optimizer = torch.optim.SGD(model.parameters(), lr=1.0)
+    trainer = _ScriptedTrainer(
+        [1.1, 1.2, 1.3],
+        model=model,
+        n_epochs=5,
+        device="cpu",
+        scheduler_monitor="test_l2",
+        early_stopping_enabled=True,
+        early_stopping_patience=2,
+        early_stopping_min_delta=1e-4,
+    )
+    trainer.start_epoch = 2
+    trainer._early_stopping_best = 1.0
+    trainer._early_stopping_bad_epochs = 1
+
+    trainer.train(
+        _Loader(),
+        {"test": _Loader()},
+        optimizer,
+        scheduler=None,
+        training_loss=_sum_l2,
+        eval_losses={"l2": _sum_l2},
+        save_every=1,
+    )
+
+    assert trainer.epochs_run == [2]
+    assert trainer._early_stopping_bad_epochs == 2
+    assert trainer.checkpoints == ["model"]
+
+
+def test_trainer_progress_sidecar_round_trips_resume_counters(tmp_path):
+    trainer = Trainer(
+        model=nn.Linear(1, 1),
+        n_epochs=1,
+        device="cpu",
+        scheduler_monitor="test_l2",
+    )
+    trainer.save_best = "test_l2"
+    trainer._best_metric_value = 0.7
+    trainer._early_stopping_best = 0.8
+    trainer._early_stopping_bad_epochs = 3
+
+    trainer._save_trainer_progress(tmp_path)
+
+    resumed = Trainer(
+        model=nn.Linear(1, 1),
+        n_epochs=1,
+        device="cpu",
+        scheduler_monitor="test_l2",
+    )
+    resumed._load_trainer_progress_from_dir(tmp_path)
+
+    assert resumed._best_metric_value == pytest.approx(0.7)
+    assert resumed._early_stopping_best == pytest.approx(0.8)
+    assert resumed._early_stopping_bad_epochs == 3
+
+
 def _ar_sample(batch=2, n_history=2, cells=3, steps=2):
     static = torch.zeros(batch, cells, 1)
     boundary = torch.zeros(batch, n_history, cells, 1)
