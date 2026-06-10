@@ -1,6 +1,6 @@
 import torch
 
-from neuralop.losses.probabilistic_losses import GaussianNLLLoss, split_gaussian_packed
+from neuralop.losses.probabilistic_losses import CRPSLoss, GaussianNLLLoss, fair_crps_univariate, split_gaussian_packed
 
 
 def _manual_diag_gaussian_nll(mu, logvar, y):
@@ -82,3 +82,22 @@ def test_gaussian_nll_weighted_mean():
     nll = nll * channel_weights.view(1, 1, C)
     expected = (nll * spatial_weights).sum() / spatial_weights.sum()
     assert torch.allclose(got, expected, atol=1e-6, rtol=1e-6)
+
+def test_fair_crps_univariate_uses_distinct_pair_denominator():
+    samples = torch.tensor([[0.0], [2.0], [5.0]])
+    target = torch.tensor([1.0])
+
+    # term1 = (1 + 1 + 4) / 3 = 2
+    # ordered pair sum = 20; fair term2 = 20 / (2 * 3 * 2) = 5/3
+    expected = torch.tensor([1.0 / 3.0])
+
+    got = fair_crps_univariate(samples, target)
+    assert torch.allclose(got, expected, atol=1e-6, rtol=1e-6)
+
+
+def test_crps_loss_uses_fair_estimator():
+    pred_samples = torch.tensor([[[[0.0]]], [[[2.0]]], [[[5.0]]]])
+    target = torch.tensor([[[1.0]]])
+
+    loss = CRPSLoss(n_samples=3, reduction="mean")(pred_samples, target)
+    assert torch.allclose(loss, torch.tensor(1.0 / 3.0), atol=1e-6, rtol=1e-6)

@@ -189,19 +189,27 @@ def _crps_ensemble_vs_reference(
     forecast_ens: np.ndarray, reference_ens: np.ndarray
 ) -> np.ndarray:
     """
-    CRPS per location for forecast ensemble against reference ensemble.
+    Fair CRPS per location for forecast ensemble against reference ensemble.
 
     Parameters
     ----------
     forecast_ens: [n_forecast, n_locations]
     reference_ens: [n_reference, n_locations]
     """
-    term_1 = np.mean(
-        np.abs(forecast_ens[:, None, :] - reference_ens[None, :, :]), axis=(0, 1)
-    )
-    term_2 = 0.5 * np.mean(
-        np.abs(forecast_ens[:, None, :] - forecast_ens[None, :, :]), axis=(0, 1)
-    )
+    forecast = np.asarray(forecast_ens, dtype=np.float64)
+    reference = np.asarray(reference_ens, dtype=np.float64)
+    if forecast.ndim != 2 or reference.ndim != 2:
+        raise ValueError("forecast_ens and reference_ens must be [members, locations].")
+    if forecast.shape[1] != reference.shape[1]:
+        raise ValueError("forecast/reference location dimensions differ.")
+    k = forecast.shape[0]
+    if k < 1 or reference.shape[0] < 1:
+        raise ValueError("fair CRPS requires at least one forecast and one reference member.")
+    term_1 = np.mean(np.abs(forecast[:, None, :] - reference[None, :, :]), axis=(0, 1))
+    if k < 2:
+        return term_1
+    pair_sum = np.sum(np.abs(forecast[:, None, :] - forecast[None, :, :]), axis=(0, 1))
+    term_2 = pair_sum / float(2 * k * (k - 1))
     return term_1 - term_2
 
 
