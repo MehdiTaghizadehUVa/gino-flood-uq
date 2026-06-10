@@ -171,12 +171,18 @@ const TERMINAL_FAILED: ReadonlySet<RunStatus> = new Set(["FAILED", "CANCELED", "
 const POLL_INTERVAL_ACTIVE_MS = 4000;
 const POLL_INTERVAL_IDLE_MS = 20000;
 
+function workspaceFromUrl(search: string, hash: string): HomeWorkspace {
+  if (hash === "#new-run") return "new";
+  if (hash === "#runs") return "runs";
+  const params = new URLSearchParams(search);
+  const requested = params.get("workspace");
+  if (requested === "runs") return "runs";
+  return "new";
+}
+
 function workspaceFromLocation(): HomeWorkspace {
   if (typeof window === "undefined") return "new";
-  const params = new URLSearchParams(window.location.search);
-  const requested = params.get("workspace");
-  if (requested === "runs" || window.location.hash === "#runs") return "runs";
-  return "new";
+  return workspaceFromUrl(window.location.search, window.location.hash);
 }
 
 type StageMark = "done" | "current" | "pending" | "failed" | "canceled";
@@ -1318,6 +1324,18 @@ export default function Page() {
     };
   }, []);
 
+  const navigateWorkspace = useCallback((nextWorkspace: HomeWorkspace) => {
+    setWorkspaceMode(nextWorkspace);
+    if (typeof window === "undefined") return;
+
+    const targetId = nextWorkspace === "runs" ? "runs" : "new-run";
+    const nextUrl = nextWorkspace === "runs" ? "/?workspace=runs#runs" : "/?workspace=new#new-run";
+    window.history.pushState({ workspace: nextWorkspace }, "", nextUrl);
+    window.requestAnimationFrame(() => {
+      document.getElementById(targetId)?.scrollIntoView({ block: "start" });
+    });
+  }, []);
+
   const refresh = useCallback(async () => {
     const [meRes, bundleRes, runsRes] = await Promise.all([
       fetch("/api/me", { cache: "no-store" }),
@@ -1797,12 +1815,12 @@ export default function Page() {
               preserve the artifacts needed for review or downstream analysis.
             </p>
             <div className="hero-actions" aria-label="Primary actions">
-              <a className="button primary" href="#new-run">
+              <button className="button primary" type="button" onClick={() => navigateWorkspace("new")}>
                 Configure scenario <ArrowRight size={14} aria-hidden="true" />
-              </a>
-              <a className="button secondary" href="/?workspace=runs#runs">
+              </button>
+              <button className="button secondary" type="button" onClick={() => navigateWorkspace("runs")}>
                 Review analyses
-              </a>
+              </button>
             </div>
             <div className="hero-capabilities" aria-label="Platform capabilities">
               <span><Waves size={14} aria-hidden="true" /> Coastal FGN benchmark</span>
@@ -2656,7 +2674,7 @@ export default function Page() {
 
         /* ===== Buttons ================================================== */
         button { border: 0; border-radius: 7px; padding: 9px 14px; font-weight: 600; cursor: pointer; font: inherit; font-size: 13px; transition: background 120ms ease, transform 60ms ease; }
-        .button { display: inline-flex; align-items: center; justify-content: center; border-radius: 7px; padding: 9px 14px; font-weight: 600; font-size: 13px; text-decoration: none; transition: background 120ms ease, transform 60ms ease; }
+        .button { display: inline-flex; align-items: center; justify-content: center; border: 0; border-radius: 7px; padding: 9px 14px; font-weight: 600; font-size: 13px; text-decoration: none; cursor: pointer; transition: background 120ms ease, transform 60ms ease; }
         .button.primary { background: var(--brand); color: white; }
         .button.primary:hover:not(:disabled) { background: var(--brand-strong); }
         .button.primary:active:not(:disabled) { transform: translateY(1px); }
