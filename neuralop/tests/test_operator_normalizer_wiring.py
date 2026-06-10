@@ -18,6 +18,7 @@ contract surface that matters for the bug fix:
 
 from __future__ import annotations
 
+import ast
 import inspect
 import re
 from pathlib import Path
@@ -97,4 +98,27 @@ def test_operator_app_preserves_force_load_normalizers_flag():
         "Expected force_load=force_load_cached_normalizers in the lifecycle call. "
         "Otherwise the user-facing force_load_normalizers config flag silently "
         "stops working."
+    )
+
+
+def test_operator_app_main_does_not_shadow_normalizer_helpers_with_local_imports():
+    """Local imports inside main() can make helper names local to the whole
+    function, breaking earlier normalizer calls before the import executes.
+    """
+    src = _operator_app_source()
+    tree = ast.parse(src)
+    main_fn = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "main"
+    )
+    forbidden = {"load_normalizer_metadata", "resolve_normalizer_metadata_path"}
+    local_imports = []
+    for node in ast.walk(main_fn):
+        if isinstance(node, ast.ImportFrom) and node.module == "neuralop.flood.data.wv":
+            local_imports.extend(alias.name for alias in node.names if alias.name in forbidden)
+
+    assert not local_imports, (
+        "operator_app.main() must use the module-level normalizer helper imports. "
+        f"Local imports shadow earlier calls: {sorted(local_imports)}"
     )

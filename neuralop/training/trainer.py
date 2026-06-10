@@ -122,6 +122,10 @@ class Trainer:
         self.data_processor = data_processor
         self.scaler = amp.GradScaler(enabled=(self.mixed_precision and self.autocast_device_type == "cuda"))
 
+        self._best_metric_value = float("inf")
+        self._early_stopping_best = float("inf")
+        self._early_stopping_bad_epochs = 0
+
         # Track starting epoch for checkpointing/resuming
         self.start_epoch = 0
 
@@ -223,7 +227,7 @@ class Trainer:
         if self.save_best is not None:
             assert self.save_best in eval_metric_names,\
                 f"Error: expected a metric of the form <loader_name>_<metric>, got {save_best}"
-        best_metric_value = float('inf')
+        best_metric_value = float(self._best_metric_value)
 
         scheduler_uses_eval_metric = (
             isinstance(self.scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau)
@@ -257,10 +261,11 @@ class Trainer:
                 sys.stdout.flush()
         
         epoch_metrics = dict()
-        early_stopping_best = float('inf')
-        early_stopping_bad_epochs = 0
+        early_stopping_best = float(self._early_stopping_best)
+        early_stopping_bad_epochs = int(self._early_stopping_bad_epochs)
         should_stop = False
         for epoch in range(self.start_epoch, self.n_epochs):
+            save_best_now = False
             train_err, avg_loss, avg_lasso_loss, epoch_train_time =\
                   self.train_one_epoch(epoch, train_loader, training_loss)
             epoch_metrics = dict(
@@ -280,11 +285,8 @@ class Trainer:
                 # save checkpoint if conditions are met
                 if self.save_best is not None:
                     if eval_metrics[self.save_best] < best_metric_value:
-                        best_metric_value = eval_metrics[self.save_best]
-                        self.checkpoint(save_dir, save_name="best_model")
-
-                if scheduler_uses_eval_metric:
-                    self.scheduler.step(float(eval_metrics[self.scheduler_monitor]))
+                        best_metric_value = float(eval_metrics[self.save_best])
+                        save_best_now = True
 
             if self.early_stopping_enabled and self.scheduler_monitor in epoch_metrics:
                 monitor_value = float(epoch_metrics[self.scheduler_monitor])
@@ -306,6 +308,16 @@ class Trainer:
                         elif self.verbose:
                             print(msg)
                             sys.stdout.flush()
+
+            self._best_metric_value = best_metric_value
+            self._early_stopping_best = early_stopping_best
+            self._early_stopping_bad_epochs = early_stopping_bad_epochs
+
+            if save_best_now:
+                self.checkpoint(save_dir, save_name="best_model")
+
+            if scheduler_uses_eval_metric and self.scheduler_monitor in epoch_metrics:
+                self.scheduler.step(float(epoch_metrics[self.scheduler_monitor]))
 
             # Save last checkpoint on schedule, including the epoch that triggers early stopping.
             if self.save_every is not None:
@@ -865,6 +877,49 @@ class Trainer:
                       step=epoch+1,
                       commit=True)
 
+    @staticmethod
+    def _trainer_progress_path(save_dir: Union[str, Path]) -> Path:
+        return Path(save_dir) / "trainer_progress.pt"
+
+    def _load_trainer_progress_from_dir(self, save_dir: Union[str, Path]) -> None:
+        progress_path = self._trainer_progress_path(save_dir)
+        if not progress_path.exists():
+            return
+        try:
+            progress = torch.load(progress_path, map_location="cpu", weights_only=False)
+        except Exception as exc:
+            raise RuntimeError(
+                f"Failed to load trainer progress sidecar from {progress_path}."
+            ) from exc
+        if not isinstance(progress, dict):
+            raise RuntimeError(f"Trainer progress sidecar is not a dictionary: {progress_path}")
+
+        self._best_metric_value = float(progress.get("best_metric_value", self._best_metric_value))
+        self._early_stopping_best = float(
+            progress.get("early_stopping_best", self._early_stopping_best)
+        )
+        self._early_stopping_bad_epochs = int(
+            progress.get("early_stopping_bad_epochs", self._early_stopping_bad_epochs)
+        )
+
+    def _save_trainer_progress(self, save_dir: Union[str, Path]) -> None:
+        is_rank0 = (not dist.is_available()) or (not dist.is_initialized()) or (dist.get_rank() == 0)
+        if is_rank0:
+            save_dir = Path(save_dir)
+            save_dir.mkdir(exist_ok=True, parents=True)
+            torch.save(
+                {
+                    "best_metric_value": float(self._best_metric_value),
+                    "early_stopping_best": float(self._early_stopping_best),
+                    "early_stopping_bad_epochs": int(self._early_stopping_bad_epochs),
+                    "scheduler_monitor": self.scheduler_monitor,
+                    "save_best": self.save_best,
+                },
+                self._trainer_progress_path(save_dir),
+            )
+        if dist.is_available() and dist.is_initialized():
+            dist.barrier()
+
     def resume_state_from_dir(self, save_dir):
         """
         Resume training from save_dir created by `neuralop.training.save_training_state`
@@ -900,6 +955,7 @@ class Trainer:
             next_epoch = int(resume_epoch) + 1
             if next_epoch > self.start_epoch:
                 self.start_epoch = next_epoch
+                self._load_trainer_progress_from_dir(save_dir)
                 if self.verbose:
                     if self.logger:
                         self.logger.info("Trainer resuming from epoch %s", next_epoch)
@@ -935,6 +991,7 @@ class Trainer:
                             regularizer=self.regularizer,
                             epoch=self.epoch
                             )
+        self._save_trainer_progress(save_dir)
         if is_rank0 and self.verbose:
             if self.logger:
                 self.logger.info("Saved training state to %s", save_dir)
