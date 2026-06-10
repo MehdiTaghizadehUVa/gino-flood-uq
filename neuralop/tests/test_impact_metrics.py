@@ -21,7 +21,9 @@ class _Logger:
 
 
 def test_ensemble_crps_scalar_matches_hand_computed_value():
-    assert np.isclose(ensemble_crps_scalar(np.array([1.0, 3.0]), np.array([2.0])), 0.5)
+    # Fair CRPS uses 2K(K-1) for the forecast self-distance term.
+    # term1 = (|1-4| + |2-4|) / 2 = 2.5; term2 = 2 / (2*2*1) = 0.5.
+    assert np.isclose(ensemble_crps_scalar(np.array([1.0, 2.0]), np.array([4.0])), 2.0)
 
 
 def test_inundated_area_uses_nonuniform_cell_areas():

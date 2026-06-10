@@ -29,7 +29,11 @@ def _manual_crps(forecast, reference):
     forecast = np.asarray(forecast, dtype=np.float64)
     reference = np.asarray(reference, dtype=np.float64)
     term1 = np.mean(np.abs(forecast[:, None, :] - reference[None, :, :]), axis=(0, 1))
-    term2 = 0.5 * np.mean(np.abs(forecast[:, None, :] - forecast[None, :, :]), axis=(0, 1))
+    k = forecast.shape[0]
+    if k < 2:
+        return float(np.mean(term1))
+    pair_sum = np.sum(np.abs(forecast[:, None, :] - forecast[None, :, :]), axis=(0, 1))
+    term2 = pair_sum / float(2 * k * (k - 1))
     return float(np.mean(term1 - term2))
 
 

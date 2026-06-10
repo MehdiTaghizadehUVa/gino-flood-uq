@@ -344,12 +344,15 @@ class ForecastProductBuilder:
 
     @staticmethod
     def empirical_crps_per_cell(ensemble: np.ndarray) -> np.ndarray:
-        """Mean absolute pairwise difference per cell — a ground-truth-free
-        CRPS-like measure of intra-ensemble spread.
+        """Fair mean absolute pairwise difference per cell.
+
+        This is a ground-truth-free CRPS-like spread diagnostic. It uses the
+        finite-ensemble fair normalization over distinct member pairs, matching
+        the project-wide CRPS convention.
 
         Computed via the order-statistic identity::
 
-            E[|X_i - X_j|] = (2/M^2) * Σ_k (2k - M - 1) * x_(k)
+            mean_{i != j}|X_i - X_j| = (2/(M(M-1))) * Σ_k (2k - M - 1) * x_(k)
 
         where ``x_(k)`` is the k-th order statistic (1-indexed). This avoids
         the O(M^2 C) intermediate that brute-forces the pairwise differences
@@ -363,9 +366,9 @@ class ForecastProductBuilder:
         if m < 2:
             return np.zeros(sorted_e.shape[1], dtype=np.float32)
         # 0-indexed k -> 1-indexed (k+1); weight = 2(k+1) - m - 1 = 2k + 1 - m,
-        # times the normalising factor 2 / m^2 (mean over m^2 pairs).
+        # times the fair normalising factor 2 / (m * (m - 1)) over distinct pairs.
         idx = np.arange(m, dtype=np.float64)
-        weights = (2.0 * idx + 1.0 - m) * (2.0 / (m * m))
+        weights = (2.0 * idx + 1.0 - m) * (2.0 / (m * (m - 1)))
         return (weights[:, None] * sorted_e).sum(axis=0).astype(np.float32, copy=False)
 
     @staticmethod

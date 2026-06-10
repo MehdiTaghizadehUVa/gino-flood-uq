@@ -487,10 +487,13 @@ def list_forecast_artifacts(root: str | Path) -> List[Path]:
 
 
 def empirical_crps_per_location(forecast_ens: np.ndarray, reference_ens: np.ndarray) -> np.ndarray:
-    """Empirical CRPS per location for forecast/reference ensembles.
+    """Empirical fair CRPS per location for forecast/reference ensembles.
 
-    forecast_ens shape [K, N], reference_ens shape [R, N].  The implementation
-    avoids materializing [K, R, N] tensors so 100x100-member ensembles remain usable.
+    forecast_ens shape [K, N], reference_ens shape [R, N]. The reference ensemble
+    is treated as samples from the verifying distribution, while the forecast
+    self-distance term uses the finite-ensemble fair correction K*(K-1), not K^2.
+    The implementation avoids materializing [K, R, N] tensors so 100x100-member
+    ensembles remain usable.
     """
     x = np.asarray(forecast_ens, dtype=np.float64)
     y = np.asarray(reference_ens, dtype=np.float64)
@@ -517,10 +520,16 @@ def empirical_crps_per_location(forecast_ens: np.ndarray, reference_ens: np.ndar
         cross += xm * counts - left + right - xm * (r - counts)
     cross /= float(k * r)
 
+    if k < 2:
+        # A finite-ensemble fair spread correction is undefined for one member;
+        # the degenerate predictive distribution reduces to MAE against the
+        # reference ensemble.
+        return cross
     x_sorted = np.sort(x, axis=0)
     coeff = (2.0 * np.arange(k, dtype=np.float64) - float(k) + 1.0).reshape(k, 1)
-    within = 2.0 * np.sum(coeff * x_sorted, axis=0) / float(k * k)
-    return cross - 0.5 * within
+    ordered_pair_sum = 2.0 * np.sum(coeff * x_sorted, axis=0)
+    fair_within = ordered_pair_sum / float(k * (k - 1))
+    return cross - 0.5 * fair_within
 
 
 def empirical_crps_mean(forecast_ens: np.ndarray, reference_ens: np.ndarray) -> float:

@@ -1321,8 +1321,8 @@ def test_orchestrator_submit_with_animation_writes_gif_artifact(tmp_path):
     assert "calibrated_p_gt_0p30m_animation.gif" in artifacts
 
 
-def test_empirical_crps_matches_brute_force_pairwise_mean():
-    """Order-statistic implementation must agree with the naive O(M^2)
+def test_empirical_crps_matches_brute_force_fair_pairwise_mean():
+    """Order-statistic implementation must agree with the naive fair
     pairwise mean to float tolerance. The Uncertainty tab depends on this
     metric being correctly normalised so cells compare apples-to-apples."""
     rng = np.random.default_rng(42)
@@ -1332,8 +1332,9 @@ def test_empirical_crps_matches_brute_force_pairwise_mean():
     m = ensemble.shape[0]
     for i in range(m):
         for j in range(m):
-            brute += np.abs(ensemble[i] - ensemble[j])
-    brute /= (m * m)
+            if i != j:
+                brute += np.abs(ensemble[i] - ensemble[j])
+    brute /= (m * (m - 1))
     np.testing.assert_allclose(fast, brute.astype(np.float32), rtol=1e-5)
 
 
