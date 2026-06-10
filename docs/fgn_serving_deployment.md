@@ -121,6 +121,13 @@ builds are still available through `docker-compose.local-build.yml`; see
 `docs/fgn_serving_deployment_automation.md` for the automated CI, image publish,
 self-hosted-runner deployment, and rollback workflow.
 
+The Caddy reverse proxy is also shipped as an immutable GHCR image. Production
+does not bind-mount `Caddyfile` from WSL because Docker Desktop can lose
+single-file bind mounts after restarts, leaving the public Cloudflare tunnel with
+no reachable origin. To test local Caddy edits, use
+`docker-compose.local-build.yml`, which rebuilds the proxy image from the checked
+out `Caddyfile`.
+
 The API exposes owner-visible run/artifact endpoints plus admin list, pin,
 unpin, cancel, and runtime allowlist-management endpoints. Only `RunOrchestrator`
 transitions run state. Allowlist, admin, and disclaimer state are persisted in

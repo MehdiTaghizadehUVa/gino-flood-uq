@@ -23,6 +23,7 @@ export FGN_API_IMAGE="${FGN_API_IMAGE:-ghcr.io/mehditaghizadehuva/gino-flood-uq/
 export FGN_WORKER_IMAGE="${FGN_WORKER_IMAGE:-ghcr.io/mehditaghizadehuva/gino-flood-uq/fgn-serving-python:test}"
 export FGN_CLEANUP_IMAGE="${FGN_CLEANUP_IMAGE:-ghcr.io/mehditaghizadehuva/gino-flood-uq/fgn-serving-python:test}"
 export FGN_FRONTEND_IMAGE="${FGN_FRONTEND_IMAGE:-ghcr.io/mehditaghizadehuva/gino-flood-uq/fgn-serving-frontend:test}"
+export FGN_PROXY_IMAGE="${FGN_PROXY_IMAGE:-ghcr.io/mehditaghizadehuva/gino-flood-uq/fgn-serving-proxy:test}"
 
 docker compose -f deployment/fgn-serving/docker-compose.yml config >/tmp/fgn-serving-compose.yml
 docker compose -f deployment/fgn-serving/docker-compose.yml -f deployment/fgn-serving/docker-compose.local-build.yml config >/tmp/fgn-serving-compose-local-build.yml

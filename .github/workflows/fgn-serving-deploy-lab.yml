@@ -48,6 +48,7 @@ jobs:
             echo "FGN_WORKER_IMAGE=${namespace}/fgn-serving-python:${sha}"
             echo "FGN_CLEANUP_IMAGE=${namespace}/fgn-serving-python:${sha}"
             echo "FGN_FRONTEND_IMAGE=${namespace}/fgn-serving-frontend:${sha}"
+            echo "FGN_PROXY_IMAGE=${namespace}/fgn-serving-proxy:${sha}"
           } >> "$GITHUB_ENV"
       - name: Point to production .env
         run: |

@@ -42,6 +42,7 @@ require_var FGN_API_IMAGE
 require_var FGN_WORKER_IMAGE
 require_var FGN_CLEANUP_IMAGE
 require_var FGN_FRONTEND_IMAGE
+require_var FGN_PROXY_IMAGE
 
 if [[ "${DRY_RUN}" == "1" ]]; then
   log "dry-run: validated env and would deploy ${FGN_DEPLOY_COMMIT:-unknown commit}."
@@ -87,7 +88,7 @@ fi
 set +e
 deploy_rc=0
 if [[ "${SKIP_PULL}" != "1" ]]; then
-  compose pull api worker-gpu cleanup-backup frontend
+  compose pull api worker-gpu cleanup-backup frontend proxy
   deploy_rc=$?
 fi
 if [[ "${deploy_rc}" == "0" ]]; then

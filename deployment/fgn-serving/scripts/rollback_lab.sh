@@ -27,6 +27,7 @@ require_var FGN_API_IMAGE
 require_var FGN_WORKER_IMAGE
 require_var FGN_CLEANUP_IMAGE
 require_var FGN_FRONTEND_IMAGE
+require_var FGN_PROXY_IMAGE
 
 if [[ "${DRY_RUN}" == "1" ]]; then
   log "dry-run: would roll back to images recorded in ${previous}."
@@ -34,7 +35,7 @@ if [[ "${DRY_RUN}" == "1" ]]; then
 fi
 
 log "rolling back services to previous deployment images."
-compose pull api worker-gpu cleanup-backup frontend
+compose pull api worker-gpu cleanup-backup frontend proxy
 compose up -d
 "${SCRIPT_DIR}/smoke_lab.sh"
 cp "${previous}" "${current}"

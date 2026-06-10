@@ -149,14 +149,13 @@ services:
       start_period: 10s
 
   proxy:
-    image: caddy:2-alpine
+    image: ${FGN_PROXY_IMAGE:-ghcr.io/mehditaghizadehuva/gino-flood-uq/fgn-serving-proxy:main}
     restart: unless-stopped
     env_file: *fgn-env
     ports:
       - "80:80"
       - "443:443"
     volumes:
-      - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy-data:/data
     depends_on:
       api:

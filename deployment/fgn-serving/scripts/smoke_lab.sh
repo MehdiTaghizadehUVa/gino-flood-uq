@@ -39,14 +39,24 @@ https_check() {
   done
 }
 
+log "checking public API health endpoint."
 https_check "https://${FGN_SITE_HOSTNAME}/api/health" 12 5 15
+log "checking public model-bundle health endpoint."
 https_check "https://${FGN_SITE_HOSTNAME}/api/model-bundle-health" 8 5 30
+log "checking public frontend route."
 https_check "https://${FGN_SITE_HOSTNAME}/" 8 5 15
 
+log "checking Compose service state."
 compose ps --status running api worker-gpu frontend redis postgres proxy >/dev/null
+log "validating Caddy proxy configuration."
+compose exec -T proxy caddy validate --config /etc/caddy/Caddyfile >/dev/null 2>&1
+log "checking Redis."
 compose exec -T redis redis-cli ping | grep -q PONG
+log "checking Postgres."
 compose exec -T postgres pg_isready -U fgn_serving -d fgn_serving >/dev/null
+log "checking Celery worker heartbeat."
 compose exec -T worker-gpu celery -A neuralop.flood.serving.celery_app inspect ping --timeout=10 >/dev/null
+log "checking CUDA visibility in worker."
 compose exec -T worker-gpu python - <<'PY'
 import sys
 import torch
@@ -57,6 +67,7 @@ print(torch.cuda.get_device_name(0))
 PY
 
 min_free_gb="${FGN_MIN_FREE_GB:-20}"
+log "checking data-root free disk space."
 free_kb="$(df -Pk "${FGN_DATA_ROOT}" | awk 'NR == 2 {print $4}')"
 free_gb="$((free_kb / 1024 / 1024))"
 if (( free_gb < min_free_gb )); then

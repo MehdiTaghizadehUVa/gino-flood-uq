@@ -47,6 +47,12 @@ jobs:
               echo "${namespace}/fgn-serving-frontend:main"
             fi
             echo "EOF"
+            echo "proxy_tags<<EOF"
+            echo "${namespace}/fgn-serving-proxy:${sha}"
+            if [[ "${GITHUB_REF}" == "refs/heads/main" || "${{ github.event_name }}" == "workflow_run" ]]; then
+              echo "${namespace}/fgn-serving-proxy:main"
+            fi
+            echo "EOF"
           } >> "$GITHUB_OUTPUT"
       - name: Build and push Python serving image
         uses: docker/build-push-action@v6
@@ -63,3 +69,11 @@ jobs:
           platforms: linux/amd64
           push: true
           tags: ${{ steps.meta.outputs.frontend_tags }}
+      - name: Build and push proxy image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deployment/fgn-serving/proxy.Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.proxy_tags }}

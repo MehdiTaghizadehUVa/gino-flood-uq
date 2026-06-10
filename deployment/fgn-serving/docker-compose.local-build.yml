@@ -21,3 +21,9 @@ services:
     image: fgn-serving-frontend:local
     build:
       context: ../../apps/fgn-serving-frontend
+
+  proxy:
+    image: fgn-serving-proxy:local
+    build:
+      context: ../..
+      dockerfile: deployment/fgn-serving/proxy.Dockerfile

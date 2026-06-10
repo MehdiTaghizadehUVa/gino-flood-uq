@@ -22,6 +22,7 @@ load_lab_env() {
     local preserved_worker_image="${FGN_WORKER_IMAGE:-}"
     local preserved_cleanup_image="${FGN_CLEANUP_IMAGE:-}"
     local preserved_frontend_image="${FGN_FRONTEND_IMAGE:-}"
+    local preserved_proxy_image="${FGN_PROXY_IMAGE:-}"
 
     set -a
     # shellcheck disable=SC1090
@@ -36,7 +37,9 @@ load_lab_env() {
     [[ -n "${preserved_worker_image}" ]] && export FGN_WORKER_IMAGE="${preserved_worker_image}"
     [[ -n "${preserved_cleanup_image}" ]] && export FGN_CLEANUP_IMAGE="${preserved_cleanup_image}"
     [[ -n "${preserved_frontend_image}" ]] && export FGN_FRONTEND_IMAGE="${preserved_frontend_image}"
+    [[ -n "${preserved_proxy_image}" ]] && export FGN_PROXY_IMAGE="${preserved_proxy_image}"
   fi
+  return 0
 }
 
 require_var() {
@@ -74,6 +77,7 @@ images = {
     "worker": os.environ.get("FGN_WORKER_IMAGE"),
     "cleanup": os.environ.get("FGN_CLEANUP_IMAGE"),
     "frontend": os.environ.get("FGN_FRONTEND_IMAGE"),
+    "proxy": os.environ.get("FGN_PROXY_IMAGE"),
 }
 
 digests = {}
@@ -125,6 +129,7 @@ mapping = {
     "FGN_WORKER_IMAGE": images.get("worker"),
     "FGN_CLEANUP_IMAGE": images.get("cleanup"),
     "FGN_FRONTEND_IMAGE": images.get("frontend"),
+    "FGN_PROXY_IMAGE": images.get("proxy"),
     "FGN_DEPLOY_COMMIT": data.get("commit"),
 }
 for key, value in mapping.items():
@@ -140,6 +145,7 @@ persist_image_pins() {
   require_var FGN_WORKER_IMAGE
   require_var FGN_CLEANUP_IMAGE
   require_var FGN_FRONTEND_IMAGE
+  require_var FGN_PROXY_IMAGE
 
   [[ -f "${env_file}" ]] || die "Env file not found: ${env_file}"
   python3 - "${env_file}" <<'PY'
@@ -153,6 +159,7 @@ updates = {
     "FGN_WORKER_IMAGE": os.environ["FGN_WORKER_IMAGE"],
     "FGN_CLEANUP_IMAGE": os.environ["FGN_CLEANUP_IMAGE"],
     "FGN_FRONTEND_IMAGE": os.environ["FGN_FRONTEND_IMAGE"],
+    "FGN_PROXY_IMAGE": os.environ["FGN_PROXY_IMAGE"],
 }
 seen = set()
 lines = []
