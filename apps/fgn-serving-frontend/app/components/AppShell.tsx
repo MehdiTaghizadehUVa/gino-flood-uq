@@ -25,8 +25,8 @@ const navItems: Array<{
   active: AppSection;
   icon: ReactNode;
 }> = [
-  { href: "/?workspace=new", label: "New run", active: "home", icon: <Home size={16} /> },
-  { href: "/?workspace=runs#runs", label: "Run queue", active: "runs", icon: <ListChecks size={16} /> },
+  { href: "/?workspace=new", label: "New analysis", active: "home", icon: <Home size={16} /> },
+  { href: "/?workspace=runs#runs", label: "Analysis queue", active: "runs", icon: <ListChecks size={16} /> },
   { href: "/admin", label: "Admin", active: "admin", icon: <ShieldCheck size={16} /> },
   {
     href: "/admin/monitoring",
@@ -58,9 +58,9 @@ export function AppShell({ active = "home", children, userEmail }: AppShellProps
           ))}
         </nav>
         <div className="app-sidebar-foot">
-          <strong>Research use only.</strong>
+          <strong>Research access.</strong>
           <br />
-          Results are calibrated uncertainty products for scientific review, not decision guidance.
+          Calibrated uncertainty products for scientific review and model evaluation.
           {userEmail ? (
             <>
               <br />
@@ -85,7 +85,7 @@ export function AppShell({ active = "home", children, userEmail }: AppShellProps
             </div>
           </div>
           <div className="command-right">
-            <span className="command-chip research">Research use only</span>
+            <span className="command-chip research">Research workspace</span>
             <span className="command-chip">
               <Activity size={12} aria-hidden="true" />
               {userEmail ?? "Authentication required"}

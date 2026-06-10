@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Activity, Cpu, ListChecks, RefreshCw } from "lucide-react";
+import { Activity, ArrowRight, Cpu, Database, ListChecks, RefreshCw, ShieldCheck, Waves } from "lucide-react";
 import { AppShell } from "./components/AppShell";
 import { MetricCard } from "./components/MetricCard";
 import { PageHeader } from "./components/PageHeader";
@@ -1591,7 +1591,7 @@ export default function Page() {
       const res = await fetch("/api/me/disclaimer", { method: "POST" });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       setUser(await res.json());
-      setMessage("Research-only disclaimer acknowledged.");
+      setMessage("Research-use boundary acknowledged.");
     } catch (exc) {
       setMessage(`Could not acknowledge disclaimer: ${String(exc)}`);
     } finally {
@@ -1755,25 +1755,28 @@ export default function Page() {
     <AppShell active={workspaceMode === "runs" ? "runs" : "home"} userEmail={user?.email}>
       <div className="shell">
         <PageHeader
-          kicker="Coastal flood research console"
-          title={bundle ? bundle.domain_name : "Loading model bundle…"}
+          kicker="FloodUQ research platform"
+          title="Coastal flood uncertainty, calibrated and reproducible."
           subtitle={
             bundle ? (
               <>
-                Fixed coastal bundle · up to {bundle.total_members} members · {bundle.max_forecast_steps}
-                -step horizon
+                Launch fixed-domain FGN ensemble analyses from coastal stage and precipitation forcings. Review
+                calibrated probability, spread, and depth products with run-level provenance and downloadable artifacts.
+                <br />
+                Active bundle: {bundle.domain_name} · up to {bundle.total_members} members · {bundle.max_forecast_steps}
+                -step forecast horizon
                 {bundle.initial_condition ? (
                   <>
                     <br />
-                    Initial history:{" "}
+                    Initial condition policy:{" "}
                     {bundle.initial_condition.default_mode === "forcing_conditioned_baseline"
-                      ? `matched train/calibration baseline (${bundle.initial_condition.k_neighbors ?? 5} neighbors)`
+                      ? `forcing-conditioned baseline selected from train/calibration references (${bundle.initial_condition.k_neighbors ?? 5} neighbors)`
                       : "dry diagnostic baseline"}
                   </>
                 ) : null}
               </>
             ) : (
-              "Preparing the model contract, queue state, and research safeguards."
+              "Loading the model bundle, queue state, and research safeguards."
             )
           }
           actions={
@@ -1784,8 +1787,64 @@ export default function Page() {
           }
         />
 
-        <ResearchNotice>
-          {bundle?.research_disclaimer ?? "For research review only; not decision guidance."}
+        <section className="home-hero" aria-labelledby="home-hero-title">
+          <div className="home-hero-copy">
+            <p className="eyebrow">Physics-informed coastal UQ</p>
+            <h2 id="home-hero-title">From forcing scenario to audit-ready flood uncertainty products.</h2>
+            <p>
+              FloodUQ packages the trained coastal FGN benchmark into a controlled research workflow:
+              validate a forcing file, launch a calibrated ensemble run, inspect uncertainty products, and
+              preserve the artifacts needed for review or downstream analysis.
+            </p>
+            <div className="hero-actions" aria-label="Primary actions">
+              <a className="button primary" href="#new-run">
+                Configure scenario <ArrowRight size={14} aria-hidden="true" />
+              </a>
+              <a className="button secondary" href="/?workspace=runs#runs">
+                Review analyses
+              </a>
+            </div>
+            <div className="hero-capabilities" aria-label="Platform capabilities">
+              <span><Waves size={14} aria-hidden="true" /> Coastal FGN benchmark</span>
+              <span><Activity size={14} aria-hidden="true" /> Calibrated UQ products</span>
+              <span><Database size={14} aria-hidden="true" /> Reproducible artifacts</span>
+              <span><ShieldCheck size={14} aria-hidden="true" /> Governed research access</span>
+            </div>
+          </div>
+          <aside className="workflow-card" aria-label="Research workflow">
+            <div className="workflow-card-head">
+              <span>Research workflow</span>
+              <strong>{bundle ? `${bundle.total_members}-member ensemble` : "Model bundle loading"}</strong>
+            </div>
+            <ol className="workflow-steps">
+              <li>
+                <span>01</span>
+                <div>
+                  <strong>Validate forcings</strong>
+                  <p>Check stage and precipitation format, horizon, and monitored reference range before queuing.</p>
+                </div>
+              </li>
+              <li>
+                <span>02</span>
+                <div>
+                  <strong>Run calibrated ensemble inference</strong>
+                  <p>Execute the fixed-domain FGN bundle with controlled member counts and stored provenance.</p>
+                </div>
+              </li>
+              <li>
+                <span>03</span>
+                <div>
+                  <strong>Inspect UQ evidence</strong>
+                  <p>Open maps, animations, per-cell traces, monitoring diagnostics, and downloadable artifacts.</p>
+                </div>
+              </li>
+            </ol>
+          </aside>
+        </section>
+
+        <ResearchNotice title="Research-use boundary.">
+          This system supports scientific review and model evaluation. Outputs are not emergency guidance,
+          operational flood forecasts, or public safety decision products.
           {!user?.disclaimer_acknowledged && (
             <button type="button" onClick={acknowledgeDisclaimer} disabled={busy}>
               Acknowledge
@@ -1794,11 +1853,11 @@ export default function Page() {
         </ResearchNotice>
 
         <section className="metric-grid home-metrics">
-          <MetricCard label="Runs" value={runs.length} detail="Current history" icon={<ListChecks size={17} />} />
-          <MetricCard label="Queued" value={queuedCount} detail="Waiting for GPU" icon={<RefreshCw size={17} />} />
-          <MetricCard label="Active GPU" value={runningCount} detail="One active job globally" icon={<Cpu size={17} />} />
+          <MetricCard label="Analyses" value={runs.length} detail="Runs in your research history" icon={<ListChecks size={17} />} />
+          <MetricCard label="Queue" value={queuedCount} detail="Validated work waiting to start" icon={<RefreshCw size={17} />} />
+          <MetricCard label="Active inference" value={runningCount} detail="One GPU job runs at a time" icon={<Cpu size={17} />} />
           <MetricCard
-            label="Latest status"
+            label="Latest analysis"
             value={latestRun ? latestRun.status : "-"}
             detail={latestRun ? latestRun.label || latestRun.run_id.slice(0, 12) : "No runs yet"}
             icon={<Activity size={17} />}
@@ -1811,10 +1870,10 @@ export default function Page() {
           <div className="section-head">
             <div>
               <p className="eyebrow">Inputs</p>
-              <h2>Scenario Setup</h2>
+              <h2>Scenario Configuration</h2>
             </div>
             <a className="button ghost" href="/api/forcing-template" download>
-              Template
+              Download template
             </a>
           </div>
 
@@ -1922,7 +1981,7 @@ export default function Page() {
 
           {validation && (
             <div className={validation.valid ? "valid" : "invalid"}>
-              <strong>{validation.valid ? "CSV validation passed" : "Validation failed"}</strong>
+              <strong>{validation.valid ? "Forcing file validated" : "Forcing validation failed"}</strong>
               {validation.messages.length > 0 && <span>{validation.messages.join("; ")}</span>}
               {validation.summary && (
                 <small>
@@ -1932,9 +1991,9 @@ export default function Page() {
               {validation.screening?.available && (
                 <div className="screening-card">
                   <strong>
-                    Reference screening:{" "}
+                    Reference-range screening:{" "}
                     {validation.screening.candidate_recommended
-                      ? "selected for retraining review"
+                      ? "selected for review"
                       : (validation.screening.flags?.length ?? 0) > 0
                         ? "diagnostics only"
                         : "within monitored reference range"}
@@ -1955,7 +2014,7 @@ export default function Page() {
           )}
 
           <button className="button primary wide-button" type="button" onClick={submitRun} disabled={busy || !file}>
-            Submit Run
+            Launch Analysis
           </button>
           {message && <p className="message">{message}</p>}
         </aside>
@@ -1966,7 +2025,7 @@ export default function Page() {
           <div className="section-head">
             <div>
               <p className="eyebrow">Operations</p>
-              <h2>Run Queue</h2>
+              <h2>Analysis Queue</h2>
             </div>
             <div className="queue-actions">
               {deletableRuns.length > 0 && (
@@ -2067,7 +2126,7 @@ export default function Page() {
                 </li>
               );
             })}
-            {runs.length === 0 && <li className="empty">No runs yet. Generate a sample scenario or upload a CSV to start.</li>}
+            {runs.length === 0 && <li className="empty">No analyses yet. Load a representative scenario or upload a forcing CSV to begin.</li>}
           </ul>
         </section>
         )}
@@ -2183,6 +2242,170 @@ export default function Page() {
           margin: 0 auto;
           padding: 24px 28px 54px;
           color: var(--text);
+        }
+
+        /* ===== Home platform intro ===================================== */
+        .home-hero {
+          display: grid;
+          grid-template-columns: minmax(0, 1.35fr) minmax(320px, 0.65fr);
+          gap: 18px;
+          align-items: stretch;
+          margin-bottom: 18px;
+        }
+        .home-hero-copy,
+        .workflow-card {
+          border: 1px solid rgba(142, 168, 182, 0.78);
+          border-radius: 12px;
+          box-shadow: var(--shadow-md);
+        }
+        .home-hero-copy {
+          position: relative;
+          overflow: hidden;
+          padding: 26px 28px;
+          background:
+            linear-gradient(135deg, rgba(7, 20, 29, 0.96), rgba(11, 31, 45, 0.93)),
+            radial-gradient(circle at 92% 10%, rgba(19, 163, 149, 0.35), transparent 22rem);
+          color: #e8f5f7;
+        }
+        .home-hero-copy::after {
+          content: "";
+          position: absolute;
+          inset: 16px;
+          pointer-events: none;
+          border: 1px solid rgba(145, 208, 219, 0.14);
+          border-radius: 10px;
+        }
+        .home-hero-copy .eyebrow {
+          color: #72e1d6;
+        }
+        .home-hero-copy h2 {
+          position: relative;
+          z-index: 1;
+          max-width: 880px;
+          margin: 8px 0 0;
+          color: #ffffff;
+          font-size: clamp(30px, 4.6vw, 58px);
+          font-weight: 900;
+          letter-spacing: -0.035em;
+          line-height: 0.98;
+        }
+        .home-hero-copy p {
+          position: relative;
+          z-index: 1;
+          max-width: 820px;
+          margin: 16px 0 0;
+          color: #c7dce3;
+          font-size: 15px;
+          line-height: 1.62;
+        }
+        .hero-actions {
+          position: relative;
+          z-index: 1;
+          display: flex;
+          flex-wrap: wrap;
+          gap: 10px;
+          margin-top: 22px;
+        }
+        .hero-actions .button.secondary {
+          border-color: rgba(200, 225, 232, 0.28);
+          background: rgba(255, 255, 255, 0.07);
+          color: #eaf8fb;
+        }
+        .hero-actions .button.secondary:hover {
+          background: rgba(255, 255, 255, 0.12);
+          border-color: rgba(114, 225, 214, 0.56);
+        }
+        .hero-capabilities {
+          position: relative;
+          z-index: 1;
+          display: flex;
+          flex-wrap: wrap;
+          gap: 8px;
+          margin-top: 20px;
+        }
+        .hero-capabilities span {
+          display: inline-flex;
+          gap: 7px;
+          align-items: center;
+          min-height: 30px;
+          padding: 6px 9px;
+          border: 1px solid rgba(145, 208, 219, 0.2);
+          border-radius: 999px;
+          background: rgba(255, 255, 255, 0.06);
+          color: #d8edf1;
+          font-size: 12px;
+          font-weight: 760;
+        }
+        .workflow-card {
+          display: grid;
+          align-content: start;
+          gap: 14px;
+          padding: 20px;
+          background:
+            linear-gradient(180deg, rgba(255,255,255,0.98), rgba(247,250,252,0.94)),
+            #ffffff;
+        }
+        .workflow-card-head {
+          display: flex;
+          justify-content: space-between;
+          gap: 12px;
+          align-items: baseline;
+          padding-bottom: 12px;
+          border-bottom: 1px solid var(--border);
+        }
+        .workflow-card-head span {
+          color: var(--text-muted);
+          font-size: 10.5px;
+          font-weight: 900;
+          letter-spacing: 0.08em;
+          text-transform: uppercase;
+        }
+        .workflow-card-head strong {
+          color: var(--brand-strong);
+          font-size: 12px;
+          font-weight: 900;
+          white-space: nowrap;
+        }
+        .workflow-steps {
+          display: grid;
+          gap: 12px;
+          margin: 0;
+          padding: 0;
+          list-style: none;
+        }
+        .workflow-steps li {
+          display: grid;
+          grid-template-columns: 38px minmax(0, 1fr);
+          gap: 12px;
+          padding: 11px 0;
+          border-bottom: 1px solid #e1eaf0;
+        }
+        .workflow-steps li:last-child {
+          border-bottom: 0;
+        }
+        .workflow-steps li > span {
+          display: grid;
+          width: 34px;
+          height: 34px;
+          place-items: center;
+          border: 1px solid rgba(19, 163, 149, 0.28);
+          border-radius: 999px;
+          background: var(--brand-soft);
+          color: var(--brand-strong);
+          font-size: 11px;
+          font-weight: 900;
+          font-variant-numeric: tabular-nums;
+        }
+        .workflow-steps strong {
+          color: var(--text);
+          font-size: 13px;
+          font-weight: 900;
+        }
+        .workflow-steps p {
+          margin: 3px 0 0;
+          color: var(--text-secondary);
+          font-size: 12.5px;
+          line-height: 1.45;
         }
 
         /* ===== Top bar ================================================== */
@@ -3430,7 +3653,10 @@ export default function Page() {
         }
         @media (max-width: 980px) {
           .shell { padding: 0 16px 36px; }
-          .workspace, .comparison-grid, .metrics, .decision-summary, .figure-grid, .evolution-grid, .chart-grid { grid-template-columns: 1fr; }
+          .home-hero, .workspace, .comparison-grid, .metrics, .decision-summary, .figure-grid, .evolution-grid, .chart-grid { grid-template-columns: 1fr; }
+          .home-hero-copy { padding: 22px; }
+          .home-hero-copy h2 { font-size: clamp(28px, 9vw, 44px); }
+          .workflow-card { padding: 16px; }
           .preview-stats { grid-template-columns: 1fr 1fr; }
           .topbar { flex-direction: column; align-items: flex-start; }
           .stage-track { grid-template-columns: repeat(2, minmax(0, 1fr)); }
