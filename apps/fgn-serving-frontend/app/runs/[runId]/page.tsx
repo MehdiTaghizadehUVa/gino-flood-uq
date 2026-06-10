@@ -1957,7 +1957,7 @@ export default function RunDetails() {
               <p className="eyebrow">Model monitoring</p>
               <h2>Reference screening and retraining review</h2>
             </div>
-            <span className="envelope-sub">{monitoring.monitoring_bundle_id}</span>
+            <span className="envelope-sub">Current coastal reference set</span>
           </header>
           <div className="monitoring-grid">
             {([monitoring.pre_run, monitoring.post_run] as (MonitoringReport | null | undefined)[]).map((report) => {

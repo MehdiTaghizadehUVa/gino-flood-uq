@@ -2021,7 +2021,7 @@ export default function Page() {
                     {typeof validation.screening.input_novelty_score === "number"
                       ? validation.screening.input_novelty_score.toFixed(2)
                       : "—"}{" "}
-                    · {validation.screening.monitoring_bundle_id}
+                    · current coastal reference set
                   </small>
                   {(validation.screening.flags ?? []).slice(0, 3).map((flag) => (
                     <small key={`${flag.code}-${flag.descriptor ?? ""}`}>{formatScreeningFlag(flag)}</small>
