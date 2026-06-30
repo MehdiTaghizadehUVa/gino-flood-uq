@@ -87,6 +87,7 @@ WANDB_LOG="${WANDB_LOG:-}"
 N_SAMPLES_MAX="${N_SAMPLES_MAX:-}"
 N_EPOCHS="${N_EPOCHS:-}"
 BATCH_SIZE="${BATCH_SIZE:-}"
+GRAD_ACCUM_STEPS="${GRAD_ACCUM_STEPS:-}"
 MC_SAMPLES="${MC_SAMPLES:-}"
 
 if [[ "${WV_MCD_SMOKE}" == "1" ]]; then
@@ -134,6 +135,7 @@ fi
 [[ -n "${N_SAMPLES_MAX}" ]] && CLI_ARGS+=(--data.n_samples_max "${N_SAMPLES_MAX}")
 [[ -n "${N_EPOCHS}" ]] && CLI_ARGS+=(--opt.n_epochs "${N_EPOCHS}")
 [[ -n "${BATCH_SIZE}" ]] && CLI_ARGS+=(--data.batch_size "${BATCH_SIZE}")
+[[ -n "${GRAD_ACCUM_STEPS}" ]] && CLI_ARGS+=(--opt.grad_accum_steps "${GRAD_ACCUM_STEPS}")
 [[ -n "${MC_SAMPLES}" ]] && CLI_ARGS+=(--uq.mc_samples "${MC_SAMPLES}" --rollout.n_ensemble_samples "${MC_SAMPLES}")
 
 cat <<INFO
@@ -151,6 +153,7 @@ Checkpoint dir:        ${CKPT_DIR}
 Resume from dir:       ${RESUME_FROM_DIR:-<none>}
 Git commit:            $(git -C "${PROJECT_DIR}" rev-parse HEAD)
 Seed:                  ${SEED}
+Grad accum steps:      ${GRAD_ACCUM_STEPS:-1}
 MC samples:            ${MC_SAMPLES:-32}
 W&B group/name/log:    ${RUN_GROUP} / ${WANDB_NAME} / ${WANDB_LOG}
 INFO

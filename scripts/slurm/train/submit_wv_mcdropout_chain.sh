@@ -20,11 +20,14 @@ TRAIN_TIME="${TRAIN_TIME:-3-00:00:00}"
 SUBMIT_PRODUCTION="${SUBMIT_PRODUCTION:-1}"
 SKIP_SMOKE="${SKIP_SMOKE:-0}"
 PROD_DEPENDENCY="${PROD_DEPENDENCY:-}"
+PROD_INITIAL_RESUME_FROM_DIR="${PROD_INITIAL_RESUME_FROM_DIR:-}"
+PROD_EXCLUDE_NODES="${PROD_EXCLUDE_NODES:-}"
 EPOCH_TARGETS="${EPOCH_TARGETS:-100 130 160 180 200}"
 SMOKE_N_SAMPLES_MAX="${SMOKE_N_SAMPLES_MAX:-32}"
 SMOKE_BATCH_SIZE="${SMOKE_BATCH_SIZE:-2}"
 SMOKE_MC_SAMPLES="${SMOKE_MC_SAMPLES:-4}"
 PROD_BATCH_SIZE="${PROD_BATCH_SIZE:-128}"
+PROD_GRAD_ACCUM_STEPS="${PROD_GRAD_ACCUM_STEPS:-1}"
 PROD_MC_SAMPLES="${PROD_MC_SAMPLES:-32}"
 
 if [[ "${STRUCTURAL_DRY_POLICY}" != "legacy_full_domain" && "${STRUCTURAL_DRY_POLICY}" != "masked_primary" ]]; then
@@ -68,10 +71,13 @@ Structural dry policy: ${STRUCTURAL_DRY_POLICY}
 Base seed:             ${BASE_SEED}
 Epoch targets:         ${EPOCH_TARGETS}
 Production batch size: ${PROD_BATCH_SIZE}
+Production grad accum: ${PROD_GRAD_ACCUM_STEPS}
 Production MC samples: ${PROD_MC_SAMPLES}
 Submit production:     ${SUBMIT_PRODUCTION}
 Skip smoke:            ${SKIP_SMOKE}
 Prod dependency:       ${PROD_DEPENDENCY:-<none>}
+Initial resume dir:    ${PROD_INITIAL_RESUME_FROM_DIR:-<none>}
+Exclude nodes:         ${PROD_EXCLUDE_NODES:-<none>}
 INFO
 
 SMOKE_TRAIN_JOB_ID=""
@@ -90,16 +96,27 @@ if [[ "${SUBMIT_PRODUCTION}" == "1" ]]; then
   for target_epoch in ${EPOCH_TARGETS}; do
     part_idx=$((part_idx + 1))
     part_label="p$(printf %02d ${part_idx})_e${target_epoch}"
-    export_args="ALL,PROJECT_DIR=${PROJECT_DIR},TRAIN_CONFIG=${TRAIN_CONFIG},RUN_ROOT=${RUN_ROOT},ARTIFACT_ROOT=${ARTIFACT_ROOT},NORMALIZER_ROOT=${NORMALIZER_ROOT},NORMALIZER_FILE=${NORMALIZER_FILE},NORMALIZER_FORCE_LOAD=true,CKPT_DIR=${TRAIN_DIR},BASE_SEED=${BASE_SEED},RUN_GROUP=${RUN_GROUP},STRUCTURAL_DRY_POLICY=${STRUCTURAL_DRY_POLICY},N_EPOCHS=${target_epoch},BATCH_SIZE=${PROD_BATCH_SIZE},MC_SAMPLES=${PROD_MC_SAMPLES},WANDB_LOG=true,WANDB_NAME=${RUN_GROUP}_${part_label}"
-    if [[ ${part_idx} -gt 1 ]]; then
-      export_args="${export_args},RESUME_FROM_DIR=${TRAIN_DIR}"
+    export_args="ALL,PROJECT_DIR=${PROJECT_DIR},TRAIN_CONFIG=${TRAIN_CONFIG},RUN_ROOT=${RUN_ROOT},ARTIFACT_ROOT=${ARTIFACT_ROOT},NORMALIZER_ROOT=${NORMALIZER_ROOT},NORMALIZER_FILE=${NORMALIZER_FILE},NORMALIZER_FORCE_LOAD=true,CKPT_DIR=${TRAIN_DIR},BASE_SEED=${BASE_SEED},RUN_GROUP=${RUN_GROUP},STRUCTURAL_DRY_POLICY=${STRUCTURAL_DRY_POLICY},N_EPOCHS=${target_epoch},BATCH_SIZE=${PROD_BATCH_SIZE},GRAD_ACCUM_STEPS=${PROD_GRAD_ACCUM_STEPS},MC_SAMPLES=${PROD_MC_SAMPLES},WANDB_LOG=true,WANDB_NAME=${RUN_GROUP}_${part_label}"
+    resume_from_dir=""
+    if [[ ${part_idx} -eq 1 && -n "${PROD_INITIAL_RESUME_FROM_DIR}" ]]; then
+      resume_from_dir="${PROD_INITIAL_RESUME_FROM_DIR}"
+    elif [[ ${part_idx} -gt 1 ]]; then
+      resume_from_dir="${TRAIN_DIR}"
+    fi
+    if [[ -n "${resume_from_dir}" ]]; then
+      export_args="${export_args},RESUME_FROM_DIR=${resume_from_dir}"
     fi
     dep_args=()
     if [[ -n "${prev_job}" ]]; then
       dep_args+=(--dependency=afterok:${prev_job})
     fi
+    exclude_args=()
+    if [[ -n "${PROD_EXCLUDE_NODES}" ]]; then
+      exclude_args+=(--exclude="${PROD_EXCLUDE_NODES}")
+    fi
     jid="$(submit_job train_${part_label} sbatch \
       "${dep_args[@]}" \
+      "${exclude_args[@]}" \
       --time=${TRAIN_TIME} \
       --job-name=wv_mcd_lg_p$(printf %02d ${part_idx}) \
       --export=${export_args} \
