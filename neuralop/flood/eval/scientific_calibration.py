@@ -796,6 +796,38 @@ def _validate_artifact_compatibility(artifact_paths: Sequence[str | Path]) -> Di
     return {k: first.get(k) for k in (*keys, "cell_hash")}
 
 
+def _calibration_cell_hash(calibration_model: Mapping[str, Any]) -> str:
+    direct = str(calibration_model.get("cell_hash", "") or "").strip()
+    if direct:
+        return direct
+    compatibility = calibration_model.get("artifact_compatibility", {}) or {}
+    if isinstance(compatibility, Mapping):
+        return str(compatibility.get("cell_hash", "") or "").strip()
+    return ""
+
+
+def _validate_calibration_cell_hash(
+    calibration_model: Mapping[str, Any],
+    *,
+    cell_hash: str | None,
+    context: str,
+) -> None:
+    expected = _calibration_cell_hash(calibration_model)
+    if not expected:
+        return
+    observed = str(cell_hash or "").strip()
+    if not observed:
+        raise ValueError(
+            f"{context} artifact is missing cell_hash; refusing to apply cell-index calibration "
+            "without mesh compatibility metadata."
+        )
+    if observed != expected:
+        raise ValueError(
+            f"{context} cell_hash mismatch; refusing to apply calibration fitted on a different mesh "
+            f"({observed} != {expected})."
+        )
+
+
 def compute_calibration_wet_frequency(
     artifact_paths: Sequence[str | Path],
     *,
@@ -843,7 +875,7 @@ def fit_crps_member_by_member_from_artifacts(
     if not paths:
         raise ValueError("No forecast artifacts supplied for calibration fitting.")
     rng = np.random.default_rng(int(seed))
-    _validate_artifact_compatibility(paths)
+    artifact_compatibility = _validate_artifact_compatibility(paths)
     wet_frequency = compute_calibration_wet_frequency(paths, wet_threshold_m=bins.wet_threshold_m)
     wet_bin_by_cell = bins.wet_index(wet_frequency)
     n_l, n_w = bins.n_lead_bins, bins.n_wet_bins
@@ -1034,6 +1066,8 @@ def fit_crps_member_by_member_from_artifacts(
         "method": SCIENTIFIC_CALIBRATION_METHOD,
         "coefficients": coeff,
         "coefficient_names": ["a_m", "beta", "gamma"],
+        "objective_name": objective_name,
+        "objective_values": objective_values,
         "objective": objective_values,
         "n_points": n_points,
         "fallback": fallback,
@@ -1060,6 +1094,8 @@ def fit_crps_member_by_member_from_artifacts(
             "fallback": fallback,
             "bounds": bounds,
         }),
+        "cell_hash": str(artifact_compatibility.get("cell_hash", "") or ""),
+        "artifact_compatibility": artifact_compatibility,
         "seed": int(seed),
         "artifact_paths": [str(p) for p in paths],
     }
@@ -1152,11 +1188,18 @@ def apply_crps_mbm_to_wd_members(
     lead_time_hour: float,
     calibration_model: Mapping[str, Any],
     wettable_mask: np.ndarray | None = None,
+    cell_hash: str | None = None,
 ) -> np.ndarray:
     """Apply fitted MBM calibration to one lead-time WD ensemble [members, cells]."""
     pred = np.asarray(pred_members_wd, dtype=np.float64)
     if pred.ndim != 2:
         raise ValueError("pred_members_wd must have shape [members, cells].")
+    if cell_hash is not None:
+        _validate_calibration_cell_hash(
+            calibration_model,
+            cell_hash=cell_hash,
+            context="CRPS-MBM application",
+        )
     coeff = np.asarray(calibration_model["coefficients"], dtype=np.float64)
     bins = CalibrationBins(
         lead_time_hours=tuple(np.asarray(calibration_model["lead_time_hours"], dtype=np.float64).tolist()),
@@ -1252,15 +1295,28 @@ def fit_exceedance_isotonic_from_artifacts(
     wet_frequency_by_cell: np.ndarray,
     thresholds_m: Sequence[float] = DEFAULT_THRESHOLDS_M,
     min_fit_points_per_bin: int = 128,
+    calibration_model: Mapping[str, Any] | None = None,
 ) -> Dict[str, Any]:
     """Fit isotonic calibration for exceedance probabilities by threshold/lead/wet bin."""
     bins.validate()
-    wet_bin_by_cell = bins.wet_index(np.asarray(wet_frequency_by_cell, dtype=np.float64))
+    wet_frequency = np.asarray(wet_frequency_by_cell, dtype=np.float64).reshape(-1)
+    artifact_compatibility = _validate_artifact_compatibility(artifact_paths)
+    if calibration_model is not None:
+        model_hash = _calibration_cell_hash(calibration_model)
+        artifact_hash = str(artifact_compatibility.get("cell_hash", "") or "")
+        if model_hash and artifact_hash and model_hash != artifact_hash:
+            raise ValueError(
+                "Isotonic calibration artifacts do not match CRPS-MBM calibration cell_hash "
+                f"({artifact_hash} != {model_hash})."
+            )
+    wet_bin_by_cell = bins.wet_index(wet_frequency)
     payload: Dict[str, Any] = {
         "method": "isotonic_pava",
+        "probability_input": "crps_mbm_calibrated_members" if calibration_model is not None else "raw_members",
         "thresholds_m": [float(t) for t in thresholds_m],
         "lead_time_hours": list(bins.lead_time_hours),
         "wet_frequency_edges": list(bins.wet_frequency_edges),
+        "cell_hash": str(artifact_compatibility.get("cell_hash", "") or ""),
         "curves": {},
     }
     for threshold in thresholds_m:
@@ -1274,13 +1330,26 @@ def fit_exceedance_isotonic_from_artifacts(
             art = load_forecast_artifact(path, load_members=True)
             pred = np.asarray(art["pred_members_wd"], dtype=np.float64)
             ref = np.asarray(art["ref_members_wd"], dtype=np.float64)
+            if pred.shape[2] != wet_frequency.size:
+                raise ValueError(
+                    f"Artifact {path} n_cells differs from isotonic wet-frequency map."
+                )
             wettable = np.asarray(art.get("wettable_mask", np.ones(pred.shape[2], dtype=bool)), dtype=bool)
             time_hours = art.get("time_hours")
             if time_hours is None:
                 time_hours = np.arange(1, pred.shape[1] + 1, dtype=np.float64)
             for t in range(pred.shape[1]):
                 lead_idx = bins.lead_index(float(time_hours[t]))
-                raw_prob = np.mean(pred[:, t, :] > float(threshold), axis=0)
+                pred_t = pred[:, t, :]
+                if calibration_model is not None:
+                    pred_t = apply_crps_mbm_to_wd_members(
+                        pred_t,
+                        lead_time_hour=float(time_hours[t]),
+                        calibration_model=calibration_model,
+                        wettable_mask=wettable,
+                        cell_hash=str(art.get("cell_hash", "")),
+                    )
+                raw_prob = np.mean(pred_t > float(threshold), axis=0)
                 obs_prob = np.mean(ref[:, t, :] > float(threshold), axis=0)
                 for wet_idx in range(bins.n_wet_bins):
                     mask = wettable & (wet_bin_by_cell == wet_idx)
@@ -1343,6 +1412,25 @@ def apply_isotonic_exceedance_probability(
     return np.clip(out, 0.0, 1.0)
 
 
+def _validate_isotonic_probability_input(
+    *,
+    isotonic_model: Mapping[str, Any],
+    calibration_model: Mapping[str, Any] | None,
+) -> None:
+    expected = "crps_mbm_calibrated_members" if calibration_model is not None else "raw_members"
+    actual = str(isotonic_model.get("probability_input", "") or "").strip()
+    if not actual:
+        raise ValueError(
+            "Isotonic calibration model is missing probability_input metadata; refit isotonic curves "
+            "with the current calibration code to avoid mixing raw and calibrated probability scales."
+        )
+    if actual != expected:
+        raise ValueError(
+            "Isotonic calibration probability_input mismatch: "
+            f"model expects {actual!r}, but this metric path is using {expected!r}."
+        )
+
+
 def save_exceedance_isotonic(model: Mapping[str, Any], out_dir: str | Path) -> Path:
     path = Path(out_dir) / ISOTONIC_JSON
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -1382,6 +1470,11 @@ def compute_artifact_uq_metrics(
     coverage: Dict[float, List[float]] = {0.5: [], 0.8: [], 0.9: [], 0.95: []}
     width: Dict[float, List[float]] = {0.5: [], 0.8: [], 0.9: [], 0.95: []}
     _validate_artifact_compatibility(artifact_paths)
+    if apply_isotonic and isotonic_model is not None:
+        _validate_isotonic_probability_input(
+            isotonic_model=isotonic_model,
+            calibration_model=calibration_model,
+        )
     for path in artifact_paths:
         art = load_forecast_artifact(path, load_members=True)
         pred = np.asarray(art["pred_members_wd"], dtype=np.float64)
@@ -1399,6 +1492,7 @@ def compute_artifact_uq_metrics(
                     lead_time_hour=float(time_hours[t]),
                     calibration_model=calibration_model,
                     wettable_mask=wettable,
+                    cell_hash=str(art.get("cell_hash", "")),
                 )
             pred_sel = pred_t[:, wettable]
             ref_sel = ref_t[:, wettable]

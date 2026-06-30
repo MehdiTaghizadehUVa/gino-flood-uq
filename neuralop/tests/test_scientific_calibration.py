@@ -13,6 +13,7 @@ from neuralop.flood.eval.scientific_calibration import (
     build_calibration_comparison,
     ensemble_mean_rmse,
     empirical_crps_mean,
+    fit_exceedance_isotonic_from_artifacts,
     fit_crps_member_by_member_from_artifacts,
     spread_ratio_penalty,
     weighted_empirical_crps_mean,
@@ -308,6 +309,120 @@ def test_geometry_hash_mismatch_raises_before_fit(tmp_path):
         fit_crps_member_by_member_from_artifacts([a, b], bins=bins)
 
 
+def test_fit_crps_mbm_records_cell_hash(tmp_path):
+    h5py = pytest.importorskip("h5py")
+    del h5py
+    art = save_forecast_artifact(
+        tmp_path / "TE000010.calibration_artifact.h5",
+        hydrograph_id="TE000010",
+        pred_members_wd=np.array([[[0.0, 0.2]], [[0.1, 0.3]]]),
+        ref_members_wd=np.array([[[0.1, 0.4]], [[0.2, 0.5]]]),
+        wettable_mask=np.array([True, True]),
+        time_hours=[1.0],
+        geometry_raw=np.array([[0.0, 0.0], [1.0, 0.0]]),
+    )
+    bins = CalibrationBins((0.0, np.inf), (0.0, 1.0), 0.01)
+    model = fit_crps_member_by_member_from_artifacts([art], bins=bins, min_fit_points_per_bin=1)
+    assert model["cell_hash"]
+    assert model["artifact_compatibility"]["cell_hash"] == model["cell_hash"]
+
+
+def test_apply_crps_mbm_rejects_mismatched_cell_hash():
+    calibration_model = {
+        "coefficients": np.array([[[0.0, 1.0, 1.0]]]),
+        "lead_time_hours": np.array([0.0, np.inf]),
+        "wet_frequency_edges": np.array([0.0, 1.0]),
+        "wet_threshold_m": 0.01,
+        "wet_frequency_by_cell": np.array([1.0]),
+        "cell_hash": "expected-hash",
+    }
+    with pytest.raises(ValueError, match="cell_hash mismatch"):
+        apply_crps_mbm_to_wd_members(
+            np.array([[0.1], [0.2]]),
+            lead_time_hour=1.0,
+            calibration_model=calibration_model,
+            wettable_mask=np.array([True]),
+            cell_hash="different-hash",
+        )
+
+
+def test_isotonic_fit_uses_mbm_calibrated_probability_scale(tmp_path):
+    h5py = pytest.importorskip("h5py")
+    del h5py
+    art = save_forecast_artifact(
+        tmp_path / "TE000010.calibration_artifact.h5",
+        hydrograph_id="TE000010",
+        pred_members_wd=np.array([[[0.0]], [[0.2]]]),
+        ref_members_wd=np.array([[[0.2]], [[0.3]]]),
+        wettable_mask=np.array([True]),
+        time_hours=[1.0],
+        geometry_raw=np.array([[0.0, 0.0]]),
+    )
+    calibration_model = {
+        "coefficients": np.array([[[0.2, 1.0, 1.0]]]),
+        "lead_time_hours": np.array([0.0, np.inf]),
+        "wet_frequency_edges": np.array([0.0, 1.0]),
+        "wet_threshold_m": 0.01,
+        "wet_frequency_by_cell": np.array([1.0]),
+    }
+    bins = CalibrationBins((0.0, np.inf), (0.0, 1.0), 0.01)
+    raw_iso = fit_exceedance_isotonic_from_artifacts(
+        [art],
+        bins=bins,
+        wet_frequency_by_cell=np.array([1.0]),
+        thresholds_m=[0.1],
+        min_fit_points_per_bin=1,
+    )
+    mbm_iso = fit_exceedance_isotonic_from_artifacts(
+        [art],
+        bins=bins,
+        wet_frequency_by_cell=np.array([1.0]),
+        thresholds_m=[0.1],
+        min_fit_points_per_bin=1,
+        calibration_model=calibration_model,
+    )
+    raw_curve = raw_iso["curves"]["0.1"]["lead_0_wet_0"]
+    mbm_curve = mbm_iso["curves"]["0.1"]["lead_0_wet_0"]
+    assert raw_iso["probability_input"] == "raw_members"
+    assert mbm_iso["probability_input"] == "crps_mbm_calibrated_members"
+    assert raw_curve["x"] == pytest.approx([0.5])
+    assert mbm_curve["x"] == pytest.approx([1.0])
+
+
+def test_isotonic_probability_scale_mismatch_raises(tmp_path):
+    h5py = pytest.importorskip("h5py")
+    del h5py
+    art = save_forecast_artifact(
+        tmp_path / "TE000011.calibration_artifact.h5",
+        hydrograph_id="TE000011",
+        pred_members_wd=np.array([[[0.0]], [[0.2]]]),
+        ref_members_wd=np.array([[[0.2]], [[0.3]]]),
+        wettable_mask=np.array([True]),
+        time_hours=[1.0],
+    )
+    calibration_model = {
+        "coefficients": np.array([[[0.0, 1.0, 1.0]]]),
+        "lead_time_hours": np.array([0.0, np.inf]),
+        "wet_frequency_edges": np.array([0.0, 1.0]),
+        "wet_threshold_m": 0.01,
+        "wet_frequency_by_cell": np.array([1.0]),
+    }
+    isotonic_model = {
+        "probability_input": "raw_members",
+        "lead_time_hours": [0.0, np.inf],
+        "wet_frequency_edges": [0.0, 1.0],
+        "curves": {"0.1": {"lead_0_wet_0": {"x": [1.0], "y": [1.0], "n": 1}}},
+    }
+    with pytest.raises(ValueError, match="probability_input mismatch"):
+        compute_artifact_uq_metrics(
+            [art],
+            calibration_model=calibration_model,
+            isotonic_model=isotonic_model,
+            apply_isotonic=True,
+            thresholds_m=[0.1],
+        )
+
+
 def test_isotonic_probability_calibration_is_applied_to_artifact_brier(tmp_path):
     h5py = pytest.importorskip("h5py")
     del h5py
@@ -327,6 +442,7 @@ def test_isotonic_probability_calibration_is_applied_to_artifact_brier(tmp_path)
         "wet_frequency_by_cell": np.array([1.0]),
     }
     isotonic_model = {
+        "probability_input": "crps_mbm_calibrated_members",
         "lead_time_hours": [0.0, np.inf],
         "wet_frequency_edges": [0.0, 1.0],
         "curves": {"0.1": {"lead_0_wet_0": {"x": [1.0], "y": [1.0], "n": 1}}},

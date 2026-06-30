@@ -739,6 +739,7 @@ def run_calibration_ablation(
         min_fit_points_per_bin=int(
             _nested_get(config, "rollout_calibration", "exceedance", "min_fit_points_per_bin", default=128)
         ),
+        calibration_model=selected_model,
     )
     save_exceedance_isotonic(isotonic, iso_dir)
     iso_metrics = compute_artifact_uq_metrics(

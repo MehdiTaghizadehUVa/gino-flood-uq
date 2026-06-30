@@ -499,6 +499,7 @@ def main() -> int:
                     wet_frequency_by_cell=calibration_model["wet_frequency_by_cell"],
                     thresholds_m=thresholds_m,
                     min_fit_points_per_bin=int(_nested_get(exceedance_cfg, "min_fit_points_per_bin", default=128)),
+                    calibration_model=calibration_model,
                 )
             iso_path = save_exceedance_isotonic(exceedance_model, calibration_dir)
             logger.info("Saved isotonic exceedance curves to %s", iso_path)
