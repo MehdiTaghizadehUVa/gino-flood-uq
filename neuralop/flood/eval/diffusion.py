@@ -24,7 +24,13 @@ from neuralop.flood.eval.rollout import (  # noqa: E402
     _rollout_prediction_generic,
     _rollout_prediction_per_hydrograph,
 )
-from neuralop.flood.eval.runtime import _opt, normalize_rollout_init_mode  # noqa: E402
+from neuralop.flood.eval.runtime import (  # noqa: E402
+    CHECKPOINT_BEST,
+    CHECKPOINT_LAST,
+    _opt,
+    normalize_rollout_init_mode,
+    preferred_eval_checkpoint_name,
+)
 from neuralop import get_model  # noqa: E402
 from neuralop.data.transforms.normalizers import load_normalizers  # noqa: E402
 from neuralop.diffusion import (  # noqa: E402
@@ -153,37 +159,50 @@ def _resolve_normalizer_path(config: Any, fallback: Optional[Path] = None) -> Op
     )
 
 
-def _expand_checkpoint_candidates(path: Path) -> List[Path]:
+_DIFFUSION_CHECKPOINT_FILES = {
+    CHECKPOINT_LAST: "checkpoint.pt",
+    CHECKPOINT_BEST: "checkpoint_best.pt",
+}
+
+
+def _diffusion_checkpoint_aliases(preferred_alias: str) -> List[str]:
+    aliases = [preferred_alias]
+    aliases.extend(alias for alias in (CHECKPOINT_LAST, CHECKPOINT_BEST) if alias not in aliases)
+    return aliases
+
+
+def _resolve_diffusion_checkpoint_in_dir(path: Path, preferred_alias: str) -> Optional[Path]:
+    for alias in _diffusion_checkpoint_aliases(preferred_alias):
+        filename = _DIFFUSION_CHECKPOINT_FILES[alias]
+        candidate = path / filename
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def _expand_checkpoint_candidates(path: Path, preferred_alias: str = CHECKPOINT_LAST) -> List[Path]:
     if path.is_file():
         return [path]
     if not path.exists():
         return []
 
-    # Prefer best checkpoint for each run directory; fall back to latest only if
-    # best is unavailable.
-    best = path / "checkpoint_best.pt"
-    if best.exists():
-        return [best]
-    latest = path / "checkpoint.pt"
-    if latest.exists():
-        return [latest]
+    checkpoint = _resolve_diffusion_checkpoint_in_dir(path, preferred_alias)
+    if checkpoint is not None:
+        return [checkpoint]
 
     found: List[Path] = []
     for child in sorted(path.iterdir()):
         if not child.is_dir():
             continue
-        best_child = child / "checkpoint_best.pt"
-        if best_child.exists():
-            found.append(best_child)
-            continue
-        latest_child = child / "checkpoint.pt"
-        if latest_child.exists():
-            found.append(latest_child)
+        checkpoint = _resolve_diffusion_checkpoint_in_dir(child, preferred_alias)
+        if checkpoint is not None:
+            found.append(checkpoint)
     return found
 
 
 def _discover_checkpoints(args: argparse.Namespace, config: Any) -> List[Path]:
     candidates: List[Path] = []
+    preferred_alias = preferred_eval_checkpoint_name(config)
     if args.checkpoint_paths:
         for raw in str(args.checkpoint_paths).split(","):
             raw = raw.strip()
@@ -192,7 +211,7 @@ def _discover_checkpoints(args: argparse.Namespace, config: Any) -> List[Path]:
             p = Path(raw)
             if not p.is_absolute():
                 p = (_REPO_ROOT / p).resolve()
-            candidates.extend(_expand_checkpoint_candidates(p))
+            candidates.extend(_expand_checkpoint_candidates(p, preferred_alias=preferred_alias))
     else:
         root_raw = args.checkpoint_root
         if root_raw is None:
@@ -204,7 +223,7 @@ def _discover_checkpoints(args: argparse.Namespace, config: Any) -> List[Path]:
         root = Path(str(root_raw))
         if not root.is_absolute():
             root = (_SCRIPT_DIR / root).resolve()
-        candidates.extend(_expand_checkpoint_candidates(root))
+        candidates.extend(_expand_checkpoint_candidates(root, preferred_alias=preferred_alias))
 
     unique: List[Path] = []
     seen = set()
