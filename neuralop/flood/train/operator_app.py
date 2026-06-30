@@ -106,6 +106,30 @@ def _resolve_training_normalizer_path(config):
     return normalizer_path.resolve()
 
 
+def should_run_training_verification(
+    config,
+    *,
+    checkpoint_resume_dir=None,
+    use_distributed=False,
+    global_rank=0,
+):
+    """Return whether mutating training sanity checks should run for this launch.
+
+    The overfit check intentionally performs optimizer steps. That is useful at
+    the start of a fresh run, but it is not a valid resume-time check because the
+    trainer restores checkpoint state later in the lifecycle.
+    """
+    try:
+        do_verify = bool(config.verify_training)
+    except (KeyError, AttributeError):
+        do_verify = False
+    if use_distributed and global_rank != 0:
+        return False
+    if checkpoint_resume_dir is not None:
+        return False
+    return do_verify
+
+
 def _prepare_structural_dry_artifact_for_training(
     config,
     *,
@@ -871,13 +895,20 @@ def main():
             fgn_noise_dim,
         )
 
-    # Optional: verify gradient flow and overfit one batch (set verify_training: true in config)
-    try:
-        do_verify = config.verify_training
-    except (KeyError, AttributeError):
-        do_verify = False
-    if use_distributed and global_rank != 0:
-        do_verify = False
+    checkpoint_resume_dir = _cfg_get(config.checkpoint, "resume_from_dir", None)
+
+    # Optional: verify gradient flow and overfit one batch (set verify_training: true in config).
+    do_verify = should_run_training_verification(
+        config,
+        checkpoint_resume_dir=checkpoint_resume_dir,
+        use_distributed=use_distributed,
+        global_rank=global_rank,
+    )
+    if _cfg_get(config, "verify_training", False) and checkpoint_resume_dir is not None and is_logger:
+        logger.info(
+            "Skipping mutable training verification for resumed run from %s.",
+            checkpoint_resume_dir,
+        )
     if do_verify:
         logger.info("--- Training verification ---")
         trainer.optimizer = optimizer  # trainer.train() sets these; set early for verification
@@ -934,7 +965,6 @@ def main():
     checkpoint_save_dir = _cfg_get(config.checkpoint, "save_dir", ".")
     if checkpoint_save_dir is None:
         checkpoint_save_dir = "."
-    checkpoint_resume_dir = _cfg_get(config.checkpoint, "resume_from_dir", None)
     if is_logger:
         save_effective_config_snapshot(config, checkpoint_save_dir, logger=logger)
 
