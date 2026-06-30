@@ -126,3 +126,6 @@ scripts/smoke_*.txt
 deployment/fgn-serving/.env
 apps/fgn-serving-frontend/node_modules/
 apps/fgn-serving-frontend/.next/
+# Forward-only timing job logs
+forward_only-fwd_cost-*.out
+forward_only-fwd_cost-*.err
