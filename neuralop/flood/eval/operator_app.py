@@ -442,6 +442,7 @@ def main() -> int:
                 impact_metrics_config=_opt(config, "rollout", "impact_metrics", None),
                 forecast_artifact_dir=str(forecast_artifact_dir) if forecast_artifact_dir is not None else None,
                 write_visualizations=write_visualizations,
+                member_boundary_mode=_opt(config, "rollout", "member_boundary_mode", "shared"),
             )
         else:
             _rollout_prediction_generic(

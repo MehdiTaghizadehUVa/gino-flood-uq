@@ -158,6 +158,63 @@ def _dry_pred_std_mean(pred_std: np.ndarray, dry_mask: np.ndarray | None) -> flo
     return float(np.mean(pred_sel))
 
 
+def _normalize_member_boundary_mode(value: Any) -> str:
+    """Normalize optional grouped-rollout boundary source for forecast members."""
+    mode = str(value or "shared").strip().lower().replace("-", "_")
+    aliases = {
+        "shared": "shared",
+        "clean": "shared",
+        "clean_family": "shared",
+        "reference": "reference_member",
+        "reference_member": "reference_member",
+        "member": "reference_member",
+        "member_hdf": "reference_member",
+    }
+    if mode not in aliases:
+        raise ValueError(
+            "rollout.member_boundary_mode must be one of {'shared', 'reference_member'}, "
+            f"got {value!r}."
+        )
+    return aliases[mode]
+
+
+def _broadcast_boundary_series_to_cells(
+    series: torch.Tensor,
+    *,
+    n_cells: int,
+    device: torch.device,
+) -> torch.Tensor:
+    """Expand a [time, bc_dim] boundary series to [time, n_cells, bc_dim]."""
+    if series.ndim != 2:
+        raise ValueError(
+            f"Expected boundary series with shape [time, channels], got {tuple(series.shape)}."
+        )
+    return series.to(device).unsqueeze(1).expand(-1, int(n_cells), -1).clone()
+
+
+def _paired_member_rmse(
+    pred_members: np.ndarray,
+    ref_members: np.ndarray,
+    ref_indices: List[int],
+    mask: np.ndarray | None,
+) -> float:
+    """RMSE for forecast members paired with their source reference realization."""
+    pred = np.asarray(pred_members, dtype=np.float64)
+    ref = np.asarray(ref_members, dtype=np.float64)
+    idx = np.asarray(ref_indices, dtype=np.int64)[: pred.shape[0]]
+    valid = (idx >= 0) & (idx < ref.shape[0])
+    if not np.any(valid):
+        return float("nan")
+    pred_valid = pred[np.flatnonzero(valid)]
+    ref_valid = ref[idx[valid]]
+    diff = pred_valid - ref_valid
+    if mask is not None:
+        diff = diff[:, np.asarray(mask, dtype=bool)]
+    if diff.size == 0:
+        return float("nan")
+    return float(np.sqrt(np.mean(diff ** 2)))
+
+
 def _forward_operator_model(
     model: Any,
     *,
@@ -213,6 +270,7 @@ def _rollout_prediction_per_hydrograph(
     calibration_model: Optional[Mapping[str, Any]] = None,
     calibration_metadata: Optional[Mapping[str, Any]] = None,
     write_visualizations: bool = True,
+    member_boundary_mode: str = "shared",
 ) -> None:
     """
     Evaluate per hydrograph using all reference simulations as ground-truth uncertainty.
@@ -270,6 +328,14 @@ def _rollout_prediction_per_hydrograph(
     )
     fgn_ar_state_update = normalize_fgn_ar_state_update(fgn_ar_state_update)
     rollout_init_mode = normalize_rollout_init_mode(rollout_init_mode)
+    member_boundary_mode = _normalize_member_boundary_mode(member_boundary_mode)
+    use_reference_member_boundary = member_boundary_mode == "reference_member"
+    if use_reference_member_boundary and rollout_init_mode != ROLLOUT_INIT_MEMBER_HISTORY:
+        raise ValueError(
+            "rollout.member_boundary_mode='reference_member' requires "
+            "rollout.init_mode='member_history' so each forecast member uses a "
+            "consistent HEC-RAS realization for both initial state and perturbed forcing."
+        )
     gaussian_state_update = str(gaussian_state_update).strip().lower()
     if gaussian_mode and gaussian_state_update not in {"sample", "mu"}:
         raise ValueError(
@@ -281,6 +347,7 @@ def _rollout_prediction_per_hydrograph(
         n_ens, n_models, model_counts,
     )
     logger.info("Hydrograph rollout initialization mode='%s'", rollout_init_mode)
+    logger.info("Hydrograph rollout member boundary mode='%s'", member_boundary_mode)
     if gaussian_mode:
         logger.info(
             "Gaussian rollout state update mode='%s' (predictions are still sampled for ensemble metrics).",
@@ -350,6 +417,7 @@ def _rollout_prediction_per_hydrograph(
     wd_falsewet_rate_001_dry_background: List[np.ndarray] = []
     wd_falsewet_rate_005_dry_background: List[np.ndarray] = []
     wd_pred_std_mean_dry_background: List[np.ndarray] = []
+    paired_member_rmse_wd: List[np.ndarray] = []
     impact_metric_values: Dict[str, List[Any]] = {}
 
     interval_levels = (0.50, 0.80, 0.90, 0.95)
@@ -382,6 +450,7 @@ def _rollout_prediction_per_hydrograph(
         geom_0 = geometry.to(device).unsqueeze(0)
         query_0 = sample["query_points"].to(device).unsqueeze(0)
         full_boundary = sample["boundary"].to(device)
+        boundary_member_series = sample.get("boundary_member_series")
         dynamic_ref = sample["dynamic_ref"].to(device)
         n_ref = int(sample["n_ref_sims"])
         dry_mask_np, wettable_mask_np = _structural_masks_from_sample(
@@ -391,8 +460,37 @@ def _rollout_prediction_per_hydrograph(
         structural_mask_active = structural_mask_active or (wettable_mask_np is not None)
 
         gt_rollout_ref = dynamic_ref[:, start_pred_t:end_pred_t]
-        gt_boundary_rollout = full_boundary[start_pred_t:end_pred_t]
-        sample_rollout_length = min(int(gt_rollout_ref.shape[1]), int(gt_boundary_rollout.shape[0]))
+        if use_reference_member_boundary:
+            if boundary_member_series is None:
+                raise ValueError(
+                    "rollout.member_boundary_mode='reference_member' requested, but grouped "
+                    f"hydrograph sample {hydro_id!r} does not include boundary_member_series."
+                )
+            boundary_member_series = torch.as_tensor(
+                boundary_member_series, dtype=full_boundary.dtype, device=device
+            )
+            if boundary_member_series.ndim != 3:
+                raise ValueError(
+                    "Grouped reference-member boundary series must have shape "
+                    f"[n_ref, time, channels], got {tuple(boundary_member_series.shape)}."
+                )
+            if int(boundary_member_series.shape[0]) != n_ref:
+                raise ValueError(
+                    "Grouped reference-member boundary count mismatch: "
+                    f"boundary_member_series has {boundary_member_series.shape[0]} members, "
+                    f"dynamic_ref has {n_ref}."
+                )
+            gt_boundary_rollout = boundary_member_series[:, start_pred_t:end_pred_t]
+            sample_rollout_length = min(
+                int(gt_rollout_ref.shape[1]),
+                int(gt_boundary_rollout.shape[1]),
+            )
+        else:
+            gt_boundary_rollout = full_boundary[start_pred_t:end_pred_t]
+            sample_rollout_length = min(
+                int(gt_rollout_ref.shape[1]),
+                int(gt_boundary_rollout.shape[0]),
+            )
         if sample_rollout_length < 1:
             raise ValueError(
                 "Hydrograph rollout has no forecast steps after skip/history slicing: "
@@ -456,6 +554,7 @@ def _rollout_prediction_per_hydrograph(
         run_wd_falsewet_rate_001_dry_background: List[float] = []
         run_wd_falsewet_rate_005_dry_background: List[float] = []
         run_wd_pred_std_mean_dry_background: List[float] = []
+        run_paired_member_rmse_wd: List[float] = []
         run_pred_wd_ens: List[np.ndarray] = []
         run_gt_wd_ref: List[np.ndarray] = []
         run_interval_coverage: Dict[float, List[float]] = {a: [] for a in interval_levels}
@@ -496,6 +595,23 @@ def _rollout_prediction_per_hydrograph(
         else:
             current_dynamic = init_histories[0].clone()
         current_boundary = full_boundary[skip_before_timestep:start_pred_t].clone()
+        current_boundaries = None
+        if use_reference_member_boundary:
+            n_cells = int(static_0.shape[1])
+            current_boundaries = []
+            for ref_idx in init_ref_indices[: n_ens if use_ensemble else 1]:
+                if ref_idx < 0:
+                    raise ValueError(
+                        "Internal error: reference-member boundary mode received an unpaired "
+                        f"initial-history index for hydrograph {hydro_id!r}."
+                    )
+                current_boundaries.append(
+                    _broadcast_boundary_series_to_cells(
+                        boundary_member_series[ref_idx, skip_before_timestep:start_pred_t],
+                        n_cells=n_cells,
+                        device=device,
+                    )
+                )
         fgn_latent_bank = None
         if fgn_noise_dim is not None:
             fgn_latent_bank = sample_fgn_rollout_latent_bank(
@@ -522,7 +638,12 @@ def _rollout_prediction_per_hydrograph(
                         model_idx = member_model_indices[ens_idx]
                         model = models[model_idx]
                         dyn_flat = dyn_hist.permute(1, 0, 2).reshape(1, dyn_hist.shape[1], -1)
-                        bc_flat = current_boundary.permute(1, 0, 2).reshape(1, current_boundary.shape[1], -1)
+                        bc_hist = (
+                            current_boundaries[ens_idx]
+                            if current_boundaries is not None
+                            else current_boundary
+                        )
+                        bc_flat = bc_hist.permute(1, 0, 2).reshape(1, bc_hist.shape[1], -1)
                         x = torch.cat([static_0, bc_flat, dyn_flat], dim=2)
                         if gaussian_mode:
                             out = _forward_operator_model(
@@ -590,9 +711,8 @@ def _rollout_prediction_per_hydrograph(
                     dyn_flat = current_dynamic.permute(1, 0, 2).reshape(
                         1, current_dynamic.shape[1], -1
                     )
-                    bc_flat = current_boundary.permute(1, 0, 2).reshape(
-                        1, current_boundary.shape[1], -1
-                    )
+                    bc_hist = current_boundaries[0] if current_boundaries is not None else current_boundary
+                    bc_flat = bc_hist.permute(1, 0, 2).reshape(1, bc_hist.shape[1], -1)
                     x = torch.cat([static_0, bc_flat, dyn_flat], dim=2)
                     if gaussian_mode:
                         out = _forward_operator_model(
@@ -815,6 +935,15 @@ def _rollout_prediction_per_hydrograph(
                     run_wd_pred_std_mean_dry_background.append(
                         _dry_pred_std_mean(pred_std_ch, dry_mask_np)
                     )
+                    if use_reference_member_boundary:
+                        run_paired_member_rmse_wd.append(
+                            _paired_member_rmse(
+                                pred_ens_ch,
+                                gt_ref_ch,
+                                init_ref_indices[: pred_ens_ch.shape[0]],
+                                wettable_mask_np,
+                            )
+                        )
 
                     # Reliability bins for event probability calibration.
                     pred_prob_primary = _select_cells(pred_prob, wettable_mask_np)
@@ -910,9 +1039,23 @@ def _rollout_prediction_per_hydrograph(
                     [current_dynamic[1:], update_stack[0, 0].unsqueeze(0)],
                     dim=0,
                 )
-            current_boundary = torch.cat(
-                [current_boundary[1:], gt_boundary_rollout[t].unsqueeze(0)], dim=0
-            )
+            if use_reference_member_boundary:
+                assert current_boundaries is not None
+                n_cells = int(static_0.shape[1])
+                for ens_idx, ref_idx in enumerate(init_ref_indices[: len(current_boundaries)]):
+                    next_boundary = _broadcast_boundary_series_to_cells(
+                        gt_boundary_rollout[ref_idx, t].unsqueeze(0),
+                        n_cells=n_cells,
+                        device=device,
+                    )
+                    current_boundaries[ens_idx] = torch.cat(
+                        [current_boundaries[ens_idx][1:], next_boundary],
+                        dim=0,
+                    )
+            else:
+                current_boundary = torch.cat(
+                    [current_boundary[1:], gt_boundary_rollout[t].unsqueeze(0)], dim=0
+                )
 
         pred_mean_by_channel = {
             k: np.stack(v, axis=0) for k, v in run_pred_mean_by_channel.items()
@@ -973,6 +1116,8 @@ def _rollout_prediction_per_hydrograph(
                     "gaussian_mode": bool(gaussian_mode),
                     "fgn_noise_dim": None if fgn_noise_dim is None else int(fgn_noise_dim),
                     "calibration_applied": calibration_model is not None,
+                    "member_boundary_mode": member_boundary_mode,
+                    "member_reference_indices": [int(i) for i in init_ref_indices[:n_ens]],
                     **dict(calibration_metadata or {}),
                 },
             )
@@ -1086,6 +1231,10 @@ def _rollout_prediction_per_hydrograph(
             wd_pred_std_mean_dry_background.append(
                 np.asarray(run_wd_pred_std_mean_dry_background, dtype=np.float64)
             )
+            if run_paired_member_rmse_wd:
+                paired_member_rmse_wd.append(
+                    np.asarray(run_paired_member_rmse_wd, dtype=np.float64)
+                )
             for alpha in interval_levels:
                 wd_interval_coverage[alpha].append(
                     np.asarray(run_interval_coverage[alpha], dtype=np.float64)
@@ -1186,6 +1335,8 @@ def _rollout_prediction_per_hydrograph(
         metrics["dry_background_pred_std_mean_wd"] = np.stack(
             wd_pred_std_mean_dry_background, axis=0
         )
+    if paired_member_rmse_wd:
+        metrics["paired_member_rmse_wd"] = np.stack(paired_member_rmse_wd, axis=0)
     for alpha in interval_levels:
         if wd_interval_coverage[alpha]:
             pct = int(round(alpha * 100))

@@ -630,6 +630,10 @@ def _build_rollout_normalized_dataset(
             fallback_boundary_ensemble_raw = torch.stack(
                 [g["boundary_series_raw"] for g in normalized_group], dim=0
             )
+            boundary_member_series = torch.stack(
+                [torch.as_tensor(g["boundary"])[:, 0, :].detach().cpu().clone() for g in normalized_group],
+                dim=0,
+            )
             sample = {
                 "hydrograph_id": hydro_id,
                 "reference_run_ids": reference_run_ids,
@@ -640,6 +644,7 @@ def _build_rollout_normalized_dataset(
                 "elevation_raw": normalized_group[0].get("elevation_raw"),
                 "boundary": normalized_group[0]["boundary"],
                 "boundary_series_raw": normalized_group[0]["boundary_series_raw"],
+                "boundary_member_series": boundary_member_series,
                 "boundary_ensemble_series_raw": _boundary_ensemble_series_from_reference_members(
                     rollout_boundary_kwargs["boundary_spec"],
                     reference_run_ids,

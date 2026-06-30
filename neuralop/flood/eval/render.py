@@ -139,6 +139,16 @@ def _as_quantile_pair(value: Any, default: Tuple[float, float]) -> Tuple[float, 
         return default
 
 
+def _as_optional_float(value: Any) -> Optional[float]:
+    if value is None or value == "":
+        return None
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        return None
+    return out if np.isfinite(out) else None
+
+
 def _visualization_options(visualization_config: Any = None) -> Dict[str, Any]:
     map_mode = _normalize_map_mode(_cfg_path(visualization_config, ("map", "mode"), DEFAULT_VISUALIZATION_MAP_MODE))
     default_provider = DEFAULT_BASEMAP_PROVIDER_BY_MODE[map_mode]
@@ -161,7 +171,7 @@ def _visualization_options(visualization_config: Any = None) -> Dict[str, Any]:
         "diagnostic_zero_fraction": float(_cfg_path(visualization_config, ("diagnostics", "zero_fraction"), 0.03)),
         "diagnostic_overlay_alpha": float(_cfg_path(visualization_config, ("diagnostics", "overlay_alpha"), 0.70)),
         "diagnostic_basemap_alpha": float(_cfg_path(visualization_config, ("diagnostics", "basemap_alpha"), 0.28)),
-        "diagnostic_error_colormap": str(_cfg_path(visualization_config, ("diagnostics", "error_colormap"), "error_rose_alpha_ramp")),
+        "diagnostic_error_colormap": str(_cfg_path(visualization_config, ("diagnostics", "error_colormap"), "error_magenta_alpha_ramp")),
         "diagnostic_spread_colormap": str(_cfg_path(visualization_config, ("diagnostics", "spread_colormap"), "spread_violet_alpha_ramp")),
         "diagnostic_crps_colormap": str(_cfg_path(visualization_config, ("diagnostics", "crps_colormap"), "crps_indigo_alpha_ramp")),
         "cache_scope": str(_cfg_path(visualization_config, ("map", "cache_scope"), "run_extent")),
@@ -170,6 +180,9 @@ def _visualization_options(visualization_config: Any = None) -> Dict[str, Any]:
         "hillshade_tint_strength": float(_cfg_path(visualization_config, ("map", "hillshade_tint_strength"), 0.45)),
         "dem_cmap": str(_cfg_path(visualization_config, ("map", "dem_cmap"), "hecras_dem")),
         "dem_quantiles": _as_quantile_pair(_cfg_path(visualization_config, ("map", "dem_quantiles"), None), (0.01, 0.99)),
+        "dem_vmin": _as_optional_float(_cfg_path(visualization_config, ("map", "dem_vmin"), None)),
+        "dem_vmax": _as_optional_float(_cfg_path(visualization_config, ("map", "dem_vmax"), None)),
+        "terrain_tif": str(_cfg_path(visualization_config, ("map", "terrain_tif"), "") or ""),
         "write_gif": _as_bool(_cfg_path(visualization_config, ("output", "write_gif"), True), True),
         "write_mp4": _as_bool(_cfg_path(visualization_config, ("output", "write_mp4"), True), True),
         "time_display": str(_cfg_path(visualization_config, ("time", "display"), "forecast_horizon_after_spinup")),
@@ -365,13 +378,59 @@ def _cache_matches_options(metadata: Dict[str, Any], options: Optional[Dict[str,
         return True
     if metadata.get("crs") not in {None, options.get("crs")}:
         return False
-    if metadata.get("provider") not in {None, options.get("provider")}:
+
+    requested_tif = str(options.get("terrain_tif") or "")
+    cached_tif = str(metadata.get("terrain_tif") or "")
+    if requested_tif or cached_tif:
+        if Path(requested_tif).expanduser().as_posix() != Path(cached_tif).expanduser().as_posix():
+            return False
+
+    if not requested_tif and metadata.get("provider") not in {None, options.get("provider")}:
         return False
     cached_map_mode = metadata.get("map_mode")
     if cached_map_mode is not None and cached_map_mode != options.get("mode"):
         return False
-    return True
 
+    def _metadata_value(key: str) -> Any:
+        if key == "basemap_alpha" and key not in metadata and "alpha" in metadata:
+            return metadata.get("alpha")
+        return metadata.get(key)
+
+    def _values_equal(key: str, expected: Any) -> bool:
+        if key not in metadata and not (key == "basemap_alpha" and "alpha" in metadata):
+            return expected is None or expected == ()
+        cached = _metadata_value(key)
+        if key == "dem_quantiles" and cached is not None:
+            cached = tuple(cached)
+        return cached == expected
+
+    if requested_tif:
+        # Local DEM rasters are colorized before caching, so rendering-affecting
+        # DEM options must match exactly before reuse.
+        required = {
+            "dem_cmap": options.get("dem_cmap"),
+            "dem_quantiles": tuple(options.get("dem_quantiles", ())),
+            "dem_vmin": options.get("dem_vmin"),
+            "dem_vmax": options.get("dem_vmax"),
+            "basemap_alpha": options.get("basemap_alpha"),
+            "export_size_px": options.get("export_size_px"),
+        }
+        return all(_values_equal(key, expected) for key, expected in required.items())
+
+    # External basemap cache metadata has evolved over time. Reuse when the
+    # source identity above matches, but invalidate if optional keys are present
+    # and conflict with the current request.
+    optional = {
+        "hillshade_cmap": options.get("hillshade_cmap"),
+        "hillshade_tint_strength": options.get("hillshade_tint_strength"),
+        "basemap_alpha": options.get("basemap_alpha"),
+        "export_size_px": options.get("export_size_px"),
+    }
+    for key, expected in optional.items():
+        if key in metadata or (key == "basemap_alpha" and "alpha" in metadata):
+            if not _values_equal(key, expected):
+                return False
+    return True
 
 def _load_cached_basemap(out_dir: str, x: Optional[np.ndarray] = None, y: Optional[np.ndarray] = None, options: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
     cache_dir = Path(out_dir) / BASEMAP_CACHE_DIRNAME
@@ -421,6 +480,120 @@ def _metadata_for_fallback(out_dir: str, mode: str, options: Dict[str, Any], rea
     (cache_dir / BASEMAP_METADATA_JSON).write_text(json.dumps(metadata, indent=2), encoding="utf-8")
 
 
+def _build_terrain_tif_context(*, x: np.ndarray, y: np.ndarray, out_dir: str, options: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Load a local terrain GeoTIFF and cache it as a cartographic background.
+
+    The raster is used as a visual underlay only. Model inputs/metrics still use
+    the normalized tensors and raw elevation carried by the evaluation pipeline.
+    """
+    tif_path = str(options.get("terrain_tif") or "").strip()
+    if not tif_path:
+        return None
+    tif = Path(tif_path).expanduser()
+    if not tif.exists():
+        warnings.warn(f"terrain_tif basemap disabled; file does not exist: {tif}")
+        return None
+    try:
+        import rasterio  # type: ignore
+        from rasterio.enums import Resampling  # type: ignore
+        from rasterio.windows import Window  # type: ignore
+        from pyproj import Transformer  # type: ignore
+    except ImportError:
+        warnings.warn("rasterio/pyproj not available; terrain_tif basemap disabled")
+        return None
+    try:
+        xmin, xmax, ymin, ymax = _spatial_extent(x, y)
+        mesh_crs = options.get("crs", DEFAULT_VISUALIZATION_CRS)
+        with rasterio.open(tif) as src:
+            if src.crs is None:
+                raise ValueError(f"terrain_tif has no CRS metadata: {tif}")
+            dem_crs = src.crs.to_string()
+            tf_fwd = Transformer.from_crs(mesh_crs, dem_crs, always_xy=True)
+            corner_xs, corner_ys = tf_fwd.transform(
+                [xmin, xmax, xmin, xmax], [ymin, ymin, ymax, ymax]
+            )
+            dem_xmin, dem_xmax = min(corner_xs), max(corner_xs)
+            dem_ymin, dem_ymax = min(corner_ys), max(corner_ys)
+            window = src.window(dem_xmin, dem_ymin, dem_xmax, dem_ymax)
+            full = Window(0, 0, src.width, src.height)
+            try:
+                window = window.intersection(full)
+            except Exception:
+                return None
+            window = window.round_offsets().round_lengths()
+            if window.width <= 0 or window.height <= 0:
+                return None
+            win_bounds = src.window_bounds(window)
+            max_px = max(128, min(int(options.get("export_size_px", 1024)), 4096))
+            scale = min(1.0, float(max_px) / max(float(window.width), float(window.height)))
+            target_w = max(1, int(round(float(window.width) * scale)))
+            target_h = max(1, int(round(float(window.height) * scale)))
+            data = src.read(1, window=window, out_shape=(target_h, target_w), resampling=Resampling.bilinear)
+            nodata = src.nodata
+        elev = data.astype(np.float64)
+        if nodata is not None:
+            elev[data == nodata] = np.nan
+        finite = elev[np.isfinite(elev)]
+        if finite.size == 0:
+            return None
+        fixed_lo = options.get("dem_vmin")
+        fixed_hi = options.get("dem_vmax")
+        if fixed_lo is not None and fixed_hi is not None and float(fixed_lo) < float(fixed_hi):
+            lo, hi = float(fixed_lo), float(fixed_hi)
+        else:
+            qlo, qhi = options.get("dem_quantiles", (0.01, 0.99))
+            lo = float(np.nanquantile(finite, qlo))
+            hi = float(np.nanquantile(finite, qhi))
+            if not np.isfinite(lo) or not np.isfinite(hi) or np.isclose(lo, hi):
+                lo, hi = float(np.nanmin(finite)), float(np.nanmax(finite))
+        cmap = _dem_elevation_cmap(str(options.get("dem_cmap", "hecras_dem")))
+        normed = np.clip((elev - lo) / max(hi - lo, 1e-10), 0.0, 1.0)
+        rgba = cmap(normed).astype(np.float32)
+        rgba[~np.isfinite(elev), 3] = 0.0
+        tf_bck = Transformer.from_crs(dem_crs, mesh_crs, always_xy=True)
+        out_xs, out_ys = tf_bck.transform(
+            [win_bounds[0], win_bounds[2], win_bounds[0], win_bounds[2]],
+            [win_bounds[1], win_bounds[1], win_bounds[3], win_bounds[3]],
+        )
+        out_xmin, out_xmax = min(out_xs), max(out_xs)
+        out_ymin, out_ymax = min(out_ys), max(out_ys)
+        cache_dir = Path(out_dir) / BASEMAP_CACHE_DIRNAME
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        np.savez_compressed(
+            cache_dir / BASEMAP_NPZ,
+            image=rgba,
+            extent=np.asarray([out_xmin, out_xmax, out_ymin, out_ymax]),
+        )
+        metadata = {
+            "mode": "external_basemap",
+            "map_mode": options.get("mode", DEFAULT_VISUALIZATION_MAP_MODE),
+            "crs": mesh_crs,
+            "provider": "local_elevation",
+            "terrain_tif": str(tif),
+            "dem_crs": dem_crs,
+            "extent": [out_xmin, out_xmax, out_ymin, out_ymax],
+            "source_window_bounds": list(win_bounds),
+            "source_shape": [int(data.shape[0]), int(data.shape[1])],
+            "dem_cmap": options.get("dem_cmap"),
+            "dem_quantiles": list(options.get("dem_quantiles", (0.01, 0.99))),
+            "dem_vmin": options.get("dem_vmin"),
+            "dem_vmax": options.get("dem_vmax"),
+            "dem_display_range": [lo, hi],
+            "basemap_alpha": options.get("basemap_alpha"),
+            "export_size_px": options.get("export_size_px"),
+            "cache_scope": options.get("cache_scope", "run_extent"),
+        }
+        (cache_dir / BASEMAP_METADATA_JSON).write_text(json.dumps(metadata, indent=2), encoding="utf-8")
+        return {
+            "mode": "external_basemap",
+            "image": rgba,
+            "extent": (out_xmin, out_xmax, out_ymin, out_ymax),
+            "metadata": metadata,
+        }
+    except Exception as exc:
+        warnings.warn(f"terrain_tif basemap failed: {exc}")
+        return None
+
 def _cartographic_context(*, x: np.ndarray, y: np.ndarray, elevation_raw: Optional[Any], out_dir: str, visualization_config: Any) -> Dict[str, Any]:
     options = _visualization_options(visualization_config)
     elevation = _to_numpy_1d_optional(elevation_raw)
@@ -431,6 +604,11 @@ def _cartographic_context(*, x: np.ndarray, y: np.ndarray, elevation_raw: Option
     if cached is not None:
         context.update(cached)
         return context
+    if options.get("terrain_tif"):
+        tif_result = _build_terrain_tif_context(x=x, y=y, out_dir=out_dir, options=options)
+        if tif_result is not None:
+            context.update(tif_result)
+            return context
     if options["mode"] in {"elevation_hillshade", "dem_elevation"}:
         extent = _spatial_extent(x, y)
         if elevation is not None:
@@ -456,16 +634,20 @@ def _cartographic_context(*, x: np.ndarray, y: np.ndarray, elevation_raw: Option
 
 def _dem_elevation_cmap(name: str) -> Any:
     if str(name).strip().lower() == "hecras_dem":
+        # HEC-RAS-like terrain ramp anchored to the Portsmouth DEM legend
+        # used in the hydraulic model: -15.1 to 19.9 m, with dense color
+        # transitions across the low-relief coastal floodplain band.
         return mcolors.LinearSegmentedColormap.from_list(
             "hecras_dem",
             [
-                (0.00, "#06451f"),
-                (0.18, "#0f7f38"),
-                (0.36, "#8bbd25"),
-                (0.54, "#d4d03d"),
-                (0.68, "#d77b24"),
-                (0.82, "#8b1f0e"),
-                (1.00, "#c9c9c9"),
+                (0.0000, "#b9f6ff"),  # -15.1 m
+                (0.4314, "#b6e500"),  #   0.0 m
+                (0.4886, "#008b2d"),  #   2.0 m
+                (0.5086, "#f1e51c"),  #   2.7 m
+                (0.5229, "#ff8a00"),  #   3.2 m
+                (0.5371, "#b00000"),  #   3.7 m
+                (0.5543, "#bfbfbf"),  #   4.3 m
+                (1.0000, "#f2f2f2"),  #  19.9 m
             ],
         )
     return plt.get_cmap(name)
@@ -503,6 +685,64 @@ def _error_rose_cmap() -> Any:
     )
 
 
+def _error_magenta_cmap() -> Any:
+    # Magenta/plum avoids the HEC-RAS DEM green-yellow-orange-red ramp.
+    return mcolors.LinearSegmentedColormap.from_list(
+        "error_magenta",
+        [
+            (0.00, _rgba("#fff7ff", 0.00)),
+            (0.14, _rgba("#fae8ff", 0.12)),
+            (0.35, _rgba("#f0abfc", 0.40)),
+            (0.62, _rgba("#d946ef", 0.74)),
+            (0.84, _rgba("#86198f", 0.93)),
+            (1.00, _rgba("#3b0764", 1.00)),
+        ],
+    )
+
+
+def _probability_cyanblue_cmap() -> Any:
+    # Probability of flooding should read as water while low probabilities reveal terrain.
+    return mcolors.LinearSegmentedColormap.from_list(
+        "probability_cyanblue",
+        [
+            (0.00, _rgba("#f8feff", 0.00)),
+            (0.10, _rgba("#dffcff", 0.18)),
+            (0.28, _rgba("#a5f3fc", 0.48)),
+            (0.52, _rgba("#22d3ee", 0.78)),
+            (0.76, _rgba("#0284c7", 0.94)),
+            (1.00, _rgba("#082f49", 1.00)),
+        ],
+    )
+
+
+def _spread_tealblue_cmap() -> Any:
+    return mcolors.LinearSegmentedColormap.from_list(
+        "spread_tealblue",
+        [
+            (0.00, _rgba("#f0fdfa", 0.00)),
+            (0.16, _rgba("#ccfbf1", 0.12)),
+            (0.38, _rgba("#5eead4", 0.40)),
+            (0.64, _rgba("#06b6d4", 0.72)),
+            (0.84, _rgba("#0e7490", 0.92)),
+            (1.00, _rgba("#083344", 1.00)),
+        ],
+    )
+
+
+def _spread_magenta_cmap() -> Any:
+    return mcolors.LinearSegmentedColormap.from_list(
+        "spread_magenta",
+        [
+            (0.00, _rgba("#fff7ff", 0.00)),
+            (0.16, _rgba("#fae8ff", 0.12)),
+            (0.38, _rgba("#e879f9", 0.42)),
+            (0.64, _rgba("#c026d3", 0.74)),
+            (0.84, _rgba("#86198f", 0.93)),
+            (1.00, _rgba("#3b0764", 1.00)),
+        ],
+    )
+
+
 def _spread_violet_cmap() -> Any:
     return mcolors.LinearSegmentedColormap.from_list(
         "spread_violet",
@@ -521,11 +761,11 @@ def _crps_indigo_cmap() -> Any:
     return mcolors.LinearSegmentedColormap.from_list(
         "crps_indigo",
         [
-            (0.00, _rgba("#f0fdff", 0.00)),
-            (0.16, _rgba("#ecfeff", 0.10)),
-            (0.38, _rgba("#a5f3fc", 0.34)),
-            (0.62, _rgba("#38bdf8", 0.68)),
-            (0.82, _rgba("#4f46e5", 0.90)),
+            (0.00, _rgba("#f8f7ff", 0.00)),
+            (0.16, _rgba("#eef2ff", 0.12)),
+            (0.38, _rgba("#c7d2fe", 0.40)),
+            (0.62, _rgba("#818cf8", 0.72)),
+            (0.82, _rgba("#4f46e5", 0.92)),
             (1.00, _rgba("#1e1b4b", 1.00)),
         ],
     )
@@ -536,10 +776,18 @@ def _resolve_field_cmap(cmap: Any) -> Any:
         key = cmap.strip().lower()
         if key == "cyan_depth":
             return _cyan_depth_cmap()
+        if key in {"probability_cyanblue", "probability_cyanblue_alpha_ramp"}:
+            return _probability_cyanblue_cmap()
+        if key in {"error_magenta", "error_magenta_alpha_ramp"}:
+            return _error_magenta_cmap()
         if key in {"error_rose", "error_rose_alpha_ramp"}:
             return _error_rose_cmap()
         if key in {"spread_violet", "spread_violet_alpha_ramp"}:
             return _spread_violet_cmap()
+        if key in {"spread_tealblue", "spread_tealblue_alpha_ramp"}:
+            return _spread_tealblue_cmap()
+        if key in {"spread_magenta", "spread_magenta_alpha_ramp"}:
+            return _spread_magenta_cmap()
         if key in {"crps_indigo", "crps_indigo_alpha_ramp"}:
             return _crps_indigo_cmap()
     return cmap
@@ -563,12 +811,17 @@ def _draw_cartographic_background(ax: Any, x: np.ndarray, y: np.ndarray, context
         finite = elev[np.isfinite(elev)]
         if finite.size == 0:
             return
-        qlo, qhi = options.get("dem_quantiles", (0.02, 0.98))
-        if mode == "elevation_hillshade":
-            qlo, qhi = 0.02, 0.98
-        lo, hi = np.nanquantile(finite, [qlo, qhi])
-        if not np.isfinite(lo) or not np.isfinite(hi) or np.isclose(lo, hi):
-            lo, hi = float(np.nanmin(finite)), float(np.nanmax(finite))
+        fixed_lo = options.get("dem_vmin")
+        fixed_hi = options.get("dem_vmax")
+        if fixed_lo is not None and fixed_hi is not None and float(fixed_lo) < float(fixed_hi):
+            lo, hi = float(fixed_lo), float(fixed_hi)
+        else:
+            qlo, qhi = options.get("dem_quantiles", (0.02, 0.98))
+            if mode == "elevation_hillshade":
+                qlo, qhi = 0.02, 0.98
+            lo, hi = np.nanquantile(finite, [qlo, qhi])
+            if not np.isfinite(lo) or not np.isfinite(hi) or np.isclose(lo, hi):
+                lo, hi = float(np.nanmin(finite)), float(np.nanmax(finite))
         plot_elev = np.asarray(elev, dtype=np.float64).copy()
         plot_elev[~np.isfinite(plot_elev)] = lo
         plot_elev = np.clip(plot_elev, lo, hi)
@@ -1531,11 +1784,8 @@ def _save_nonspatial_uq_diagnostics(
     )
     impact_keys = {
         "total": "crps_total_inundated_area_wd",
-        "total_fraction": "crps_total_inundated_area_fraction_wd",
         "peak": "crps_peak_inundated_area_wd",
-        "peak_fraction": "crps_peak_inundated_area_fraction_wd",
         "arrival": "crps_arrival_time_wd",
-        "arrival_fraction": "crps_arrival_time_fraction_wd",
     }
     if pooled_avg_keys or pooled_max_keys or any(key in metrics for key in impact_keys.values()):
         fig, axs = plt.subplots(2, 2, figsize=(13.0, 8.2), dpi=280, constrained_layout=True)
@@ -1568,48 +1818,20 @@ def _save_nonspatial_uq_diagnostics(
             ax_max.legend(fontsize=8, ncol=2)
 
         for label, key in [
-            (
-                "Total inundated area",
-                impact_keys["total_fraction"]
-                if impact_keys["total_fraction"] in metrics
-                else impact_keys["total"],
-            ),
-            (
-                "Peak inundated area",
-                impact_keys["peak_fraction"]
-                if impact_keys["peak_fraction"] in metrics
-                else impact_keys["peak"],
-            ),
+            ("Total inundated area", impact_keys["total"]),
+            ("Peak inundated area", impact_keys["peak"]),
         ]:
             arr = np.asarray(metrics.get(key, np.array([])))
             if arr.ndim >= 2 and arr.size > 0:
                 ax_area.plot(time_hours, np.mean(arr, axis=0), linewidth=1.4, label=label)
-        area_is_fraction = (
-            impact_keys["total_fraction"] in metrics or impact_keys["peak_fraction"] in metrics
-        )
-        ax_area.set_title("Normalized inundated-area CRPS" if area_is_fraction else "Inundated-area CRPS")
+        ax_area.set_title("Inundated-area CRPS")
         ax_area.set_xlabel("Lead time (hour)")
-        ax_area.set_ylabel(
-            "CRPS (fraction of active domain)" if area_is_fraction else "CRPS (area units)"
-        )
+        ax_area.set_ylabel("CRPS (area units)")
         ax_area.grid(True, alpha=0.3)
-        if any(
-            key in metrics
-            for key in (
-                impact_keys["total"],
-                impact_keys["peak"],
-                impact_keys["total_fraction"],
-                impact_keys["peak_fraction"],
-            )
-        ):
+        if impact_keys["total"] in metrics or impact_keys["peak"] in metrics:
             ax_area.legend(fontsize=8)
 
-        arrival_key = (
-            impact_keys["arrival_fraction"]
-            if impact_keys["arrival_fraction"] in metrics
-            else impact_keys["arrival"]
-        )
-        arrival = np.asarray(metrics.get(arrival_key, np.array([])))
+        arrival = np.asarray(metrics.get(impact_keys["arrival"], np.array([])))
         if arrival.size > 0:
             ax_arrival.bar(
                 [0],
@@ -1620,16 +1842,8 @@ def _save_nonspatial_uq_diagnostics(
             )
         ax_arrival.set_xticks([0])
         ax_arrival.set_xticklabels(["Arrival"])
-        ax_arrival.set_title(
-            "Normalized cell arrival-time CRPS"
-            if arrival_key == impact_keys["arrival_fraction"]
-            else "Cell arrival-time CRPS"
-        )
-        ax_arrival.set_ylabel(
-            "CRPS (fraction of rollout horizon)"
-            if arrival_key == impact_keys["arrival_fraction"]
-            else "CRPS (lead-time steps)"
-        )
+        ax_arrival.set_title("Cell arrival-time CRPS")
+        ax_arrival.set_ylabel("CRPS (lead-time steps)")
         ax_arrival.grid(True, axis="y", alpha=0.3)
 
         fig.savefig(os.path.join(out_dir, UQ_IMPACT_CRPS_PNG), bbox_inches="tight")
@@ -2250,8 +2464,8 @@ def _save_hydrograph_uq_figures_and_animation(
     gt_prob_wd: Optional[np.ndarray] = None,
     crps_map_wd: Optional[np.ndarray] = None,
     boundary_series_raw: Optional[Any] = None,
-    boundary_ensemble_series_raw: Optional[Any] = None,
     boundary_channel_names: Optional[List[str]] = None,
+    boundary_ensemble_series_raw: Optional[Any] = None,
     relative_l2_by_channel: Optional[Dict[str, np.ndarray]] = None,
     rollout_start_index: int = 0,
     elevation_raw: Optional[Any] = None,
@@ -2260,11 +2474,6 @@ def _save_hydrograph_uq_figures_and_animation(
     """Generate publication-ready UQ figures and animations per hydrograph."""
     import matplotlib as mpl
 
-    # Note: the bare ``mpl.rc("font", ...)`` below mutates global rcParams.
-    # That is safe because serving-side entry points (e.g. ``ProductsWriter``,
-    # ``write_rivanna_style_map_png``) already wrap calls into this module in
-    # ``mpl.rc_context`` so the mutation is scoped. Direct callers from the
-    # research/eval CLI accept global state changes.
     mpl.rc("font", family="serif", size=11)
     x, y = _geometry_xy(geometry)
     cartographic_context = _cartographic_context(
@@ -2348,8 +2557,8 @@ def _save_hydrograph_uq_figures_and_animation(
         fig, axs = plt.subplots(1, 3, figsize=(16.5, 5.2), dpi=320, constrained_layout=True)
         prob_err_max = _robust_nonnegative_vmax(diff_abs)
         items = [
-            (f"GT mean P(wd>{UQ_EXCEEDANCE_THRESHOLD:.2f})", gt_prob_mean, "viridis", 0.0, 1.0),
-            (f"Forecast mean P(wd>{UQ_EXCEEDANCE_THRESHOLD:.2f})", pred_prob_mean, "viridis", 0.0, 1.0),
+            (f"GT mean P(wd>{UQ_EXCEEDANCE_THRESHOLD:.2f})", gt_prob_mean, "probability_cyanblue", 0.0, 1.0),
+            (f"Forecast mean P(wd>{UQ_EXCEEDANCE_THRESHOLD:.2f})", pred_prob_mean, "probability_cyanblue", 0.0, 1.0),
             ("|Probability error|", diff_abs, "error_rose", 0.0, prob_err_max),
         ]
         for ax, (title, arr, cmap, vmin, vmax) in zip(axs, items):
@@ -2544,7 +2753,6 @@ def _save_hydrograph_uq_figures_and_animation(
             frame_idx=0,
             dt_seconds=dt_seconds,
             boundary_series_raw=boundary_series_raw,
-            boundary_ensemble_series_raw=boundary_ensemble_series_raw,
             boundary_channel_names=boundary_channel_names,
             relative_l2=wd_relative_l2,
             rollout_start_index=rollout_start_index,
@@ -2589,6 +2797,7 @@ def _save_hydrograph_uq_figures_and_animation(
                 frame_idx=frame_idx,
                 dt_seconds=dt_seconds,
                 boundary_series_raw=boundary_series_raw,
+                boundary_ensemble_series_raw=boundary_ensemble_series_raw,
                 boundary_channel_names=boundary_channel_names,
                 relative_l2=wd_relative_l2,
                 rollout_start_index=rollout_start_index,

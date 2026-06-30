@@ -1,8 +1,11 @@
+import json
+
 import matplotlib
 matplotlib.use("Agg")
 
 import numpy as np
 import torch
+import pytest
 
 from neuralop.flood.eval import render
 from neuralop.flood.eval.operator_app import _resolve_rollout_length_for_evaluation
@@ -654,3 +657,189 @@ def test_save_animation_outputs_writes_gif_and_mp4_when_enabled(monkeypatch, tmp
     assert outputs["gif"].endswith(".gif")
     assert outputs["mp4"].endswith(".mp4")
     assert [path for path, _ in fake.saved] == [str(tmp_path / "demo.gif"), str(tmp_path / "demo.mp4")]
+
+
+def test_terrain_tif_rejects_stale_cache_and_builds_new_context(tmp_path, monkeypatch):
+    terrain_tif = tmp_path / "terrain.tif"
+    stale_tif = tmp_path / "old_terrain.tif"
+    terrain_tif.write_bytes(b"placeholder")
+    stale_tif.write_bytes(b"placeholder")
+    cache_dir = tmp_path / "cartographic_context"
+    cache_dir.mkdir()
+    np.savez_compressed(
+        cache_dir / "basemap_context.npz",
+        image=np.zeros((2, 2, 4), dtype=np.float32),
+        extent=np.asarray([0.0, 1.0, 0.0, 1.0]),
+    )
+    (cache_dir / "basemap_metadata.json").write_text(
+        json.dumps({
+            "mode": "external_basemap",
+            "map_mode": "dem_elevation",
+            "crs": "EPSG:32618",
+            "provider": "local_elevation",
+            "terrain_tif": str(stale_tif),
+        })
+    )
+
+    def _fake_terrain_context(*, x, y, out_dir, options):
+        return {
+            "mode": "external_basemap",
+            "image": np.ones((2, 2, 4), dtype=np.float32),
+            "extent": (0.0, 1.0, 0.0, 1.0),
+            "metadata": {"terrain_tif": str(terrain_tif)},
+        }
+
+    monkeypatch.setattr(render, "_build_terrain_tif_context", _fake_terrain_context)
+
+    context = _cartographic_context(
+        x=np.array([0.0, 1.0, 0.0, 1.0]),
+        y=np.array([0.0, 0.0, 1.0, 1.0]),
+        elevation_raw=np.array([1.0, 2.0, 3.0, 4.0]),
+        out_dir=str(tmp_path),
+        visualization_config={"map": {"terrain_tif": str(terrain_tif)}},
+    )
+
+    assert context["mode"] == "external_basemap"
+    assert context["metadata"]["terrain_tif"] == str(terrain_tif)
+    assert np.allclose(context["image"], 1.0)
+
+
+def test_terrain_tif_reuses_matching_cached_context(tmp_path, monkeypatch):
+    terrain_tif = tmp_path / "terrain.tif"
+    terrain_tif.write_bytes(b"placeholder")
+    opts = render._visualization_options({"map": {"terrain_tif": str(terrain_tif)}})
+    cache_dir = tmp_path / "cartographic_context"
+    cache_dir.mkdir()
+    image = np.full((2, 2, 4), 0.5, dtype=np.float32)
+    np.savez_compressed(
+        cache_dir / "basemap_context.npz",
+        image=image,
+        extent=np.asarray([-1.0, 2.0, -1.0, 2.0]),
+    )
+    (cache_dir / "basemap_metadata.json").write_text(
+        json.dumps({
+            "mode": "external_basemap",
+            "map_mode": opts["mode"],
+            "crs": opts["crs"],
+            "provider": opts["provider"],
+            "terrain_tif": str(terrain_tif),
+            "dem_cmap": opts["dem_cmap"],
+            "dem_quantiles": list(opts["dem_quantiles"]),
+            "basemap_alpha": opts["basemap_alpha"],
+            "export_size_px": opts["export_size_px"],
+        })
+    )
+
+    def _fail_build(*args, **kwargs):
+        raise AssertionError("matching terrain_tif cache should be reused")
+
+    monkeypatch.setattr(render, "_build_terrain_tif_context", _fail_build)
+    context = _cartographic_context(
+        x=np.array([0.0, 1.0, 0.0, 1.0]),
+        y=np.array([0.0, 0.0, 1.0, 1.0]),
+        elevation_raw=np.array([1.0, 2.0, 3.0, 4.0]),
+        out_dir=str(tmp_path),
+        visualization_config={"map": {"terrain_tif": str(terrain_tif)}},
+    )
+
+    assert context["mode"] == "external_basemap"
+    assert np.allclose(context["image"], image)
+
+
+def test_basemap_cache_rejects_changed_terrain_tif(tmp_path):
+    old_tif = tmp_path / "old.tif"
+    new_tif = tmp_path / "new.tif"
+    opts = render._visualization_options({"map": {"terrain_tif": str(new_tif)}})
+    metadata = {
+        "crs": opts["crs"],
+        "map_mode": opts["mode"],
+        "provider": opts["provider"],
+        "terrain_tif": str(old_tif),
+    }
+
+    assert render._cache_matches_options(metadata, opts) is False
+
+
+def test_diagnostic_colormap_alpha_ramp_aliases_remain_supported():
+    for name in ["error_rose_alpha_ramp", "spread_violet_alpha_ramp", "crps_indigo_alpha_ramp"]:
+        cmap = render._resolve_field_cmap(name)
+        assert cmap(0.0)[3] == 0.0
+        assert cmap(0.2)[3] < cmap(1.0)[3]
+
+def test_hydrograph_animation_passes_boundary_ensemble_to_diagnostics(tmp_path, monkeypatch):
+    monkeypatch.setattr(render, "PUBLICATION_TIMESTEPS", [0])
+    captured = {}
+    original_make_axes = render._make_rollout_diagnostic_axes
+
+    def _capture_make_axes(*args, **kwargs):
+        captured["boundary_ensemble_series_raw"] = kwargs.get("boundary_ensemble_series_raw")
+        return original_make_axes(*args, **kwargs)
+
+    monkeypatch.setattr(render, "_make_rollout_diagnostic_axes", _capture_make_axes)
+    geometry = torch.tensor(
+        [[0.0, 0.0], [1.0, 0.0], [0.0, 1.0], [1.0, 1.0]],
+        dtype=torch.float32,
+    )
+    fields = _tiny_rollout_fields()
+    boundary = np.array([[1.0, 0.0], [1.1, 0.2], [1.2, 0.4]], dtype=np.float64)
+    boundary_ensemble = np.stack([boundary, boundary + 0.1], axis=0)
+
+    _save_hydrograph_uq_figures_and_animation(
+        geometry=geometry,
+        target_variables=["wd"],
+        out_dir=str(tmp_path),
+        hydrograph_id="ensemble_boundary_demo",
+        dt_seconds=900.0,
+        n_ref_sims=2,
+        n_ens=2,
+        boundary_series_raw=boundary,
+        boundary_ensemble_series_raw=boundary_ensemble,
+        boundary_channel_names=["stage", "precipitation"],
+        relative_l2_by_channel={"wd": np.array([0.1, 0.2, 0.15])},
+        rollout_start_index=0,
+        visualization_config={"map": {"enabled": False}, "output": {"write_gif": False, "write_mp4": False}},
+        **fields,
+    )
+
+    assert captured["boundary_ensemble_series_raw"] is boundary_ensemble
+
+def test_terrain_tif_context_loads_local_geotiff(tmp_path):
+    rasterio = pytest.importorskip("rasterio")
+    from rasterio.transform import from_origin
+
+    tif = tmp_path / "terrain_real.tif"
+    data = np.arange(100, dtype=np.float32).reshape(10, 10)
+    with rasterio.open(
+        tif,
+        "w",
+        driver="GTiff",
+        height=data.shape[0],
+        width=data.shape[1],
+        count=1,
+        dtype="float32",
+        crs="EPSG:32618",
+        transform=from_origin(0.0, 10.0, 1.0, 1.0),
+        nodata=-9999.0,
+    ) as dst:
+        dst.write(data, 1)
+
+    context = _cartographic_context(
+        x=np.array([1.0, 8.0, 1.0, 8.0]),
+        y=np.array([1.0, 1.0, 8.0, 8.0]),
+        elevation_raw=None,
+        out_dir=str(tmp_path),
+        visualization_config={
+            "map": {
+                "enabled": True,
+                "terrain_tif": str(tif),
+                "crs": "EPSG:32618",
+                "export_size_px": 128,
+            }
+        },
+    )
+
+    assert context["mode"] == "external_basemap"
+    assert context["image"].ndim == 3
+    assert context["image"].shape[-1] == 4
+    assert context["metadata"]["terrain_tif"] == str(tif)
+    assert (tmp_path / "cartographic_context" / "basemap_metadata.json").exists()
