@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Any, Callable, Tuple
+import math
+from dataclasses import dataclass, field
+from typing import Any, Callable, Iterable, Mapping, Optional, Sequence, Tuple
 
 import torch
 from torch import nn
@@ -14,7 +15,9 @@ from neuralop.flood.neon import (
     NEONStage2LossWeights,
     compute_stage2_loss,
     freeze_stage1_model,
+    per_epistemic_fair_crps,
     sample_epistemic_indices,
+    save_neon_stage2_checkpoint,
 )
 
 
@@ -403,3 +406,242 @@ def build_neon_stage2_optimizer(
         lr=float(learning_rate),
         weight_decay=float(weight_decay),
     )
+
+
+# ---------------------------------------------------------------------------
+# Family-level Stage-2 training loop (Gap 3)
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class NEONFamilySample:
+    """One grouped-hydrograph event family for Stage-2 training/validation.
+
+    ``reference`` is the HEC-RAS reference ensemble ``[R, T, Nv, C]`` (R>1).
+    The optional domain-input fields are consumed by a production feature
+    collector that runs the frozen FGNO rollout; tests inject a fake collector
+    and only need ``reference`` (plus optional scoring weights / graph edges).
+    """
+
+    family_id: str
+    reference: torch.Tensor
+    weights: Optional[torch.Tensor] = None
+    edge_index: Optional[torch.Tensor] = None
+    edge_weights: Optional[torch.Tensor] = None
+    # Optional fixed-domain inputs for the production frozen-FGNO rollout.
+    static: Optional[torch.Tensor] = None
+    geometry: Optional[torch.Tensor] = None
+    query_points: Optional[torch.Tensor] = None
+    boundary_sequence: Optional[torch.Tensor] = None
+    initial_histories: Optional[torch.Tensor] = None
+
+
+@dataclass
+class NEONTrainingResult:
+    """Outcome of a Stage-2 training run."""
+
+    history: list[dict[str, float]]
+    best_epoch: int
+    best_val_fit: float
+
+
+# feature_collector(family, *, num_aleatory, generator) -> FrozenFGNOFeatureBatch
+FeatureCollector = Callable[..., "FrozenFGNOFeatureBatch"]
+
+
+def _reference_with_batch_dim(reference: torch.Tensor) -> torch.Tensor:
+    """Return reference as ``[B, R, T, Nv, C]`` (add B=1 if given ``[R, T, Nv, C]``)."""
+    if reference.ndim == 5:
+        return reference
+    if reference.ndim == 4:
+        return reference.unsqueeze(0)
+    raise ValueError(
+        "family reference must have shape [R, T, Nv, C] or [B, R, T, Nv, C], "
+        f"got {tuple(reference.shape)}."
+    )
+
+
+def _evaluate_neon_validation(
+    *,
+    module: NEONEpistemicCorrection,
+    families: Sequence[NEONFamilySample],
+    feature_collector: FeatureCollector,
+    m: int,
+    k: int,
+    d_e: int,
+    generator: Optional[torch.Generator],
+) -> float:
+    """Mean per-epistemic fair CRPS over validation families (no gradients)."""
+    module.eval()
+    total = 0.0
+    count = 0
+    with torch.no_grad():
+        for family in families:
+            batch = feature_collector(family, num_aleatory=int(k), generator=generator)
+            z_e = sample_epistemic_indices(
+                int(m), int(d_e),
+                device=batch.features.device,
+                dtype=batch.features.dtype,
+                generator=generator,
+            )
+            out = module(batch.base_prediction, batch.features, z_e)
+            fit = per_epistemic_fair_crps(
+                out.prediction,
+                _reference_with_batch_dim(family.reference).to(out.prediction.dtype),
+                weights=family.weights,
+                reduction="mean",
+            )
+            total += float(fit.item())
+            count += 1
+    return total / max(count, 1)
+
+
+def build_neon_stage2_metadata(
+    *,
+    stage1_checkpoint_path: str,
+    stage1_checkpoint_alias: str,
+    normalizer_fingerprint: Mapping[str, Any],
+    structural_dry_policy: Any,
+    feature_source: str,
+    dependency: str,
+    d_a: int,
+    d_e: int,
+    k_train: int,
+    m_train: int,
+    k_eval: int,
+    m_eval: int,
+    alpha: Optional[float],
+    prior_seed: Optional[int],
+    loss_weights: Mapping[str, float],
+    optimizer_settings: Mapping[str, Any],
+    stage1_config_snapshot: Optional[Mapping[str, Any]] = None,
+    extra: Optional[Mapping[str, Any]] = None,
+) -> dict[str, Any]:
+    """Assemble the plan-mandated structured Stage-2 checkpoint metadata.
+
+    ``best_epoch`` and ``val_metrics`` are filled in by the training loop at
+    save time; everything else is pinned here so a checkpoint is fully
+    reproducible and auditable.
+    """
+    metadata: dict[str, Any] = {
+        "stage1_checkpoint_path": str(stage1_checkpoint_path),
+        "stage1_checkpoint_alias": str(stage1_checkpoint_alias),
+        "stage1_config_snapshot": dict(stage1_config_snapshot) if stage1_config_snapshot else None,
+        "normalizer_fingerprint": dict(normalizer_fingerprint),
+        "structural_dry_policy": structural_dry_policy,
+        "feature_source": str(feature_source),
+        "dependency": str(dependency),
+        "d_a": int(d_a),
+        "d_e": int(d_e),
+        "k_train": int(k_train),
+        "m_train": int(m_train),
+        "k_eval": int(k_eval),
+        "m_eval": int(m_eval),
+        "alpha": None if alpha is None else float(alpha),
+        "prior_seed": None if prior_seed is None else int(prior_seed),
+        "loss_weights": dict(loss_weights),
+        "optimizer_settings": dict(optimizer_settings),
+    }
+    if extra:
+        metadata.update(dict(extra))
+    return metadata
+
+
+def train_neon_stage2_epochs(
+    *,
+    module: NEONEpistemicCorrection,
+    optimizer: torch.optim.Optimizer,
+    train_families: Sequence[NEONFamilySample],
+    val_families: Sequence[NEONFamilySample],
+    feature_collector: FeatureCollector,
+    n_epochs: int,
+    m_train: int,
+    k_train: int,
+    d_e: int,
+    loss_weights: Optional[NEONStage2LossWeights] = None,
+    generator: Optional[torch.Generator] = None,
+    grad_clip_norm: Optional[float] = None,
+    zero_threshold: float = 0.0,
+    checkpoint_path: Optional[Any] = None,
+    checkpoint_metadata: Optional[Mapping[str, Any]] = None,
+    stage1_model: Optional[nn.Module] = None,
+) -> NEONTrainingResult:
+    """Run the family-level Stage-2 epoch loop.
+
+    For each epoch and training family: collect frozen FGNO base predictions +
+    features (``feature_collector`` samples ``k_train`` aleatory members and
+    runs the AR rollout), sample ``m_train`` epistemic indices, forward the
+    EpiNet, compute per-epistemic fair CRPS plus penalties, and backprop only
+    the trainable EpiNet parameters. After each epoch, evaluate mean validation
+    fair CRPS and, if it improved, save the best checkpoint (with structured
+    metadata + best-epoch bookkeeping).
+
+    If ``stage1_model`` is provided, the optimizer is asserted not to own any
+    Stage-1 parameter before training starts.
+    """
+    if stage1_model is not None:
+        assert_optimizer_excludes_stage1(stage1_model=stage1_model, optimizer=optimizer)
+
+    history: list[dict[str, float]] = []
+    best_val = math.inf
+    best_epoch = -1
+
+    for epoch in range(int(n_epochs)):
+        module.train()
+        fit_sum = 0.0
+        total_sum = 0.0
+        n_batches = 0
+        for family in train_families:
+            batch = feature_collector(family, num_aleatory=int(k_train), generator=generator)
+            z_e = sample_epistemic_indices(
+                int(m_train), int(d_e),
+                device=batch.features.device,
+                dtype=batch.features.dtype,
+                generator=generator,
+            )
+            losses = neon_stage2_training_step(
+                module=module,
+                optimizer=optimizer,
+                base_prediction=batch.base_prediction,
+                features=batch.features,
+                reference=_reference_with_batch_dim(family.reference).to(batch.features.dtype),
+                z_e=z_e,
+                weights=family.weights,
+                edge_index=family.edge_index,
+                edge_weights=family.edge_weights,
+                zero_threshold=zero_threshold,
+                loss_weights=loss_weights,
+                grad_clip_norm=grad_clip_norm,
+            )
+            fit_sum += float(losses.fit.item())
+            total_sum += float(losses.total.item())
+            n_batches += 1
+
+        val_fit = _evaluate_neon_validation(
+            module=module,
+            families=val_families,
+            feature_collector=feature_collector,
+            m=int(m_train),
+            k=int(k_train),
+            d_e=int(d_e),
+            generator=generator,
+        )
+        history.append(
+            {
+                "epoch": int(epoch),
+                "train_fit": fit_sum / max(n_batches, 1),
+                "train_total": total_sum / max(n_batches, 1),
+                "val_fit": float(val_fit),
+            }
+        )
+
+        if val_fit < best_val:
+            best_val = float(val_fit)
+            best_epoch = int(epoch)
+            if checkpoint_path is not None:
+                save_metadata = dict(checkpoint_metadata or {})
+                save_metadata["best_epoch"] = int(epoch)
+                save_metadata["val_metrics"] = {"val_fit": float(val_fit)}
+                save_neon_stage2_checkpoint(checkpoint_path, module, metadata=save_metadata)
+
+    return NEONTrainingResult(history=history, best_epoch=best_epoch, best_val_fit=best_val)
