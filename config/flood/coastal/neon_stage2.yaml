@@ -1,0 +1,53 @@
+# NEON-aligned Stage-2 epistemic FGNO configuration (coastal depth-only v1).
+#
+# This is an offline research/training extension. It does NOT change Stage-1
+# FGNO training. Point `stage1_checkpoint_dir` at a pretrained coastal FGNO run
+# and `stage2_checkpoint_dir` at the desired Stage-2 output directory.
+#
+# The `neon:` block is parsed by neuralop.flood.neon_config.load_neon_config.
+neon:
+  enabled: true
+  stage1_checkpoint_dir: /path/to/pretrained_fgno
+  stage2_checkpoint_dir: /path/to/neon_stage2
+
+  # Feature seam exposed from the frozen GINO forward path.
+  # One of: decoder_pre_projection | latent_grid_fno | combined_mesh
+  feature_source: decoder_pre_projection
+
+  # Correction dependency on the aleatory hydraulic state.
+  # za_dependent (main method) | za_independent (ablation)
+  dependency: za_dependent
+
+  # Epistemic index dimension and nested ensemble budgets.
+  d_e: 16
+  M_train: 4
+  K_train: 8
+  M_eval: 16
+  K_eval: 50
+
+  # Randomized-prior scale. `auto_0p10_base_rmse` calibrates alpha so that
+  # Std_ze[alpha * E^P] ~= 0.10 * RMSE_base on a calibration batch. Set `alpha`
+  # to a float to pin it explicitly (overrides auto-calibration).
+  prior_scale: auto_0p10_base_rmse
+  alpha: null
+
+  # Objective. per_epistemic_fcrps is the main method; pooled_fcrps is the
+  # negative-control ablation; l2_mean is the conditional-mean baseline.
+  objective: per_epistemic_fcrps
+  reference_term_for_logging: true
+
+  # Scoring weights.
+  spatial_weights: wettable_area   # wettable_area | wet_front | uniform
+  lead_time_weights: uniform       # uniform | lead_emphasis
+
+  # Regularization weights.
+  lambda_rpf: 1.0e-4
+  lambda_smooth: 1.0e-3
+  lambda_time: 1.0
+  lambda_pos: 1.0e-2
+  lambda_mag: 1.0e-4
+
+  # Optimizer.
+  learning_rate: 1.0e-4
+  weight_decay: 1.0e-4
+  n_epochs: 30
