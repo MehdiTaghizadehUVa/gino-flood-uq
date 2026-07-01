@@ -56,16 +56,22 @@ def make_feature_collector_from_frozen_model(
     def collector(family: NEONFamilySample, *, num_aleatory: int, generator=generator):
         if family.initial_histories is None:
             raise ValueError(f"family {family.family_id!r} lacks initial_histories for rollout.")
-        latents = torch.randn(int(num_aleatory), int(latent_dim), generator=generator)
-        init = family.initial_histories
+        # The collector owns device placement: move all inputs to the frozen
+        # model's device so the AR rollout is device-consistent on GPU.
+        try:
+            model_device = next(stage1_model.parameters()).device
+        except StopIteration:  # parameter-less model (shouldn't happen for GINO)
+            model_device = torch.device("cpu")
+        latents = torch.randn(int(num_aleatory), int(latent_dim), generator=generator).to(model_device)
+        init = family.initial_histories.to(model_device)
         if init.ndim == 3:  # [n_history, Nv, C] -> broadcast to K members
             init = init.unsqueeze(0).expand(int(num_aleatory), -1, -1, -1).contiguous()
         return collect_frozen_fgno_rollout_features(
             stage1_model=stage1_model,
-            static=family.static,
-            geometry=family.geometry,
-            query_points=family.query_points,
-            boundary_sequence=family.boundary_sequence,
+            static=family.static.to(model_device),
+            geometry=family.geometry.to(model_device),
+            query_points=family.query_points.to(model_device),
+            boundary_sequence=family.boundary_sequence.to(model_device),
             initial_histories=init,
             aleatory_latents=latents,
             rollout_length=int(family.reference.shape[1]),  # T from the reference ensemble
@@ -127,6 +133,9 @@ def run_neon_stage2_training(
         out_channels=int(out_channels),
         hidden_channels=int(hidden_channels),
     )
+    # Place the trainable EpiNet on the same device as the (frozen) features so
+    # forward/backward stay device-consistent on GPU.
+    module = module.to(probe.features.device)
 
     if calibrate_prior and config.uses_auto_prior_scale:
         z_e = sample_epistemic_indices(

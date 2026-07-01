@@ -283,7 +283,15 @@ def _build_frozen_gino_step_fn(
             feat = out["features"].get("decoder_pre_projection")
         if feat is None:
             raise KeyError(f"Stage-1 output did not include feature_source={feature_source!r}.")
-        return out["prediction"][0], feat[0]
+        pred = out["prediction"][0]   # [Nv, C]
+        feat = feat[0]                # [Nv, C_phi] or [C_phi, Nv]
+        # GINO's decoder pre-projection feature is returned channels-first
+        # ([C_phi, Nv]); orient it to node-first [Nv, C_phi] to match the
+        # prediction and the Stage-2 [.., Nv, C_phi] contract.
+        n_cells = int(pred.shape[0])
+        if feat.shape[0] != n_cells and feat.shape[-1] == n_cells:
+            feat = feat.transpose(0, 1).contiguous()
+        return pred, feat
 
     return step_fn
 
@@ -487,7 +495,9 @@ def _evaluate_neon_validation(
             out = module(batch.base_prediction, batch.features, z_e)
             fit = per_epistemic_fair_crps(
                 out.prediction,
-                _reference_with_batch_dim(family.reference).to(out.prediction.dtype),
+                _reference_with_batch_dim(family.reference).to(
+                    device=out.prediction.device, dtype=out.prediction.dtype
+                ),
                 weights=family.weights,
                 reduction="mean",
             )
@@ -604,7 +614,9 @@ def train_neon_stage2_epochs(
                 optimizer=optimizer,
                 base_prediction=batch.base_prediction,
                 features=batch.features,
-                reference=_reference_with_batch_dim(family.reference).to(batch.features.dtype),
+                reference=_reference_with_batch_dim(family.reference).to(
+                    device=batch.features.device, dtype=batch.features.dtype
+                ),
                 z_e=z_e,
                 weights=family.weights,
                 edge_index=family.edge_index,
