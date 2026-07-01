@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Callable, Tuple
 
 import torch
 from torch import nn
@@ -135,6 +135,198 @@ def collect_frozen_fgno_features(
     return FrozenFGNOFeatureBatch(
         base_prediction=base_prediction,
         features=features,
+        aleatory_latents=aleatory_latents.detach(),
+    )
+
+
+@dataclass
+class ARRolloutOutput:
+    """Autoregressive rollout base predictions and features for one hydrograph.
+
+    Shapes follow ``[K, T, Nv, C]`` (predictions) and ``[K, T, Nv, C_phi]``
+    (features), where ``K`` indexes aleatory latents and ``T`` is the rollout
+    horizon.
+    """
+
+    base_prediction: torch.Tensor
+    features: torch.Tensor
+
+
+# Type of the injected per-step function: (history[n_hist,Nv,C], t, latent[d_a])
+# -> (prediction[Nv,C], feature[Nv,C_phi]).
+ARStepFn = Callable[[torch.Tensor, int, torch.Tensor], Tuple[torch.Tensor, torch.Tensor]]
+
+
+def autoregressive_feature_rollout(
+    *,
+    step_fn: ARStepFn,
+    initial_histories: torch.Tensor,
+    aleatory_latents: torch.Tensor,
+    rollout_length: int,
+    detach: bool = True,
+) -> ARRolloutOutput:
+    """Run a member-feedback autoregressive rollout, collecting predictions + features.
+
+    This is the model-agnostic core of NEON Stage-2 feature collection. It owns
+    the aleatory-member loop, the dynamic-history sliding window, member
+    feedback (each member's own prediction feeds back into its own history),
+    and stacking over time. The model-specific tensor assembly and forward pass
+    live entirely inside the injected ``step_fn``.
+
+    Parameters
+    ----------
+    step_fn
+        ``(history, t, latent) -> (prediction, feature)`` where ``history`` is
+        ``[n_history, Nv, C]``, ``t`` is the 0-based rollout step, ``latent`` is
+        ``[d_a]``, and the returned prediction/feature are ``[Nv, C]`` /
+        ``[Nv, C_phi]``.
+    initial_histories
+        ``[K, n_history, Nv, C]`` warm-start histories, one per aleatory member.
+    aleatory_latents
+        ``[K, d_a]`` persistent aleatory latents (one per member, held fixed
+        across the rollout).
+    rollout_length
+        Number of autoregressive steps ``T`` (>= 1).
+    detach
+        Detach predictions/features each step (default True). Stage-2 consumes
+        frozen FGNO outputs, so features must not carry Stage-1 gradients.
+    """
+    T = int(rollout_length)
+    if T < 1:
+        raise ValueError(f"rollout_length must be >= 1, got {rollout_length}.")
+    if initial_histories.ndim != 4:
+        raise ValueError(
+            "initial_histories must have shape [K, n_history, Nv, C], "
+            f"got {tuple(initial_histories.shape)}."
+        )
+    K = int(initial_histories.shape[0])
+    if aleatory_latents.ndim != 2 or int(aleatory_latents.shape[0]) != K:
+        raise ValueError(
+            "aleatory_latents must have shape [K, d_a] matching initial_histories K="
+            f"{K}, got {tuple(aleatory_latents.shape)}."
+        )
+
+    preds_per_member: list[torch.Tensor] = []
+    feats_per_member: list[torch.Tensor] = []
+    for member_idx in range(K):
+        history = initial_histories[member_idx].clone()
+        latent = aleatory_latents[member_idx]
+        step_preds: list[torch.Tensor] = []
+        step_feats: list[torch.Tensor] = []
+        for t in range(T):
+            pred_t, feat_t = step_fn(history, t, latent)
+            if detach:
+                pred_t = pred_t.detach()
+                feat_t = feat_t.detach()
+            step_preds.append(pred_t)
+            step_feats.append(feat_t)
+            # Member feedback: slide the history window forward with this
+            # member's own prediction.
+            history = torch.cat([history[1:], pred_t.unsqueeze(0)], dim=0)
+        preds_per_member.append(torch.stack(step_preds, dim=0))
+        feats_per_member.append(torch.stack(step_feats, dim=0))
+
+    return ARRolloutOutput(
+        base_prediction=torch.stack(preds_per_member, dim=0),
+        features=torch.stack(feats_per_member, dim=0),
+    )
+
+
+def _build_frozen_gino_step_fn(
+    *,
+    stage1_model: nn.Module,
+    static: torch.Tensor,
+    geometry: torch.Tensor,
+    query_points: torch.Tensor,
+    boundary_sequence: torch.Tensor,
+    n_history: int,
+    feature_source: str,
+) -> ARStepFn:
+    """Build the per-step closure that runs one frozen GINO forward.
+
+    Mirrors the flood rollout tensor assembly: the GINO input ``x`` is
+    ``concat([static, flattened boundary window, flattened dynamic history])``
+    on the native mesh. The boundary window for step ``t`` is
+    ``boundary_sequence[t : t + n_history]``.
+    """
+
+    def step_fn(history: torch.Tensor, t: int, latent: torch.Tensor):
+        # history: [n_history, Nv, C]
+        nv = history.shape[1]
+        dyn_flat = history.permute(1, 0, 2).reshape(1, nv, -1)  # [1, Nv, n_history*C]
+        bwin = boundary_sequence[t : t + n_history]             # [n_history, Nv, Cb]
+        if bwin.shape[0] != n_history:
+            raise ValueError(
+                "boundary_sequence too short for rollout: needs "
+                f"{n_history} frames at step {t}, has {bwin.shape[0]}."
+            )
+        bc_flat = bwin.permute(1, 0, 2).reshape(1, nv, -1)      # [1, Nv, n_history*Cb]
+        x = torch.cat([static, bc_flat, dyn_flat], dim=2)
+        out = stage1_model(
+            x=x,
+            input_geom=geometry,
+            latent_queries=query_points,
+            output_queries=geometry,
+            ada_in=latent.unsqueeze(0),
+            return_features=True,
+            feature_source=feature_source,
+        )
+        if not isinstance(out, dict) or "prediction" not in out or "features" not in out:
+            raise TypeError(
+                "Stage-1 model must return a feature dictionary when return_features=True."
+            )
+        feat = out["features"].get(feature_source)
+        if feat is None:
+            feat = out["features"].get("decoder_pre_projection")
+        if feat is None:
+            raise KeyError(f"Stage-1 output did not include feature_source={feature_source!r}.")
+        return out["prediction"][0], feat[0]
+
+    return step_fn
+
+
+def collect_frozen_fgno_rollout_features(
+    *,
+    stage1_model: nn.Module,
+    static: torch.Tensor,
+    geometry: torch.Tensor,
+    query_points: torch.Tensor,
+    boundary_sequence: torch.Tensor,
+    initial_histories: torch.Tensor,
+    aleatory_latents: torch.Tensor,
+    rollout_length: int,
+    n_history: int = 3,
+    feature_source: str = "decoder_pre_projection",
+) -> "FrozenFGNOFeatureBatch":
+    """Autoregressively roll out a frozen FGNO, collecting base predictions + features.
+
+    Unlike :func:`collect_frozen_fgno_features` (single-step, ``T=1``), this
+    produces a real rollout of horizon ``rollout_length`` with member feedback,
+    matching the plan's Stage-2 training protocol. Returns a
+    :class:`FrozenFGNOFeatureBatch` with ``B=1`` (one hydrograph):
+    ``base_prediction`` ``[1, K, T, Nv, C]`` and ``features`` ``[1, K, T, Nv, C_phi]``.
+    """
+    freeze_stage1_model(stage1_model)
+    step_fn = _build_frozen_gino_step_fn(
+        stage1_model=stage1_model,
+        static=static,
+        geometry=geometry,
+        query_points=query_points,
+        boundary_sequence=boundary_sequence,
+        n_history=int(n_history),
+        feature_source=feature_source,
+    )
+    with torch.no_grad():
+        rollout = autoregressive_feature_rollout(
+            step_fn=step_fn,
+            initial_histories=initial_histories,
+            aleatory_latents=aleatory_latents,
+            rollout_length=rollout_length,
+            detach=True,
+        )
+    return FrozenFGNOFeatureBatch(
+        base_prediction=rollout.base_prediction.unsqueeze(0),
+        features=rollout.features.unsqueeze(0),
         aleatory_latents=aleatory_latents.detach(),
     )
 
