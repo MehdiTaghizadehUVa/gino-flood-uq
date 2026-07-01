@@ -351,6 +351,8 @@ def save_forecast_artifact(
     boundary_channel_names: Sequence[str] | None = None,
     member_model_id: Sequence[Any] | None = None,
     member_sample_id: Sequence[Any] | None = None,
+    member_epistemic_id: Sequence[int] | None = None,
+    member_aleatory_id: Sequence[int] | None = None,
     time_hours: Sequence[float] | None = None,
     geometry_raw: np.ndarray | None = None,
     elevation_raw: np.ndarray | None = None,
@@ -419,6 +421,22 @@ def save_forecast_artifact(
         _write_string_dataset(f, "boundary_channel_names", boundary_channel_names or [])
         _write_string_dataset(f, "member_model_id", member_model_id or list(range(n_members)))
         _write_string_dataset(f, "member_sample_id", member_sample_id or list(range(n_members)))
+        if member_epistemic_id is not None:
+            epi = np.asarray(member_epistemic_id, dtype=np.int64).reshape(-1)
+            if epi.shape[0] != n_members:
+                raise ValueError(
+                    "member_epistemic_id length must match n_forecast_members; "
+                    f"got {epi.shape[0]} and {n_members}."
+                )
+            f.create_dataset("member_epistemic_id", data=epi)
+        if member_aleatory_id is not None:
+            ale = np.asarray(member_aleatory_id, dtype=np.int64).reshape(-1)
+            if ale.shape[0] != n_members:
+                raise ValueError(
+                    "member_aleatory_id length must match n_forecast_members; "
+                    f"got {ale.shape[0]} and {n_members}."
+                )
+            f.create_dataset("member_aleatory_id", data=ale)
         if time_hours is None:
             time_hours = np.arange(1, n_time + 1, dtype=np.float64)
         f.create_dataset("time_hours", data=np.asarray(time_hours, dtype=np.float64).reshape(n_time))
@@ -449,6 +467,8 @@ def load_forecast_artifact(path: str | Path, *, load_members: bool = True) -> Di
             "boundary_channel_names": [x.decode("utf-8") if isinstance(x, bytes) else str(x) for x in f.get("boundary_channel_names", [])[:]],
             "member_model_id": [x.decode("utf-8") if isinstance(x, bytes) else str(x) for x in f.get("member_model_id", [])[:]],
             "member_sample_id": [x.decode("utf-8") if isinstance(x, bytes) else str(x) for x in f.get("member_sample_id", [])[:]],
+            "member_epistemic_id": f["member_epistemic_id"][...].astype(int).tolist() if "member_epistemic_id" in f else None,
+            "member_aleatory_id": f["member_aleatory_id"][...].astype(int).tolist() if "member_aleatory_id" in f else None,
             "metadata": {},
             "cell_hash": str(f.attrs.get("cell_hash", "")),
         }

@@ -504,6 +504,8 @@ class GINO(BaseModel):
         x=None,
         latent_features=None,
         ada_in=None,
+        return_features=False,
+        feature_source="decoder_pre_projection",
         **kwargs
     ):
         """
@@ -592,6 +594,7 @@ class GINO(BaseModel):
         )
         # => shape (b, c, n_out) => permute => (b, n_out, c)
         out = out.permute(0, 2, 1)
+        decoder_pre_projection = out
 
         # 5) final projection(s)
         if self.output_distribution == "gaussian":
@@ -647,7 +650,23 @@ class GINO(BaseModel):
                 delta = out
                 out   = self.alpha * prev_step + self.beta * delta
 
-        return out
+        if not return_features:
+            return out
+
+        feature_source = str(feature_source).strip().lower()
+        features = {}
+        if feature_source in {"decoder_pre_projection", "all"}:
+            features["decoder_pre_projection"] = decoder_pre_projection
+        else:
+            raise ValueError(
+                "Unsupported GINO feature_source "
+                f"{feature_source!r}. Currently supported: 'decoder_pre_projection' or 'all'."
+            )
+        return {
+            "prediction": out,
+            "features": features,
+            "feature_source": feature_source,
+        }
 
     def reset_verifications(self):
         """
