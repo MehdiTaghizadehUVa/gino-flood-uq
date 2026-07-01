@@ -131,17 +131,40 @@ def _infer_latent_dim(config: NEONStage2Config) -> int:
 
 
 def _load_frozen_stage1(stage1_checkpoint: Any):  # pragma: no cover - GPU/infra path
-    """Load a frozen Stage-1 coastal FGNO from a checkpoint directory.
+    """Load a frozen Stage-1 coastal FGNO from a serving model-bundle JSON.
 
-    Wired to the existing flood checkpoint utilities. Kept as a small, replace-
-    able seam so the orchestration is unit-tested with a fake and this adapter
-    is validated by a GPU smoke against a concrete checkpoint.
+    Reuses the serving inference loader (validated by the NEON GPU smoke): loads
+    the bundle, builds ProductionFGNInferenceService, prepares the models and
+    domain assets, and returns the first frozen FGN model. ``stage1_checkpoint``
+    is the path to a ``coastal_fgn_bundle.json``. Serving metadata drift (e.g.
+    dt_seconds) is tolerated so the real weights load regardless.
     """
-    raise NotImplementedError(
-        "Wire _load_frozen_stage1 to the target coastal FGNO checkpoint loader "
-        "(e.g. neuralop.flood.serving.inference model loading) before running "
-        "real Stage-2 training, or pass load_stage1_fn explicitly."
-    )
+    import json
+    from pathlib import Path as _Path
+
+    from neuralop.flood.serving.inference import ProductionFGNInferenceService
+    from neuralop.flood.serving.model_bundle import load_model_bundle
+
+    try:
+        bundle = load_model_bundle(str(stage1_checkpoint))
+    except Exception:
+        with open(stage1_checkpoint) as handle:
+            raw = json.load(handle)
+        raw["dt_seconds"] = 900  # tolerate serving dt metadata drift
+        patched = str(_Path(stage1_checkpoint).with_name("coastal_fgn_bundle_neon.json"))
+        with open(patched, "w") as handle:
+            json.dump(raw, handle)
+        bundle = load_model_bundle(patched)
+
+    import torch as _torch
+
+    device = "cuda:0" if _torch.cuda.is_available() else "cpu"
+    service = ProductionFGNInferenceService(bundle, device=device)
+    prepared = service._ensure_loaded()
+    # Cache the prepared assets so a companion family loader can reuse them.
+    _load_frozen_stage1.last_prepared = prepared  # type: ignore[attr-defined]
+    _load_frozen_stage1.last_bundle = bundle       # type: ignore[attr-defined]
+    return prepared["models"][0]
 
 
 def _build_grouped_families(data_root: Any, config: NEONStage2Config):  # pragma: no cover
