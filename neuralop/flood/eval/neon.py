@@ -273,3 +273,108 @@ def evaluate_neon_nested(
         out[f"{key}_mean"] = float(value.mean().item())
     out.update(neon_epistemic_error_correlation(prediction, reference, weights=weights))
     return out
+
+
+# ---------------------------------------------------------------------------
+# Deep-ensemble comparison + variance-map plotting (Gap 7)
+# ---------------------------------------------------------------------------
+
+
+def deep_ensemble_epistemic_variance(model_means: torch.Tensor) -> torch.Tensor:
+    """Deep-ensemble epistemic variance: Var over models of per-model ensemble means.
+
+    ``model_means`` is ``[B, J, T, Nv, C]`` where ``J`` indexes deep-ensemble
+    members (each already averaged over its ``K`` aleatory samples). Returns
+    ``[B, T, Nv, C]``. Used as a reference baseline against the NEON epistemic
+    map, not as the formal definition of epistemic uncertainty.
+    """
+    if model_means.ndim != 5:
+        raise ValueError(
+            f"model_means must be [B, J, T, Nv, C]; got {tuple(model_means.shape)}."
+        )
+    if int(model_means.shape[1]) < 2:
+        return torch.zeros_like(model_means[:, 0])
+    return model_means.var(dim=1, unbiased=True)
+
+
+def compare_epistemic_maps(
+    neon_epistemic: torch.Tensor,
+    other_epistemic: torch.Tensor,
+    *,
+    top_q: float = 0.1,
+) -> dict[str, float]:
+    """Compare two epistemic-variance maps (e.g. NEON vs deep ensemble).
+
+    Returns spatial Pearson correlation, top-``q`` high-variance region overlap
+    fraction, and the domain-average variance ratio.
+    """
+    x = neon_epistemic.reshape(-1).to(torch.float64)
+    y = other_epistemic.reshape(-1).to(torch.float64)
+    if x.numel() != y.numel():
+        raise ValueError(
+            f"maps must have the same number of cells; got {x.numel()} and {y.numel()}."
+        )
+    xm = x - x.mean()
+    ym = y - y.mean()
+    denom = torch.sqrt((xm.pow(2).sum() * ym.pow(2).sum())).clamp_min(1.0e-12)
+    corr = float((xm * ym).sum() / denom)
+
+    n = int(x.numel())
+    k = max(1, int(round(float(top_q) * n)))
+    top_x = set(torch.topk(x, k).indices.tolist())
+    top_y = set(torch.topk(y, k).indices.tolist())
+    overlap = len(top_x & top_y) / float(k)
+
+    ratio = float(x.mean() / y.mean().clamp_min(1.0e-12))
+    return {"spatial_corr": corr, "topq_overlap": overlap, "variance_ratio": ratio}
+
+
+def write_variance_maps(
+    prediction: torch.Tensor,
+    *,
+    geometry_xy,
+    output_dir,
+    label: str = "neon",
+    time_index: int = 0,
+):
+    """Render aleatory / epistemic / ANOVA-corrected / total variance maps to PNG.
+
+    ``prediction`` is ``[B, M, K, T, Nv, C]``. Renders the ``B=0``, ``C=0`` slice
+    at ``time_index`` as UTM scatter maps. Returns the list of written paths.
+    """
+    from pathlib import Path as _Path
+
+    summary = neon_variance_summary(prediction)
+    xy = _as_numpy_array(geometry_xy)
+    if xy.ndim != 2 or xy.shape[1] != 2:
+        raise ValueError(f"geometry_xy must be [Nv, 2]; got {tuple(xy.shape)}.")
+
+    import matplotlib
+
+    matplotlib.use("Agg", force=True)
+    import matplotlib.pyplot as plt
+
+    out_dir = _Path(output_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    fields = [
+        ("aleatory", summary["variance_aleatory"], "viridis"),
+        ("epistemic", summary["variance_epistemic"], "magma"),
+        ("epistemic_anova_corrected", summary["variance_epistemic_anova_corrected"], "magma"),
+        ("total", summary["variance_total"], "cividis"),
+    ]
+    paths = []
+    for name, field, cmap in fields:
+        values = _as_numpy_array(field[0, int(time_index), :, 0])
+        fig, ax = plt.subplots(figsize=(7.0, 6.0), dpi=140)
+        sc = ax.scatter(xy[:, 0], xy[:, 1], c=values, s=4.0, cmap=cmap, linewidths=0)
+        ax.set_aspect("equal", adjustable="box")
+        ax.set_title(f"{label} {name} variance | t{int(time_index) + 1}")
+        ax.set_xlabel("UTM Easting (m)")
+        ax.set_ylabel("UTM Northing (m)")
+        fig.colorbar(sc, ax=ax, shrink=0.82)
+        fig.tight_layout()
+        path = out_dir / f"{label}_variance_{name}_t{int(time_index) + 1:03d}.png"
+        fig.savefig(path)
+        plt.close(fig)
+        paths.append(path)
+    return paths

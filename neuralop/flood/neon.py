@@ -226,6 +226,7 @@ class NEONEpistemicCorrection(nn.Module):
         n_hidden_layers: int = 2,
         detach_features: bool = True,
         lead_time_dim: int = 0,
+        za_dependent: bool = True,
     ) -> None:
         super().__init__()
         self.feature_channels = int(feature_channels)
@@ -236,6 +237,7 @@ class NEONEpistemicCorrection(nn.Module):
         self.alpha = float(alpha)
         self.detach_features = bool(detach_features)
         self.lead_time_dim = int(lead_time_dim)
+        self.za_dependent = bool(za_dependent)
         self.trainable_branch = _CorrectionBranch(
             feature_channels=self.feature_channels,
             out_channels=self.out_channels,
@@ -292,6 +294,11 @@ class NEONEpistemicCorrection(nn.Module):
 
         branch_features = features.detach() if self.detach_features else features
         base = base_prediction.detach() if self.detach_features else base_prediction
+        if not self.za_dependent:
+            # za-independent ablation: average the frozen features over the
+            # aleatory (K) axis so the correction depends only on the conditional
+            # mean feature and is shared across aleatory members.
+            branch_features = branch_features.mean(dim=1, keepdim=True).expand_as(branch_features)
         trainable = self.trainable_branch(branch_features, z_e)
         with torch.no_grad():
             prior = self.prior_branch(branch_features, z_e)
@@ -485,6 +492,28 @@ def per_epistemic_fair_crps(
     if reduction == "sum":
         return per_particle.sum()
     raise ValueError("reduction must be one of {'none', 'mean', 'sum'}.")
+
+def pooled_fair_crps(
+    prediction: torch.Tensor,
+    reference: torch.Tensor,
+    *,
+    weights: torch.Tensor | None = None,
+    reduction: str = "mean",
+    chunk_size: int | None = 65536,
+) -> torch.Tensor:
+    """Negative-control fair CRPS that pools ``(z_a, z_e)`` into one ensemble.
+
+    Flattens ``[B, M, K, T, Nv, C]`` to a single ``M*K``-member ensemble and
+    scores it once against the reference. This intentionally does NOT preserve
+    the nested per-epistemic interpretation: pooling inflates the fair-CRPS
+    self-distance term and can mask epistemic miscalibration. Provided only as
+    the plan's negative control against :func:`per_epistemic_fair_crps`.
+    """
+    flat = flatten_nested_predictions(prediction).unsqueeze(1)  # [B, 1, M*K, T, Nv, C]
+    return per_epistemic_fair_crps(
+        flat, reference, weights=weights, reduction=reduction, chunk_size=chunk_size
+    )
+
 
 def rpf_l2_penalty(module: NEONEpistemicCorrection) -> torch.Tensor:
     """L2 penalty on selected trainable randomized-prior-function weights."""
@@ -725,6 +754,7 @@ def save_neon_stage2_checkpoint(
             "alpha": module.alpha,
             "detach_features": module.detach_features,
             "lead_time_dim": module.lead_time_dim,
+            "za_dependent": module.za_dependent,
         },
     }
     torch.save(payload, path)
