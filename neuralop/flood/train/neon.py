@@ -645,3 +645,28 @@ def train_neon_stage2_epochs(
                 save_neon_stage2_checkpoint(checkpoint_path, module, metadata=save_metadata)
 
     return NEONTrainingResult(history=history, best_epoch=best_epoch, best_val_fit=best_val)
+
+
+def build_epinet_from_config(
+    config: Any,
+    *,
+    feature_channels: int,
+    out_channels: int,
+    hidden_channels: int = 64,
+) -> NEONEpistemicCorrection:
+    """Build a NEONEpistemicCorrection from a NEONStage2Config + feature width.
+
+    ``feature_channels`` is the frozen FGNO feature width (e.g. the decoder
+    pre-projection channel count) and must be probed from the model. ``alpha``
+    is taken from the config when explicit, else a placeholder (0.1) that the
+    caller should overwrite via prior-scale auto-calibration.
+    """
+    alpha = 0.1 if getattr(config, "alpha", None) is None else float(config.alpha)
+    return NEONEpistemicCorrection(
+        feature_channels=int(feature_channels),
+        out_channels=int(out_channels),
+        epistemic_dim=int(config.d_e),
+        hidden_channels=int(hidden_channels),
+        alpha=alpha,
+        lead_time_dim=int(getattr(config, "lead_time_dim", 0)),
+    )

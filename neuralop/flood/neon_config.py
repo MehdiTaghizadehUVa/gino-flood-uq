@@ -58,6 +58,7 @@ class NEONStage2Config:
     k_eval: int = 50
     prior_scale: Union[str, float] = "auto_0p10_base_rmse"
     alpha: Optional[float] = None
+    lead_time_dim: int = 0
     objective: str = "per_epistemic_fcrps"
     reference_term_for_logging: bool = True
     spatial_weights: str = "wettable_area"
@@ -154,6 +155,8 @@ class NEONStage2Config:
                 )
         if int(self.n_epochs) < 1:
             raise NEONConfigError(f"n_epochs must be >= 1, got {self.n_epochs}.")
+        if int(self.lead_time_dim) < 0:
+            raise NEONConfigError(f"lead_time_dim must be >= 0, got {self.lead_time_dim}.")
         # Non-negative regularization weights.
         for name in ("lambda_rpf", "lambda_smooth", "lambda_time", "lambda_pos", "lambda_mag", "weight_decay"):
             if float(getattr(self, name)) < 0.0:
