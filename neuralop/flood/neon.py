@@ -6,6 +6,7 @@ interface.  It does not change Stage-1 FGNO training behavior.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -93,11 +94,59 @@ def sample_epistemic_indices(
     )
 
 
+class _LeadTimeEncoder(nn.Module):
+    """Maps a rollout lead-time index to a per-timestep modulation bias.
+
+    Deterministic in the lead time, so it adds temporally-coherent lead-
+    dependent structure to the correction rather than iid node noise. The same
+    ``z_e`` can therefore induce corrections that vary smoothly with lead time.
+    """
+
+    def __init__(self, lead_time_dim: int, hidden_channels: int) -> None:
+        super().__init__()
+        self.lead_time_dim = int(lead_time_dim)
+        self.mlp = nn.Sequential(
+            nn.Linear(self.lead_time_dim, hidden_channels),
+            nn.SiLU(),
+            nn.Linear(hidden_channels, hidden_channels),
+        )
+
+    @staticmethod
+    def _sinusoidal(t_norm: torch.Tensor, dim: int) -> torch.Tensor:
+        half = dim // 2
+        device, dtype = t_norm.device, t_norm.dtype
+        if half >= 1:
+            freqs = torch.exp(
+                -math.log(10000.0)
+                * torch.arange(half, device=device, dtype=dtype)
+                / max(half - 1, 1)
+            )
+            args = t_norm.view(-1, 1) * freqs.view(1, -1) * (2.0 * math.pi)
+            emb = torch.cat([torch.sin(args), torch.cos(args)], dim=1)
+        else:
+            emb = t_norm.view(-1, 1)
+        if emb.shape[1] < dim:
+            pad = torch.zeros(emb.shape[0], dim - emb.shape[1], device=device, dtype=dtype)
+            emb = torch.cat([emb, pad], dim=1)
+        return emb[:, :dim]
+
+    def forward(self, n_time: int, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
+        n_time = int(n_time)
+        if n_time > 1:
+            t_norm = torch.linspace(0.0, 1.0, n_time, device=device, dtype=dtype)
+        else:
+            t_norm = torch.zeros(1, device=device, dtype=dtype)
+        emb = self._sinusoidal(t_norm, self.lead_time_dim)  # [T, lead_time_dim]
+        return self.mlp(emb)  # [T, hidden]
+
+
 class _CorrectionBranch(nn.Module):
     """Pointwise feature-conditioned correction branch.
 
     The branch is shared over time and mesh nodes.  A rollout-global epistemic
     index modulates coherent feature fields rather than adding iid node noise.
+    An optional lead-time encoder adds temporally-coherent, lead-dependent
+    structure so the same ``z_e`` can induce lead-varying corrections.
     """
 
     def __init__(
@@ -108,6 +157,7 @@ class _CorrectionBranch(nn.Module):
         epistemic_dim: int,
         hidden_channels: int,
         n_hidden_layers: int = 2,
+        lead_time_dim: int = 0,
     ) -> None:
         super().__init__()
         if feature_channels < 1:
@@ -134,6 +184,11 @@ class _CorrectionBranch(nn.Module):
             nn.SiLU(),
             nn.Linear(hidden_channels, out_channels),
         )
+        self.lead_time_encoder = (
+            _LeadTimeEncoder(int(lead_time_dim), hidden_channels)
+            if int(lead_time_dim) > 0
+            else None
+        )
 
     def forward(self, features: torch.Tensor, z_e: torch.Tensor) -> torch.Tensor:
         if features.ndim != 5:
@@ -150,6 +205,10 @@ class _CorrectionBranch(nn.Module):
         gamma = gamma.view(view_shape)
         beta = beta.view(view_shape)
         modulated = feature_hidden.unsqueeze(1) * (1.0 + gamma) + beta
+        if self.lead_time_encoder is not None:
+            n_time = int(features.shape[2])
+            lead = self.lead_time_encoder(n_time, feature_hidden.device, feature_hidden.dtype)
+            modulated = modulated + lead.view(1, 1, 1, n_time, 1, lead.shape[-1])
         return self.output_head(modulated)
 
 
@@ -166,6 +225,7 @@ class NEONEpistemicCorrection(nn.Module):
         alpha: float = 0.1,
         n_hidden_layers: int = 2,
         detach_features: bool = True,
+        lead_time_dim: int = 0,
     ) -> None:
         super().__init__()
         self.feature_channels = int(feature_channels)
@@ -175,12 +235,14 @@ class NEONEpistemicCorrection(nn.Module):
         self.n_hidden_layers = int(n_hidden_layers)
         self.alpha = float(alpha)
         self.detach_features = bool(detach_features)
+        self.lead_time_dim = int(lead_time_dim)
         self.trainable_branch = _CorrectionBranch(
             feature_channels=self.feature_channels,
             out_channels=self.out_channels,
             epistemic_dim=self.epistemic_dim,
             hidden_channels=self.hidden_channels,
             n_hidden_layers=n_hidden_layers,
+            lead_time_dim=self.lead_time_dim,
         )
         self.prior_branch = _CorrectionBranch(
             feature_channels=self.feature_channels,
@@ -188,9 +250,14 @@ class NEONEpistemicCorrection(nn.Module):
             epistemic_dim=self.epistemic_dim,
             hidden_channels=self.hidden_channels,
             n_hidden_layers=n_hidden_layers,
+            lead_time_dim=self.lead_time_dim,
         )
         for param in self.prior_branch.parameters():
             param.requires_grad_(False)
+
+    def set_prior_scale(self, alpha: float) -> None:
+        """Set the randomized-prior scale ``alpha`` (e.g. from auto-calibration)."""
+        self.alpha = float(alpha)
 
     def forward(
         self,
@@ -242,6 +309,8 @@ class NEONEpistemicCorrection(nn.Module):
 
         yield from self.trainable_branch.epistemic_encoder.parameters()
         yield from self.trainable_branch.output_head.parameters()
+        if self.trainable_branch.lead_time_encoder is not None:
+            yield from self.trainable_branch.lead_time_encoder.parameters()
 
 
 def _validate_nested_prediction(prediction: torch.Tensor) -> tuple[int, int, int, int, int, int]:
@@ -519,6 +588,56 @@ def anova_corrected_epistemic_variance(prediction: torch.Tensor) -> torch.Tensor
     return torch.clamp(between - within_ms / float(K), min=0.0)
 
 
+def base_rmse_from_reference(
+    base_prediction: torch.Tensor,
+    reference: torch.Tensor,
+    *,
+    weights: torch.Tensor | None = None,
+) -> float:
+    """RMSE of the base ensemble mean vs the reference ensemble mean.
+
+    ``base_prediction`` is ``[B, K, T, Nv, C]`` and ``reference`` is
+    ``[B, R, T, Nv, C]``. Used as the ``RMSE_base`` target for prior-scale
+    auto-calibration.
+    """
+    if base_prediction.ndim != 5 or reference.ndim != 5:
+        raise ValueError(
+            "base_prediction and reference must both be 5-D "
+            f"([B,K,T,Nv,C] / [B,R,T,Nv,C]); got {tuple(base_prediction.shape)} "
+            f"and {tuple(reference.shape)}."
+        )
+    pred_mean = base_prediction.mean(dim=1)
+    ref_mean = reference.mean(dim=1)
+    mse = _weighted_mean((pred_mean - ref_mean).pow(2), weights)
+    return float(mse.clamp_min(0.0).sqrt().item())
+
+
+def calibrate_prior_scale(
+    *,
+    module: NEONEpistemicCorrection,
+    features: torch.Tensor,
+    z_e: torch.Tensor,
+    base_rmse: float,
+    target_fraction: float = 0.10,
+    eps: float = 1.0e-8,
+) -> float:
+    """Return ``alpha`` s.t. ``Std_ze[alpha * E^P(phi, z_e)] ~= f * RMSE_base``.
+
+    Measures the epistemic (z_e) standard deviation of the *unit-scale* prior
+    correction ``E^P`` on a calibration batch and picks ``alpha`` so the scaled
+    prior spread matches ``target_fraction * base_rmse``. Because std is linear
+    in scale, this is exact for the same aggregation used here. Robust to a
+    degenerate (near-zero) prior spread via ``eps``.
+    """
+    with torch.no_grad():
+        prior = module.prior_branch(features, z_e)  # [B, M, K, T, Nv, C]
+        if int(prior.shape[1]) > 1:
+            spread = float(prior.std(dim=1, unbiased=True).mean().item())
+        else:
+            spread = 0.0
+    return float(target_fraction) * float(base_rmse) / max(spread, eps)
+
+
 def compute_stage2_loss(
     *,
     prediction: torch.Tensor,
@@ -605,6 +724,7 @@ def save_neon_stage2_checkpoint(
             "n_hidden_layers": module.n_hidden_layers,
             "alpha": module.alpha,
             "detach_features": module.detach_features,
+            "lead_time_dim": module.lead_time_dim,
         },
     }
     torch.save(payload, path)
