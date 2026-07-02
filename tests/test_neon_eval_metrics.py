@@ -129,3 +129,26 @@ def test_evaluate_neon_nested_bundles_predictive_and_epistemic():
     ):
         assert key in bundle
     assert all(isinstance(v, float) for v in bundle.values())
+
+
+def test_predictive_metrics_accept_TNvC_weights_regression():
+    # Regression: [T, Nv, C] weights (the shape NEONFamilySample.weights uses)
+    # must broadcast through the weighted RMSE/Brier path. Previously
+    # _weighted_mean left-padded on the wrong axis and this raised.
+    pred = torch.zeros(1, 2, 1, 1, 2, 1)
+    ref = torch.zeros(1, 2, 1, 2, 1)
+    pred[..., 1, :] = 1.0   # node 1 forecast exceeds; ref never
+    weights = torch.tensor([[[1.0], [0.0]]])  # [T, Nv, C] = [1, 2, 1]
+    assert weights.shape == (1, 2, 1)
+    m = neon_predictive_metrics(pred, ref, thresholds=(0.5,), weights=weights)
+    # node 1 disagreement masked out -> brier 0, rmse 0 (only wet node 0 agrees)
+    assert m["brier_wd_exceed_0.5m"] == pytest.approx(0.0)
+    assert m["ensemble_mean_rmse"] == pytest.approx(0.0)
+
+
+def test_evaluate_neon_nested_accepts_TNvC_weights_regression():
+    pred = torch.randn(1, 4, 3, 2, 5, 1).abs()
+    ref = torch.randn(1, 6, 2, 5, 1).abs()
+    weights = torch.ones(2, 5, 1)  # [T, Nv, C]
+    bundle = evaluate_neon_nested(pred, ref, thresholds=(0.1, 0.3, 0.5), weights=weights)
+    assert torch.isfinite(torch.tensor(list(bundle.values()))).all()

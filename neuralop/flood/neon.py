@@ -343,8 +343,12 @@ def _weighted_mean(values: torch.Tensor, weights: torch.Tensor | None = None) ->
     if weights is None:
         return values.mean()
     weights = weights.to(device=values.device, dtype=values.dtype)
+    # Left-pad (prepend) singleton dims so a [T, Nv, C] weight broadcasts against
+    # [B, T, Nv, C] or [B, M, K, T, Nv, C] values per standard right-aligned
+    # broadcasting -- matching the [T, Nv, C] contract used by the metric APIs
+    # and _normalize_score_weights.
     while weights.ndim < values.ndim:
-        weights = weights.unsqueeze(1)
+        weights = weights.unsqueeze(0)
     try:
         torch.broadcast_shapes(values.shape, weights.shape)
     except RuntimeError as exc:
