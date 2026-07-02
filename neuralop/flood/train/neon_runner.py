@@ -145,6 +145,7 @@ def run_neon_stage2_training(
     stage1_alias: str = "best_model",
     cache_features: bool = False,
     cache_device: str = "cpu",
+    epistemic_chunk_size: Optional[int] = None,
 ):
     """End-to-end NEON Stage-2 training orchestration.
 
@@ -249,4 +250,5 @@ def run_neon_stage2_training(
         stage1_model=stage1,
         checkpoint_path=checkpoint_path,
         checkpoint_metadata=metadata,
+        epistemic_chunk_size=epistemic_chunk_size,
     )

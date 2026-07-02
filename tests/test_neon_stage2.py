@@ -42,6 +42,7 @@ freeze_stage1_model = neon.freeze_stage1_model
 graph_smoothness_penalty = neon.graph_smoothness_penalty
 nested_variance_components = neon.nested_variance_components
 per_epistemic_fair_crps = neon.per_epistemic_fair_crps
+stage2_fit_score = neon.stage2_fit_score
 positivity_penalty = neon.positivity_penalty
 load_neon_stage2_checkpoint = neon.load_neon_stage2_checkpoint
 save_neon_stage2_checkpoint = neon.save_neon_stage2_checkpoint
@@ -141,6 +142,22 @@ def test_per_epistemic_fair_crps_scores_each_epistemic_particle_separately():
     assert per_particle.shape == (1, 2)
     assert torch.allclose(per_particle[0], torch.tensor([0.0, 9.0]))
     assert torch.isclose(mean_score, torch.tensor(4.5))
+
+
+def test_stage2_fit_score_honors_configured_objective_modes():
+    pred = torch.tensor(
+        [[[[[[0.0]]], [[[2.0]]]], [[[[4.0]]], [[[6.0]]]]]]
+    )  # [B=1, M=2, K=2, T=1, Nv=1, C=1]
+    ref = torch.tensor([[[[[0.0]]], [[[2.0]]]]])  # [B=1, R=2, T=1, Nv=1, C=1]
+
+    per_epi = stage2_fit_score(pred, ref, objective="per_epistemic_fcrps")
+    pooled = stage2_fit_score(pred, ref, objective="pooled_fcrps")
+    l2_mean = stage2_fit_score(pred, ref, objective="l2_mean")
+
+    assert torch.isclose(per_epi, per_epistemic_fair_crps(pred, ref, reduction="mean"))
+    assert pooled != per_epi
+    # Flattened forecast mean is 3, reference mean is 1 -> MSE = 4.
+    assert torch.isclose(l2_mean, torch.tensor(4.0))
 
 
 def test_per_epistemic_fair_crps_honors_normalized_weights():
@@ -283,3 +300,32 @@ def test_nested_forecast_artifact_adapter_flattens_members_and_preserves_ids():
     assert loaded["ref_members_wd"].shape == (5, 3, 4)
     assert loaded["member_epistemic_id"] == [0, 0, 1, 1]
     assert loaded["member_aleatory_id"] == [0, 1, 0, 1]
+
+
+def test_epistemic_chunking_matches_full_fit():
+    # M-chunking correctness: per-epistemic fair CRPS averaged over M must equal
+    # the size-weighted sum of per-chunk means. This underwrites the
+    # epistemic_chunk_size gradient-accumulation path used to fit big rollouts.
+    torch.manual_seed(0)
+    base = torch.zeros(2, 3, 4, 5, 1)          # [B, K, T, Nv, C]
+    features = torch.randn(2, 3, 4, 5, 6)      # [B, K, T, Nv, C_phi]
+    z_e = torch.randn(4, 4)                     # [M, d_e]
+    ref = torch.randn(2, 3, 4, 5, 1).abs()     # [B, R, T, Nv, C]
+    head = NEONEpistemicCorrection(
+        feature_channels=6, out_channels=1, epistemic_dim=4, hidden_channels=8, alpha=0.2
+    )
+    head.eval()
+    with torch.no_grad():
+        full = float(
+            stage2_fit_score(
+                head(base, features, z_e).prediction, ref, objective="per_epistemic_fcrps"
+            ).item()
+        )
+        M = int(z_e.shape[0])
+        acc = 0.0
+        for m in range(M):
+            pred_m = head(base, features, z_e[m : m + 1]).prediction
+            acc += float(
+                stage2_fit_score(pred_m, ref, objective="per_epistemic_fcrps").item()
+            ) * (1.0 / M)
+    assert abs(acc - full) <= 1e-5 * abs(full) + 1e-6

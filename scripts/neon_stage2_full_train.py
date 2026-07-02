@@ -121,6 +121,7 @@ def main() -> int:
         calibrate_prior=True,
         cache_features=True,      # CPU fp16 cache of the frozen rollout
         cache_device="cpu",
+        epistemic_chunk_size=1,   # process one z_e at a time so backward fits on a 40GB A100
     )
     LOG.info("training done in %.1f min", (time.time() - t1) / 60.0)
 

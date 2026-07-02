@@ -18,6 +18,7 @@ from neuralop.flood.neon import (
     per_epistemic_fair_crps,
     sample_epistemic_indices,
     save_neon_stage2_checkpoint,
+    stage2_fit_score,
 )
 
 
@@ -356,6 +357,8 @@ def neon_stage2_training_step(
     zero_threshold: float | torch.Tensor = 0.0,
     loss_weights: NEONStage2LossWeights | None = None,
     grad_clip_norm: float | None = None,
+    objective: str = "per_epistemic_fcrps",
+    epistemic_chunk_size: int | None = None,
 ) -> NEONStage2LossOutput:
     """Perform one Stage-2 optimization step from frozen FGNO tensors."""
 
@@ -368,19 +371,58 @@ def neon_stage2_training_step(
             dtype=features.dtype,
         )
     optimizer.zero_grad(set_to_none=True)
-    out = module(base_prediction, features, z_e)
-    losses = compute_stage2_loss(
-        prediction=out.prediction,
-        reference=reference,
-        correction=out.correction,
-        module=module,
-        weights=weights,
-        edge_index=edge_index,
-        edge_weights=edge_weights,
-        zero_threshold=zero_threshold,
-        loss_weights=loss_weights,
-    )
-    losses.total.backward()
+    total_m = int(z_e.shape[0])
+    chunk = int(epistemic_chunk_size) if epistemic_chunk_size else total_m
+    chunk = max(1, min(chunk, total_m))
+    if chunk >= total_m:
+        out = module(base_prediction, features, z_e)
+        losses = compute_stage2_loss(
+            prediction=out.prediction,
+            reference=reference,
+            correction=out.correction,
+            module=module,
+            weights=weights,
+            edge_index=edge_index,
+            edge_weights=edge_weights,
+            zero_threshold=zero_threshold,
+            loss_weights=loss_weights,
+            objective=objective,
+        )
+        losses.total.backward()
+    else:
+        # Chunk the epistemic (M) axis with gradient accumulation to cap
+        # activation memory. Per-epistemic fair CRPS and the correction
+        # penalties are computed independently per z_e, so the mean over M
+        # equals the size-weighted sum of per-chunk means (exact gradients).
+        agg = {n: 0.0 for n in ("total", "fit", "rpf", "graph", "time", "pos", "mag")}
+        for start in range(0, total_m, chunk):
+            z_chunk = z_e[start : start + chunk]
+            scale = float(z_chunk.shape[0]) / float(total_m)
+            out = module(base_prediction, features, z_chunk)
+            losses_c = compute_stage2_loss(
+                prediction=out.prediction,
+                reference=reference,
+                correction=out.correction,
+                module=module,
+                weights=weights,
+                edge_index=edge_index,
+                edge_weights=edge_weights,
+                zero_threshold=zero_threshold,
+                loss_weights=loss_weights,
+                objective=objective,
+            )
+            (losses_c.total * scale).backward()
+            for n in agg:
+                agg[n] += float(getattr(losses_c, n).item()) * scale
+        losses = NEONStage2LossOutput(
+            total=torch.tensor(agg["total"]),
+            fit=torch.tensor(agg["fit"]),
+            rpf=torch.tensor(agg["rpf"]),
+            graph=torch.tensor(agg["graph"]),
+            time=torch.tensor(agg["time"]),
+            pos=torch.tensor(agg["pos"]),
+            mag=torch.tensor(agg["mag"]),
+        )
     if grad_clip_norm is not None:
         torch.nn.utils.clip_grad_norm_(module.trainable_branch.parameters(), float(grad_clip_norm))
     optimizer.step()
@@ -478,8 +520,10 @@ def _evaluate_neon_validation(
     k: int,
     d_e: int,
     generator: Optional[torch.Generator],
+    objective: str = "per_epistemic_fcrps",
+    epistemic_chunk_size: int | None = None,
 ) -> float:
-    """Mean per-epistemic fair CRPS over validation families (no gradients)."""
+    """Mean configured Stage-2 fit score over validation families (no gradients)."""
     module.eval()
     total = 0.0
     count = 0
@@ -492,16 +536,23 @@ def _evaluate_neon_validation(
                 dtype=batch.features.dtype,
                 generator=generator,
             )
-            out = module(batch.base_prediction, batch.features, z_e)
-            fit = per_epistemic_fair_crps(
-                out.prediction,
-                _reference_with_batch_dim(family.reference).to(
-                    device=out.prediction.device, dtype=out.prediction.dtype
-                ),
-                weights=family.weights,
-                reduction="mean",
-            )
-            total += float(fit.item())
+            ref = _reference_with_batch_dim(family.reference)
+            total_m = int(z_e.shape[0])
+            chunk = int(epistemic_chunk_size) if epistemic_chunk_size else total_m
+            chunk = max(1, min(chunk, total_m))
+            fit_val = 0.0
+            for start in range(0, total_m, chunk):
+                z_chunk = z_e[start : start + chunk]
+                scale = float(z_chunk.shape[0]) / float(total_m)
+                out = module(batch.base_prediction, batch.features, z_chunk)
+                fit = stage2_fit_score(
+                    out.prediction,
+                    ref.to(device=out.prediction.device, dtype=out.prediction.dtype),
+                    weights=family.weights,
+                    objective=objective,
+                )
+                fit_val += float(fit.item()) * scale
+            total += fit_val
             count += 1
     return total / max(count, 1)
 
@@ -575,6 +626,8 @@ def train_neon_stage2_epochs(
     checkpoint_path: Optional[Any] = None,
     checkpoint_metadata: Optional[Mapping[str, Any]] = None,
     stage1_model: Optional[nn.Module] = None,
+    objective: str = "per_epistemic_fcrps",
+    epistemic_chunk_size: Optional[int] = None,
 ) -> NEONTrainingResult:
     """Run the family-level Stage-2 epoch loop.
 
@@ -624,6 +677,8 @@ def train_neon_stage2_epochs(
                 zero_threshold=zero_threshold,
                 loss_weights=loss_weights,
                 grad_clip_norm=grad_clip_norm,
+                objective=objective,
+                epistemic_chunk_size=epistemic_chunk_size,
             )
             fit_sum += float(losses.fit.item())
             total_sum += float(losses.total.item())
@@ -637,6 +692,8 @@ def train_neon_stage2_epochs(
             k=int(k_train),
             d_e=int(d_e),
             generator=generator,
+            objective=objective,
+            epistemic_chunk_size=epistemic_chunk_size,
         )
         history.append(
             {
@@ -681,4 +738,6 @@ def build_epinet_from_config(
         hidden_channels=int(hidden_channels),
         alpha=alpha,
         lead_time_dim=int(getattr(config, "lead_time_dim", 0)),
+        za_dependent=str(getattr(config, "dependency", "za_dependent")).strip().lower()
+        == "za_dependent",
     )
