@@ -22,6 +22,7 @@ from neuralop.flood.neon import (
     sample_epistemic_indices,
 )
 from neuralop.flood.train.neon import (
+    FrozenFGNOFeatureBatch,
     NEONFamilySample,
     build_epinet_from_config,
     build_neon_stage2_metadata,
@@ -82,6 +83,49 @@ def make_feature_collector_from_frozen_model(
     return collector
 
 
+def make_cached_feature_collector(
+    base_collector,
+    *,
+    cache_device: str | torch.device = "cpu",
+    cache_dtype: torch.dtype = torch.float16,
+):
+    """Wrap a feature collector so each family's frozen rollout runs only once.
+
+    The frozen-FGNO AR rollout is the dominant per-epoch cost; the epoch loop
+    otherwise recollects it every epoch. This wrapper computes each family's
+    ``(base_prediction, features)`` on first sight, stashes them on
+    ``cache_device`` (CPU by default) in ``cache_dtype`` (fp16 to halve the
+    footprint), and on subsequent epochs returns the cached tensors moved back
+    to the original compute device/dtype. Trades per-epoch aleatory resampling
+    for a large speedup: the K aleatory members are fixed per family across
+    epochs (epistemic ``z_e`` is still resampled each epoch by the loop).
+    """
+    cache: dict[str, tuple] = {}
+
+    def collector(family: NEONFamilySample, *, num_aleatory: int, generator=None):
+        key = str(family.family_id)
+        hit = cache.get(key)
+        if hit is None:
+            batch = base_collector(family, num_aleatory=num_aleatory, generator=generator)
+            dev, dt = batch.features.device, batch.features.dtype
+            cache[key] = (
+                batch.base_prediction.detach().to(device=cache_device, dtype=cache_dtype),
+                batch.features.detach().to(device=cache_device, dtype=cache_dtype),
+                batch.aleatory_latents.detach().to(device=cache_device),
+                dev,
+                dt,
+            )
+            return batch
+        base_c, feat_c, lat_c, dev, dt = hit
+        return FrozenFGNOFeatureBatch(
+            base_prediction=base_c.to(device=dev, dtype=dt),
+            features=feat_c.to(device=dev, dtype=dt),
+            aleatory_latents=lat_c.to(device=dev),
+        )
+
+    return collector
+
+
 def run_neon_stage2_training(
     *,
     config: Any,
@@ -99,6 +143,8 @@ def run_neon_stage2_training(
     normalizer_fingerprint: Optional[dict] = None,
     structural_dry_policy: Any = None,
     stage1_alias: str = "best_model",
+    cache_features: bool = False,
+    cache_device: str = "cpu",
 ):
     """End-to-end NEON Stage-2 training orchestration.
 
@@ -122,6 +168,10 @@ def run_neon_stage2_training(
         latent_dim=latent_dim,
         generator=generator,
     )
+    # Wrap for caching before the probe so the probe populates the cache and the
+    # frozen rollout for family[0] is not recomputed in epoch 0.
+    if cache_features:
+        collector = make_cached_feature_collector(collector, cache_device=cache_device)
 
     # Probe the frozen feature width from one family to size the EpiNet.
     probe = collector(train_families[0], num_aleatory=max(2, int(config.k_train)), generator=generator)
