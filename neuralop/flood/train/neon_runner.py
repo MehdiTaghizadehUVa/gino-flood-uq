@@ -144,7 +144,9 @@ def run_neon_stage2_training(
         )
         rmse = base_rmse_from_reference(
             probe.base_prediction,
-            train_families[0].reference.unsqueeze(0).to(probe.features.dtype),
+            train_families[0].reference.unsqueeze(0).to(
+                device=probe.features.device, dtype=probe.features.dtype
+            ),
         )
         alpha = calibrate_prior_scale(
             module=module, features=probe.features, z_e=z_e,

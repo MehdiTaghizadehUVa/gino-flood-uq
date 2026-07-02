@@ -85,10 +85,20 @@ def sample_epistemic_indices(
         raise ValueError("num_particles must be >= 1.")
     if int(epistemic_dim) < 1:
         raise ValueError("epistemic_dim must be >= 1.")
+    target_device = torch.device(device)
+    # A torch.Generator is bound to a device; torch.randn forbids a generator
+    # whose device differs from the requested device. When they differ (e.g. a
+    # CPU generator driving CUDA sampling), draw on the generator's device then
+    # move -- preserving the reproducible sample across the CPU/GPU boundary.
+    if generator is not None and generator.device.type != target_device.type:
+        sampled = torch.randn(
+            int(num_particles), int(epistemic_dim), dtype=dtype, generator=generator
+        )
+        return sampled.to(target_device)
     return torch.randn(
         int(num_particles),
         int(epistemic_dim),
-        device=device,
+        device=target_device,
         dtype=dtype,
         generator=generator,
     )

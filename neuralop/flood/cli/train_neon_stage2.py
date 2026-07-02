@@ -170,13 +170,52 @@ def _load_frozen_stage1(stage1_checkpoint: Any):  # pragma: no cover - GPU/infra
 def _build_grouped_families(data_root: Any, config: NEONStage2Config):  # pragma: no cover
     """Build (train, val) NEONFamilySample splits from grouped-hydrograph data.
 
-    Kept as a seam onto the existing grouped-hydrograph rollout dataset; the
-    training orchestration and epoch loop are exercised with fakes.
+    ``data_root`` is the path to a coastal flood *eval* YAML config whose
+    ``data``/``rollout_data`` sections describe the grouped-hydrograph test set
+    (R>1 HEC-RAS references per hydrograph). Normalizers are taken from the
+    frozen Stage-1 bundle prepared by :func:`_load_frozen_stage1` (so the
+    references are normalized in the same space as the model), and the shared
+    rollout dataset builder + NEON family converter turn the per-hydrograph
+    samples into train/val ``NEONFamilySample`` splits.
     """
-    raise NotImplementedError(
-        "Wire _build_grouped_families to the grouped-hydrograph family loader "
-        "(neuralop.flood.eval.datasets) before running real Stage-2 training, "
-        "or pass build_families_fn explicitly."
+    import logging
+    import sys as _sys
+
+    from neuralop.flood.train.neon_families import build_families_from_config
+    from neuralop.flood.utils.runtime_core import (
+        load_config_and_setup,
+        parse_target_variables,
+    )
+
+    prepared = getattr(_load_frozen_stage1, "last_prepared", None)
+    if prepared is None:
+        raise RuntimeError(
+            "_build_grouped_families needs the frozen Stage-1 bundle's normalizers; "
+            "call _load_frozen_stage1 (load_stage1_fn) before building families."
+        )
+    normalizers = prepared["normalizers"]
+
+    # Load the flood eval config via the shared runtime loader (reads
+    # --config_path from argv), isolating our own argv so it does not clash.
+    saved_argv = list(_sys.argv)
+    try:
+        _sys.argv = [saved_argv[0] if saved_argv else "neon", "--config_path", str(data_root)]
+        flood_config, _device, _is_logger = load_config_and_setup()
+    finally:
+        _sys.argv = saved_argv
+
+    target_variables = parse_target_variables(
+        getattr(flood_config.data, "target_variables", ["wd"])
+    )
+    logger = logging.getLogger("neon_stage2.families")
+    return build_families_from_config(
+        flood_config,
+        normalizers,
+        target_variables,
+        logger,
+        rollout_length=getattr(config, "rollout_length", None),
+        max_families=getattr(config, "max_families", None),
+        val_fraction=float(getattr(config, "val_fraction", 0.1)),
     )
 
 
