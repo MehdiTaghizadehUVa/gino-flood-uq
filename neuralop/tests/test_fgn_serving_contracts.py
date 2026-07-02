@@ -19,6 +19,7 @@ from neuralop.flood.serving.result_cache import (
     LocalCacheArtifactStore,
     ResultCache,
     ResultCacheRunRole,
+    RESULT_CACHE_PRODUCT_SCHEMA_VERSION,
     build_result_cache_key,
 )
 from neuralop.flood.serving.run_spec import RunSpec, RunStateError, RunStatus
@@ -188,6 +189,14 @@ def test_result_cache_key_uses_scientific_fingerprint_not_csv_bytes(tmp_path):
     assert build_result_cache_key(run_spec=changed, forcing_input=forcing_a, bundle=bundle) != (
         build_result_cache_key(run_spec=spec_a, forcing_input=forcing_a, bundle=bundle)
     )
+
+    assert RESULT_CACHE_PRODUCT_SCHEMA_VERSION == "fgn-serving-products-v2-dem-hecras-alpha055"
+    assert build_result_cache_key(
+        run_spec=spec_a,
+        forcing_input=forcing_a,
+        bundle=bundle,
+        product_schema_version="fgn-serving-products-v1",
+    ) != build_result_cache_key(run_spec=spec_a, forcing_input=forcing_a, bundle=bundle)
 
 
 def test_completed_duplicate_materializes_private_run_from_result_cache(tmp_path):
