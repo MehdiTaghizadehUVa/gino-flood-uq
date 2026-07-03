@@ -153,3 +153,29 @@ def test_runner_auto_calibrates_prior_scale_away_from_placeholder(tmp_path):
     # unless calibration coincidentally lands there).
     assert meta["alpha"] is not None
     assert torch.isfinite(torch.tensor(meta["alpha"]))
+
+
+def test_disk_cache_collects_once_and_round_trips(tmp_path):
+    # cache_dir mode: first call rolls the base collector and writes one file;
+    # second call must load from disk (no recollection) and reproduce the
+    # tensors up to fp16 quantization.
+    calls = {"n": 0}
+
+    def base(family, *, num_aleatory, generator=None):
+        calls["n"] += 1
+        g = torch.Generator().manual_seed(7)
+        return train_neon.FrozenFGNOFeatureBatch(
+            base_prediction=torch.randn(1, num_aleatory, T, Nv, C, generator=g),
+            features=torch.randn(1, num_aleatory, T, Nv, Cphi, generator=g),
+            aleatory_latents=torch.randn(num_aleatory, 2, generator=g),
+        )
+
+    fam = NEONFamilySample(family_id="TR000001", reference=torch.zeros(R, T, Nv, C))
+    coll = runner.make_cached_feature_collector(base, cache_dir=tmp_path)
+    first = coll(fam, num_aleatory=4)
+    second = coll(fam, num_aleatory=4)
+    assert calls["n"] == 1
+    assert (tmp_path / "TR000001_k4.pt").exists()
+    assert second.features.dtype == first.features.dtype
+    assert torch.allclose(first.features, second.features, atol=1e-2)
+    assert torch.allclose(first.base_prediction, second.base_prediction, atol=1e-2)

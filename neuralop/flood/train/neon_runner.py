@@ -9,6 +9,7 @@ real adapters are validated by a GPU smoke against a concrete checkpoint/dataset
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Any, Callable, Optional, Sequence, Tuple
 
@@ -88,6 +89,7 @@ def make_cached_feature_collector(
     *,
     cache_device: str | torch.device = "cpu",
     cache_dtype: torch.dtype = torch.float16,
+    cache_dir: Optional[Any] = None,
 ):
     """Wrap a feature collector so each family's frozen rollout runs only once.
 
@@ -99,22 +101,50 @@ def make_cached_feature_collector(
     to the original compute device/dtype. Trades per-epoch aleatory resampling
     for a large speedup: the K aleatory members are fixed per family across
     epochs (epistemic ``z_e`` is still resampled each epoch by the loop).
+
+    With ``cache_dir`` set, entries are stored as one ``<family_id>.pt`` file
+    per family instead of in RAM (written atomically via tmp+rename so
+    concurrent jobs can share a cache). Use this when the full family set does
+    not fit in memory (e.g. 500 families at T=94 is ~570 GB fp16).
     """
     cache: dict[str, tuple] = {}
+    dir_path = None
+    if cache_dir is not None:
+        dir_path = Path(cache_dir)
+        dir_path.mkdir(parents=True, exist_ok=True)
+
+    def _store(batch) -> None:
+        payload = {
+            "base": batch.base_prediction.detach().to(device=cache_device, dtype=cache_dtype),
+            "features": batch.features.detach().to(device=cache_device, dtype=cache_dtype),
+            "latents": batch.aleatory_latents.detach().to(device=cache_device),
+            "device": str(batch.features.device),
+            "dtype": batch.features.dtype,
+        }
+        return payload
 
     def collector(family: NEONFamilySample, *, num_aleatory: int, generator=None):
         key = str(family.family_id)
+        if dir_path is not None:
+            fpath = dir_path / f"{key}_k{int(num_aleatory)}.pt"
+            if fpath.exists():
+                p = torch.load(fpath, map_location="cpu")
+                dev, dt = torch.device(p["device"]), p["dtype"]
+                return FrozenFGNOFeatureBatch(
+                    base_prediction=p["base"].to(device=dev, dtype=dt),
+                    features=p["features"].to(device=dev, dtype=dt),
+                    aleatory_latents=p["latents"].to(device=dev),
+                )
+            batch = base_collector(family, num_aleatory=num_aleatory, generator=generator)
+            tmp = fpath.with_suffix(f".tmp{os.getpid()}")
+            torch.save(_store(batch), tmp)
+            os.replace(tmp, fpath)
+            return batch
         hit = cache.get(key)
         if hit is None:
             batch = base_collector(family, num_aleatory=num_aleatory, generator=generator)
-            dev, dt = batch.features.device, batch.features.dtype
-            cache[key] = (
-                batch.base_prediction.detach().to(device=cache_device, dtype=cache_dtype),
-                batch.features.detach().to(device=cache_device, dtype=cache_dtype),
-                batch.aleatory_latents.detach().to(device=cache_device),
-                dev,
-                dt,
-            )
+            p = _store(batch)
+            cache[key] = (p["base"], p["features"], p["latents"], batch.features.device, batch.features.dtype)
             return batch
         base_c, feat_c, lat_c, dev, dt = hit
         return FrozenFGNOFeatureBatch(
@@ -145,7 +175,10 @@ def run_neon_stage2_training(
     stage1_alias: str = "best_model",
     cache_features: bool = False,
     cache_device: str = "cpu",
+    cache_dir: Optional[Any] = None,
     epistemic_chunk_size: Optional[int] = None,
+    val_seed: Optional[int] = None,
+    prior_seed: Optional[int] = None,
 ):
     """End-to-end NEON Stage-2 training orchestration.
 
@@ -172,12 +205,18 @@ def run_neon_stage2_training(
     # Wrap for caching before the probe so the probe populates the cache and the
     # frozen rollout for family[0] is not recomputed in epoch 0.
     if cache_features:
-        collector = make_cached_feature_collector(collector, cache_device=cache_device)
+        collector = make_cached_feature_collector(
+            collector, cache_device=cache_device, cache_dir=cache_dir
+        )
 
     # Probe the frozen feature width from one family to size the EpiNet.
     probe = collector(train_families[0], num_aleatory=max(2, int(config.k_train)), generator=generator)
     feature_channels = int(probe.features.shape[-1])
 
+    # Seed the EpiNet construction so the randomized prior branch (and the
+    # trainable init) is reproducible from the recorded prior_seed.
+    if prior_seed is not None:
+        torch.manual_seed(int(prior_seed))
     module = build_epinet_from_config(
         config,
         feature_channels=feature_channels,
@@ -223,7 +262,7 @@ def run_neon_stage2_training(
         k_eval=int(config.k_eval),
         m_eval=int(config.m_eval),
         alpha=module.alpha,
-        prior_seed=None,
+        prior_seed=prior_seed,
         loss_weights=config.to_loss_weights_dict(),
         optimizer_settings={
             "learning_rate": float(config.learning_rate),
@@ -251,4 +290,5 @@ def run_neon_stage2_training(
         checkpoint_path=checkpoint_path,
         checkpoint_metadata=metadata,
         epistemic_chunk_size=epistemic_chunk_size,
+        val_seed=val_seed,
     )

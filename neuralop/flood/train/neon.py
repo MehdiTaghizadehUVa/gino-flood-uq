@@ -628,6 +628,7 @@ def train_neon_stage2_epochs(
     stage1_model: Optional[nn.Module] = None,
     objective: str = "per_epistemic_fcrps",
     epistemic_chunk_size: Optional[int] = None,
+    val_seed: Optional[int] = None,
 ) -> NEONTrainingResult:
     """Run the family-level Stage-2 epoch loop.
 
@@ -684,6 +685,13 @@ def train_neon_stage2_epochs(
             total_sum += float(losses.total.item())
             n_batches += 1
 
+        # A fixed val_seed redraws the SAME validation z_e (and any collector
+        # sampling) every epoch, so best-epoch selection compares like with
+        # like instead of riding sampling noise.
+        val_generator = generator
+        if val_seed is not None:
+            val_generator = torch.Generator()
+            val_generator.manual_seed(int(val_seed))
         val_fit = _evaluate_neon_validation(
             module=module,
             families=val_families,
@@ -691,7 +699,7 @@ def train_neon_stage2_epochs(
             m=int(m_train),
             k=int(k_train),
             d_e=int(d_e),
-            generator=generator,
+            generator=val_generator,
             objective=objective,
             epistemic_chunk_size=epistemic_chunk_size,
         )
