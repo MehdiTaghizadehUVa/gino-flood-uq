@@ -26,7 +26,7 @@ from neuralop.flood.serving.storage import ArtifactRef, ArtifactStore
 
 
 RESULT_CACHE_SCHEMA_VERSION = 1
-RESULT_CACHE_PRODUCT_SCHEMA_VERSION = "fgn-serving-products-v3-dem-context"
+RESULT_CACHE_PRODUCT_SCHEMA_VERSION = "fgn-serving-products-v4-dem-context"
 
 _USER_SCOPED_ARTIFACTS = {
     "forcing.csv",

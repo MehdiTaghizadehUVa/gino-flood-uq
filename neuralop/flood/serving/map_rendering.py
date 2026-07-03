@@ -189,6 +189,26 @@ def _cartographic_context(
     )
 
 
+def serving_cartographic_context(
+    *,
+    x: np.ndarray,
+    y: np.ndarray,
+    elevation_raw: np.ndarray | None,
+    out_dir: str,
+    visualization_config: Any | None,
+    eval_render: Any,
+) -> dict[str, Any]:
+    """Return the serving map background context used by PNG and GIF products."""
+    return _cartographic_context(
+        x=x,
+        y=y,
+        elevation_raw=elevation_raw,
+        out_dir=out_dir,
+        visualization_config=visualization_config,
+        eval_render=eval_render,
+    )
+
+
 def compute_rivanna_style_data_viewport(
     *,
     geometry_xy: np.ndarray,

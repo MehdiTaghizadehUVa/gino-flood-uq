@@ -1728,7 +1728,7 @@ class ForecastProductBuilder:
         import matplotlib.pyplot as plt
         from matplotlib.animation import PillowWriter
         from neuralop.flood.eval import render as eval_render
-        from neuralop.flood.serving.map_rendering import SERVING_MAP_FACE_COLOR, serving_visualization_config
+        from neuralop.flood.serving.map_rendering import SERVING_MAP_FACE_COLOR, serving_cartographic_context
 
         with mpl.rc_context(
             {
@@ -1747,13 +1747,13 @@ class ForecastProductBuilder:
             dpi = 180
             renderer = eval_render._build_spatial_renderer(x, y, figsize=fig_size, dpi=dpi, n_rows=1, n_cols=1)
             elevation_raw = metadata.get("elevation_raw")
-            visualization_config = serving_visualization_config(metadata.get("visualization_config"))
-            context = eval_render._cartographic_context(
+            context = serving_cartographic_context(
                 x=x,
                 y=y,
                 elevation_raw=np.asarray(elevation_raw, dtype=np.float64) if elevation_raw is not None else None,
                 out_dir=str(out_path.parent),
-                visualization_config=visualization_config,
+                visualization_config=metadata.get("visualization_config"),
+                eval_render=eval_render,
             )
             vmax = eval_render._wd_spatial_vmax(mean_by_time)
             if not np.isfinite(vmax) or vmax <= 0.0:
@@ -1858,7 +1858,7 @@ class ForecastProductBuilder:
         import matplotlib.pyplot as plt
         from matplotlib.animation import PillowWriter
         from neuralop.flood.eval import render as eval_render
-        from neuralop.flood.serving.map_rendering import SERVING_MAP_FACE_COLOR, serving_visualization_config
+        from neuralop.flood.serving.map_rendering import SERVING_MAP_FACE_COLOR, serving_cartographic_context
 
         with mpl.rc_context(
             {
@@ -1877,13 +1877,13 @@ class ForecastProductBuilder:
             dpi = 180
             renderer = eval_render._build_spatial_renderer(x, y, figsize=fig_size, dpi=dpi, n_rows=1, n_cols=1)
             elevation_raw = metadata.get("elevation_raw")
-            visualization_config = serving_visualization_config(metadata.get("visualization_config"))
-            context = eval_render._cartographic_context(
+            context = serving_cartographic_context(
                 x=x,
                 y=y,
                 elevation_raw=np.asarray(elevation_raw, dtype=np.float64) if elevation_raw is not None else None,
                 out_dir=str(out_path.parent),
-                visualization_config=visualization_config,
+                visualization_config=metadata.get("visualization_config"),
+                eval_render=eval_render,
             )
             initial_idx = next((idx for idx in range(n_time) if float(np.nanmax(prob_full[idx])) > 0.0), 0)
             fig, ax = plt.subplots(
