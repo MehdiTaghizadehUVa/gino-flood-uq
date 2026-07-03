@@ -139,3 +139,26 @@ def test_main_dry_run_prints_plan_and_returns_zero(tmp_path, capsys):
 def test_main_requires_config():
     with pytest.raises(SystemExit):
         main([])
+
+
+def test_eval_cli_dry_run_prints_torch_free_plan(capsys):
+    import json as _json
+
+    eval_cli = _load_module(
+        "neuralop.flood.cli.eval_neon_stage2",
+        "neuralop/flood/cli/eval_neon_stage2.py",
+        ("neuralop", "neuralop.flood", "neuralop.flood.cli"),
+    )
+    rc = eval_cli.main([
+        "--config", "/tmp/flood.yaml",
+        "--stage2-checkpoint", "/tmp/neon_stage2_best.pt",
+        "--stage1-bundle", "/tmp/bundle.json",
+        "--output-dir", "/tmp/out",
+        "--dry-run",
+    ])
+    assert rc == 0
+    plan = _json.loads(capsys.readouterr().out)
+    assert plan["m_eval"] == 32
+    assert plan["k_eval"] == 50
+    assert plan["families"] == "val"
+    assert plan["thresholds"] == [0.1, 0.3, 0.5]

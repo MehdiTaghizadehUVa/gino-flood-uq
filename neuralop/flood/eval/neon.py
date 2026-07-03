@@ -398,3 +398,142 @@ def write_variance_maps(
         plt.close(fig)
         paths.append(path)
     return paths
+
+
+# ---------------------------------------------------------------------------
+# Legacy-evaluator integration: PIT/rank, reliability, spread-skill
+# ---------------------------------------------------------------------------
+
+
+def nested_pit_rank_histograms(
+    prediction: torch.Tensor,
+    reference: torch.Tensor,
+    *,
+    pit_bins: int = 20,
+    seed: int = 0,
+    min_ref_depth: float | None = None,
+):
+    """PIT and rank histograms of the flattened ``M*K`` ensemble vs references.
+
+    Reuses the rollout evaluator's randomized tie-handling counts
+    (``_pit_rank_counts_from_reference``), looping over time steps so the
+    member-by-reference comparison never materializes the full horizon at once.
+    ``min_ref_depth`` restricts to cells where any reference member exceeds the
+    depth (PIT over the wettable signal instead of the dry background).
+    Depth-only (C=1) predictions are assumed.
+    """
+    import numpy as np
+
+    def _pit_rank_counts(pred_ens, ref_ens, pit_edges, n_ens, rng):
+        # Mirrors eval.metrics._pit_rank_counts_from_reference (randomized
+        # tie handling) without importing the heavy eval dependency chain.
+        less = np.sum(pred_ens[:, None, :] < ref_ens[None, :, :], axis=0).astype(np.int64)
+        equal = np.sum(pred_ens[:, None, :] == ref_ens[None, :, :], axis=0).astype(np.int64)
+        u = rng.random(size=less.shape, dtype=np.float64)
+        pit = (less + u * equal) / max(float(n_ens), 1.0)
+        valid = np.isfinite(pit)
+        pc = np.histogram(pit[valid], bins=pit_edges)[0].astype(np.float64)
+        rank = np.clip(less + np.floor(u * (equal + 1)).astype(np.int64), 0, n_ens)
+        rc = np.bincount(rank[valid], minlength=n_ens + 1).astype(np.float64)
+        return pc, rc
+
+    flat = flatten_nested_predictions(prediction)
+    B, MK, T, _, _ = flat.shape
+    pit_edges = np.linspace(0.0, 1.0, int(pit_bins) + 1)
+    rng = np.random.default_rng(int(seed))
+    pit_counts = np.zeros(int(pit_bins), dtype=np.float64)
+    rank_counts = np.zeros(MK + 1, dtype=np.float64)
+    for b in range(B):
+        for t in range(T):
+            pred = flat[b, :, t, :, 0].detach().cpu().numpy()
+            ref = reference[b, :, t, :, 0].detach().cpu().numpy()
+            if min_ref_depth is not None:
+                wet = ref.max(axis=0) > float(min_ref_depth)
+                if not wet.any():
+                    continue
+                pred = pred[:, wet]
+                ref = ref[:, wet]
+            pc, rc = _pit_rank_counts(pred, ref, pit_edges, MK, rng)
+            pit_counts += pc
+            rank_counts += rc
+    return {
+        "pit_edges": pit_edges.tolist(),
+        "pit_counts": pit_counts.tolist(),
+        "rank_counts": rank_counts.tolist(),
+    }
+
+
+def exceedance_reliability(
+    prediction: torch.Tensor,
+    reference: torch.Tensor,
+    *,
+    thresholds=(0.1, 0.3, 0.5),
+    n_bins: int = 10,
+):
+    """Reliability of exceedance probabilities vs reference frequencies.
+
+    For each threshold, bins the flattened-ensemble forecast exceedance
+    probability into ``n_bins`` and reports per-bin counts plus raw sums so
+    multiple families can be aggregated exactly before computing the curve.
+    """
+    flat = flatten_nested_predictions(prediction)
+    edges = torch.linspace(0.0, 1.0, int(n_bins) + 1)
+    out = {}
+    for thr in thresholds:
+        p_pred = (flat > float(thr)).to(torch.float64).mean(dim=1).reshape(-1)
+        p_ref = (reference > float(thr)).to(torch.float64).mean(dim=1).reshape(-1)
+        idx = torch.clamp(torch.bucketize(p_pred, edges[1:-1].to(p_pred.dtype)), 0, n_bins - 1)
+        bins = []
+        for i in range(int(n_bins)):
+            mask = idx == i
+            n = int(mask.sum())
+            bins.append(
+                {
+                    "bin_lo": float(edges[i]),
+                    "bin_hi": float(edges[i + 1]),
+                    "n": n,
+                    "sum_forecast_prob": float(p_pred[mask].sum()) if n else 0.0,
+                    "sum_observed_freq": float(p_ref[mask].sum()) if n else 0.0,
+                    "forecast_prob": float(p_pred[mask].mean()) if n else None,
+                    "observed_freq": float(p_ref[mask].mean()) if n else None,
+                }
+            )
+        out[f"{float(thr):g}m"] = bins
+    return out
+
+
+def spread_error_diagnostics(
+    prediction: torch.Tensor,
+    reference: torch.Tensor,
+    *,
+    n_bins: int = 10,
+):
+    """Spread-skill diagnostics of the flattened ``M*K`` ensemble.
+
+    Correlates per-(time, cell) ensemble spread (std over members) with the
+    absolute error of the ensemble mean vs the reference-ensemble mean, and
+    returns quantile-binned mean spread vs error RMSE (a calibrated ensemble
+    tracks the 1:1 line).
+    """
+    flat = flatten_nested_predictions(prediction)
+    spread = flat.std(dim=1, unbiased=True).reshape(-1).to(torch.float64)
+    err = (flat.mean(dim=1) - reference.mean(dim=1)).abs().reshape(-1).to(torch.float64)
+    xm = spread - spread.mean()
+    ym = err - err.mean()
+    denom = torch.sqrt(xm.pow(2).sum() * ym.pow(2).sum()).clamp_min(1.0e-12)
+    corr = float((xm * ym).sum() / denom)
+
+    qs = torch.quantile(spread, torch.linspace(0.0, 1.0, int(n_bins) + 1, dtype=torch.float64))
+    bins = []
+    for i in range(int(n_bins)):
+        lo, hi = qs[i], qs[i + 1]
+        mask = (spread >= lo) & (spread <= hi if i == n_bins - 1 else spread < hi)
+        n = int(mask.sum())
+        bins.append(
+            {
+                "mean_spread": float(spread[mask].mean()) if n else None,
+                "error_rmse": float(err[mask].pow(2).mean().sqrt()) if n else None,
+                "n": n,
+            }
+        )
+    return {"spread_error_corr": corr, "bins": bins}

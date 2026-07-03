@@ -164,3 +164,39 @@ def test_evaluate_neon_nested_accepts_TNvC_weights_regression():
     weights = torch.ones(2, 5, 1)  # [T, Nv, C]
     bundle = evaluate_neon_nested(pred, ref, thresholds=(0.1, 0.3, 0.5), weights=weights)
     assert torch.isfinite(torch.tensor(list(bundle.values()))).all()
+
+
+def test_pit_rank_histograms_detect_underdispersion():
+    # Ensemble entirely below every reference member: every PIT value is 1
+    # (last bin) and every rank is the top rank -- the classic underdispersion
+    # signature the histogram must expose.
+    pred = torch.zeros(1, 2, 2, 1, 3, 1)   # M=2, K=2 -> MK=4 members
+    ref = torch.ones(1, 3, 1, 3, 1)        # R=3 references, 3 cells
+    out = eval_neon.nested_pit_rank_histograms(pred, ref, pit_bins=5)
+    assert sum(out["pit_counts"]) == 9     # 3 refs x 3 cells x 1 step
+    assert out["pit_counts"][-1] == 9
+    assert out["rank_counts"][-1] == 9
+    assert len(out["rank_counts"]) == 5    # MK + 1
+
+
+def test_exceedance_reliability_perfect_when_forecast_matches_reference():
+    torch.manual_seed(0)
+    ref = (torch.rand(1, 10, 1, 50, 1) > 0.5).float()
+    pred = ref.reshape(1, 1, 10, 1, 50, 1).clone()   # forecast members == refs
+    out = eval_neon.exceedance_reliability(pred, ref, thresholds=(0.5,), n_bins=5)
+    occupied = [b for b in out["0.5m"] if b["n"]]
+    assert occupied
+    for b in occupied:
+        assert abs(b["forecast_prob"] - b["observed_freq"]) < 1e-9
+
+
+def test_spread_error_diagnostics_tracks_heteroscedastic_error():
+    torch.manual_seed(0)
+    B, M, K, T, Nv, C = 1, 4, 8, 1, 500, 1
+    scale = torch.linspace(0.1, 2.0, Nv).view(1, 1, 1, 1, Nv, 1)
+    pred = scale * torch.randn(B, M, K, T, Nv, C)
+    ref = torch.zeros(1, 5, T, Nv, C)
+    out = eval_neon.spread_error_diagnostics(pred, ref)
+    assert out["spread_error_corr"] > 0.4
+    assert len(out["bins"]) == 10
+    assert sum(b["n"] for b in out["bins"]) == Nv
