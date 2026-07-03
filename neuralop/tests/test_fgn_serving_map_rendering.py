@@ -1,3 +1,4 @@
+import numpy as np
 import pytest
 
 from neuralop.flood.eval import render as eval_render
@@ -57,3 +58,48 @@ def test_serving_visualization_respects_explicit_overrides():
     assert cfg["map"]["dem_vmax"] == pytest.approx(8.0)
     assert cfg["diagnostics"]["basemap_alpha"] == pytest.approx(0.18)
     assert cfg["wd"]["overlay_alpha"] == pytest.approx(0.7)
+
+
+def test_serving_visualization_uses_external_terrain_tif_env(monkeypatch, tmp_path):
+    terrain = tmp_path / "Terrain_V2.DEM1m_V2.tif"
+    terrain.write_bytes(b"placeholder")
+    monkeypatch.setenv("FGN_SERVING_TERRAIN_TIF", str(terrain))
+
+    cfg = serving_visualization_config()
+
+    assert cfg["map"]["terrain_tif"] == str(terrain)
+
+
+def test_serving_context_prefers_external_terrain_tif_over_dem_context(monkeypatch, tmp_path):
+    from neuralop.flood.serving import map_rendering
+
+    terrain = tmp_path / "Terrain_V2.DEM1m_V2.tif"
+    terrain.write_bytes(b"placeholder")
+    monkeypatch.setenv("FGN_SERVING_TERRAIN_TIF", str(terrain))
+
+    def _fail_dem_context(**kwargs):
+        raise AssertionError("dem_context fallback should not run when external terrain_tif is available")
+
+    class _FakeEvalRender:
+        @staticmethod
+        def _cartographic_context(*, x, y, elevation_raw, out_dir, visualization_config):
+            return {
+                "mode": "external_basemap",
+                "metadata": {"terrain_tif": visualization_config["map"]["terrain_tif"]},
+                "image": np.zeros((2, 2, 4), dtype=np.float32),
+                "extent": (0.0, 1.0, 0.0, 1.0),
+                "options": {},
+            }
+
+    monkeypatch.setattr(map_rendering, "_load_dem_context", _fail_dem_context)
+    context = map_rendering.serving_cartographic_context(
+        x=np.array([0.0, 1.0]),
+        y=np.array([0.0, 1.0]),
+        elevation_raw=np.array([0.0, 1.0]),
+        out_dir=str(tmp_path),
+        visualization_config={"map": {"dem_context_path": str(tmp_path / "dem_context.npz")}},
+        eval_render=_FakeEvalRender,
+    )
+
+    assert context["mode"] == "external_basemap"
+    assert context["metadata"]["terrain_tif"] == str(terrain)

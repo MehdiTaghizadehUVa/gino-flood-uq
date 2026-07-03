@@ -190,7 +190,7 @@ def test_result_cache_key_uses_scientific_fingerprint_not_csv_bytes(tmp_path):
         build_result_cache_key(run_spec=spec_a, forcing_input=forcing_a, bundle=bundle)
     )
 
-    assert RESULT_CACHE_PRODUCT_SCHEMA_VERSION == "fgn-serving-products-v4-dem-context"
+    assert RESULT_CACHE_PRODUCT_SCHEMA_VERSION == "fgn-serving-products-v5-external-terrain-tif"
     assert build_result_cache_key(
         run_spec=spec_a,
         forcing_input=forcing_a,

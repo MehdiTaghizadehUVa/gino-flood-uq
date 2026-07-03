@@ -11,6 +11,7 @@ import json
 import os
 import shutil
 from copy import deepcopy
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -70,16 +71,98 @@ def serving_visualization_config(visualization_config: Any | None = None) -> dic
     per-run overrides for map alpha, DEM range, colormaps, or thresholds.
     """
     if visualization_config is None:
-        return deepcopy(DEFAULT_SERVING_VISUALIZATION_CONFIG)
-    if not isinstance(visualization_config, Mapping):
-        return deepcopy(DEFAULT_SERVING_VISUALIZATION_CONFIG)
-    return _deep_merge_mapping(DEFAULT_SERVING_VISUALIZATION_CONFIG, visualization_config)
+        result = deepcopy(DEFAULT_SERVING_VISUALIZATION_CONFIG)
+    elif not isinstance(visualization_config, Mapping):
+        result = deepcopy(DEFAULT_SERVING_VISUALIZATION_CONFIG)
+    else:
+        result = _deep_merge_mapping(DEFAULT_SERVING_VISUALIZATION_CONFIG, visualization_config)
+    map_cfg = result.setdefault("map", {})
+    terrain_tif = _resolve_terrain_tif_path(result)
+    if terrain_tif is not None:
+        map_cfg["terrain_tif"] = str(terrain_tif)
+    return result
 
 
 def _map_config_value(visualization_config: Mapping[str, Any], key: str) -> Any | None:
     map_cfg = visualization_config.get("map")
     if isinstance(map_cfg, Mapping):
         return map_cfg.get(key)
+    return None
+
+
+@lru_cache(maxsize=1)
+def _discover_model_bundle_terrain_tifs() -> tuple[str, ...]:
+    """Return likely external terrain rasters available inside the container.
+
+    The production deployment mounts the model bundle read-only at
+    ``/model_bundle``. Keeping discovery constrained to that small tree avoids
+    expensive filesystem walks while allowing the lab deployment to use the
+    same HEC-RAS DEM raster as the publication figures without requiring every
+    run artifact to repeat the path in metadata.
+    """
+    root = Path(os.environ.get("FGN_MODEL_BUNDLE_ROOT", "/model_bundle")).expanduser()
+    if not root.exists() or not root.is_dir():
+        return ()
+    patterns = (
+        "**/Terrain_V2.DEM1m_V2.tif",
+        "**/Terrain.DEM1m.tif",
+        "**/*DEM1m*.tif",
+        "**/*Terrain*.tif",
+    )
+    discovered: list[str] = []
+    seen: set[str] = set()
+    for pattern in patterns:
+        try:
+            matches = sorted(root.glob(pattern))
+        except Exception:
+            continue
+        for candidate in matches[:25]:
+            if not candidate.is_file():
+                continue
+            text = str(candidate)
+            if text in seen:
+                continue
+            discovered.append(text)
+            seen.add(text)
+    return tuple(discovered)
+
+
+def _candidate_terrain_tif_paths(visualization_config: Mapping[str, Any]) -> list[Path]:
+    raw_values = [
+        _map_config_value(visualization_config, "terrain_tif"),
+        os.environ.get("FGN_SERVING_TERRAIN_TIF"),
+        os.environ.get("FGN_TERRAIN_TIF"),
+        "/model_bundle/domain/Terrain_V2.DEM1m_V2.tif",
+        "/model_bundle/domain/Terrain.DEM1m.tif",
+        "/model_bundle/Terrain/Terrain_V2.DEM1m_V2.tif",
+        "/model_bundle/Terrain/Terrain.DEM1m.tif",
+        *_discover_model_bundle_terrain_tifs(),
+    ]
+    paths: list[Path] = []
+    seen: set[str] = set()
+    for raw in raw_values:
+        if not raw:
+            continue
+        path = Path(str(raw)).expanduser()
+        candidates = [path]
+        if not path.is_absolute():
+            candidates.append(Path("/model_bundle") / path)
+        for candidate in candidates:
+            text = str(candidate)
+            if text in seen:
+                continue
+            paths.append(candidate)
+            seen.add(text)
+    return paths
+
+
+def _resolve_terrain_tif_path(visualization_config: Mapping[str, Any]) -> Path | None:
+    for path in _candidate_terrain_tif_paths(visualization_config):
+        try:
+            if path.exists() and path.is_file():
+                return path
+        except OSError:
+            continue
     return None
 
 
@@ -162,6 +245,18 @@ def _cartographic_context(
     eval_render: Any,
 ) -> dict[str, Any]:
     config = serving_visualization_config(visualization_config)
+    if _map_config_value(config, "terrain_tif"):
+        terrain_context = eval_render._cartographic_context(
+            x=x,
+            y=y,
+            elevation_raw=elevation_raw,
+            out_dir=out_dir,
+            visualization_config=config,
+        )
+        metadata = terrain_context.get("metadata", {}) if isinstance(terrain_context, Mapping) else {}
+        if terrain_context.get("mode") == "external_basemap" and metadata.get("terrain_tif"):
+            return terrain_context
+
     dem_context = _load_dem_context(x=x, y=y, visualization_config=config, eval_render=eval_render)
     if dem_context is not None:
         cache_dir = Path(out_dir) / "cartographic_context"

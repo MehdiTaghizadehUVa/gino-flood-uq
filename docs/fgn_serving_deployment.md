@@ -140,6 +140,7 @@ Compose expects `FGN_DATA_ROOT` to point at a large disk mounted inside WSL, for
 example `/mnt/d/FGNServing`. The directory must contain:
 
 - `model_bundle/` mounted read-only at `/model_bundle`
+- `model_bundle/domain/Terrain_V2.DEM1m_V2.tif` is recommended for external DEM-backed map rendering. Set `FGN_SERVING_TERRAIN_TIF` if the raster is stored elsewhere inside the mounted bundle.
 - `artifacts/` mounted read-write at `/artifacts`
 - `postgres/` mounted as the Postgres data directory
 - `backups/` used for daily compressed Postgres backups
