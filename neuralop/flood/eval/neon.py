@@ -254,6 +254,26 @@ def neon_epistemic_error_correlation(
     abs_err = (flat.mean(dim=1) - reference.mean(dim=1)).abs()         # [B,T,Nv,C]
     x = epi.reshape(epi.shape[0], -1)
     y = abs_err.reshape(abs_err.shape[0], -1)
+    if weights is not None:
+        weights = weights.to(device=prediction.device, dtype=prediction.dtype)
+        if weights.ndim == 3:
+            weights = weights.unsqueeze(0)
+        if weights.ndim != 4:
+            raise ValueError(
+                "weights must have shape [T, Nv, C] or [B, T, Nv, C], "
+                f"got {tuple(weights.shape)}."
+            )
+        if weights.shape[0] == 1 and x.shape[0] > 1:
+            weights = weights.expand(x.shape[0], -1, -1, -1)
+        mask = weights.reshape(x.shape[0], -1) > 0
+        corrs = []
+        for b in range(x.shape[0]):
+            if int(mask[b].sum().item()) < 2:
+                corrs.append(torch.zeros((), device=x.device, dtype=x.dtype))
+            else:
+                corrs.append(_rowwise_pearson(x[b : b + 1, mask[b]], y[b : b + 1, mask[b]])[0])
+        corr = torch.stack(corrs)
+        return {"epistemic_abs_error_spatial_corr": float(corr.mean().item())}
     corr = _rowwise_pearson(x, y)
     return {"epistemic_abs_error_spatial_corr": float(corr.mean().item())}
 
@@ -268,7 +288,7 @@ def evaluate_neon_nested(
     """Full NEON nested-evaluation bundle: predictive + epistemic diagnostics."""
     out: dict[str, float] = {}
     out.update(neon_predictive_metrics(prediction, reference, thresholds=thresholds, weights=weights))
-    variance = domain_average_variance_summary(prediction)
+    variance = domain_average_variance_summary(prediction, weights=weights)
     for key, value in variance.items():
         out[f"{key}_mean"] = float(value.mean().item())
     out.update(neon_epistemic_error_correlation(prediction, reference, weights=weights))

@@ -113,6 +113,18 @@ def test_epistemic_error_correlation_is_high_when_variance_tracks_error():
     assert out["epistemic_abs_error_spatial_corr"] > 0.7
 
 
+def test_evaluate_neon_nested_uses_weights_for_variance_summary():
+    pred = torch.zeros(1, 2, 2, 1, 2, 1)
+    pred[:, 1, :, :, 1, :] = 10.0  # epistemic variance only at masked-out node 1
+    ref = torch.zeros(1, 2, 1, 2, 1)
+    weights = torch.tensor([[[1.0], [0.0]]])
+
+    bundle = evaluate_neon_nested(pred, ref, thresholds=(0.5,), weights=weights)
+
+    assert bundle["variance_epistemic_mean"] == pytest.approx(0.0)
+    assert bundle["variance_epistemic_anova_corrected_mean"] == pytest.approx(0.0)
+
+
 def test_evaluate_neon_nested_bundles_predictive_and_epistemic():
     pred = torch.randn(1, 4, 3, 2, 5, 1).abs()
     ref = torch.randn(1, 6, 2, 5, 1).abs()

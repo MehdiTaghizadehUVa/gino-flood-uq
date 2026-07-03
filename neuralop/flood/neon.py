@@ -529,6 +529,50 @@ def pooled_fair_crps(
     )
 
 
+def stage2_fit_score(
+    prediction: torch.Tensor,
+    reference: torch.Tensor,
+    *,
+    weights: torch.Tensor | None = None,
+    objective: str = "per_epistemic_fcrps",
+    chunk_size: int | None = 65536,
+) -> torch.Tensor:
+    """Stage-2 fit objective selected by the NEON config.
+
+    The main objective scores each fixed epistemic particle separately, so
+    ``z_e`` indexes operators and ``z_a`` indexes aleatory samples within each
+    operator. The pooled and L2 objectives are explicit ablations/controls and
+    should not be used as the primary NEON-aligned training objective.
+    """
+
+    objective = str(objective).strip().lower()
+    if objective in {"per_epistemic_fcrps", "per_epistemic_crps", "fcrps"}:
+        return per_epistemic_fair_crps(
+            prediction,
+            reference,
+            weights=weights,
+            reduction="mean",
+            chunk_size=chunk_size,
+        )
+    if objective == "pooled_fcrps":
+        return pooled_fair_crps(
+            prediction,
+            reference,
+            weights=weights,
+            reduction="mean",
+            chunk_size=chunk_size,
+        )
+    if objective in {"l2_mean", "mean_l2"}:
+        flat = flatten_nested_predictions(prediction)
+        pred_mean = flat.mean(dim=1)
+        ref_mean = reference.mean(dim=1)
+        return _weighted_mean((pred_mean - ref_mean).pow(2), weights)
+    raise ValueError(
+        "objective must be one of {'per_epistemic_fcrps', 'pooled_fcrps', 'l2_mean'}, "
+        f"got {objective!r}."
+    )
+
+
 def rpf_l2_penalty(module: NEONEpistemicCorrection) -> torch.Tensor:
     """L2 penalty on selected trainable randomized-prior-function weights."""
 
@@ -692,11 +736,12 @@ def compute_stage2_loss(
     edge_weights: torch.Tensor | None = None,
     zero_threshold: float | torch.Tensor = 0.0,
     loss_weights: NEONStage2LossWeights | None = None,
+    objective: str = "per_epistemic_fcrps",
 ) -> NEONStage2LossOutput:
     """Compute the NEON Stage-2 objective from nested corrected predictions."""
 
     loss_weights = loss_weights or NEONStage2LossWeights()
-    fit = per_epistemic_fair_crps(prediction, reference, weights=weights, reduction="mean")
+    fit = stage2_fit_score(prediction, reference, weights=weights, objective=objective)
     rpf = rpf_l2_penalty(module)
     if edge_index is None:
         graph = torch.tensor(0.0, device=prediction.device, dtype=prediction.dtype)

@@ -38,8 +38,8 @@ grouped_samples_to_families = fam_mod.grouped_samples_to_families
 Nv, Cs, Cb, C, res = 5, 7, 2, 1, 4
 
 
-def _sample(hid: str, *, R=3, t_total=8, dry=None):
-    return {
+def _sample(hid: str, *, R=3, t_total=8, dry=None, area=None):
+    sample = {
         "hydrograph_id": hid,
         "geometry": torch.zeros(Nv, 2),
         "static": torch.zeros(Nv, Cs),
@@ -49,6 +49,9 @@ def _sample(hid: str, *, R=3, t_total=8, dry=None):
         "n_ref_sims": R,
         "structural_dry_mask": dry,
     }
+    if area is not None:
+        sample["cell_area"] = area
+    return sample
 
 
 def test_sample_to_family_slices_reference_to_forecast_window():
@@ -63,6 +66,8 @@ def test_sample_to_family_slices_reference_to_forecast_window():
     assert fam.geometry.shape == (1, Nv, 2)
     assert fam.query_points.shape == (1, res, res, 2)
     assert fam.initial_histories.shape == (n_hist, Nv, C)
+    expected_history = _sample("TE1", R=R, t_total=t_total)["dynamic_ref"][:, skip : skip + n_hist].mean(dim=0)
+    torch.testing.assert_close(fam.initial_histories, expected_history)
     # boundary offset by skip -> length t_total - skip, and covers T + n_history
     assert fam.boundary_sequence.shape[0] == t_total - skip
     assert fam.boundary_sequence.shape[0] >= T + n_hist
@@ -87,9 +92,19 @@ def test_sample_to_family_builds_wettable_weights_from_dry_mask():
     assert torch.all(fam.weights[:, 2:, :] == 1.0)
 
 
-def test_sample_to_family_no_weights_when_mask_absent():
+def test_sample_to_family_uses_uniform_weights_when_mask_and_area_are_absent():
     fam = grouped_sample_to_family(_sample("TE1", dry=None), skip_before_timestep=2, n_history=3)
-    assert fam.weights is None
+    assert fam.weights is not None
+    assert torch.all(fam.weights == 1.0)
+
+
+def test_sample_to_family_area_weights_when_cell_area_is_available():
+    area = torch.tensor([10.0, 20.0, 0.0, float("nan"), 50.0])
+    fam = grouped_sample_to_family(
+        _sample("TE1", t_total=8, area=area), skip_before_timestep=2, n_history=3
+    )
+    assert fam.weights is not None
+    torch.testing.assert_close(fam.weights[0, :, 0], torch.tensor([10.0, 20.0, 0.0, 0.0, 50.0]))
 
 
 def test_sample_to_family_rejects_window_past_horizon():

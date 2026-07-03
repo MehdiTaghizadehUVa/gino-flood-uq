@@ -108,6 +108,29 @@ def test_runner_trains_saves_and_records_metadata(tmp_path):
     assert not stage1.training
 
 
+def test_runner_propagates_dependency_mode_to_epinet_checkpoint(tmp_path):
+    torch.manual_seed(0)
+    config = NEONStage2Config(
+        enabled=True, d_e=4, m_train=2, k_train=2, m_eval=2, k_eval=2,
+        n_epochs=1, dependency="za_independent", alpha=0.05,
+    )
+    stage1 = _DummyStage1()
+
+    run_neon_stage2_training(
+        config=config,
+        stage1_checkpoint="dummy_fgno.pt",
+        output_dir=tmp_path,
+        data_root="ignored",
+        load_stage1_fn=lambda ckpt: stage1,
+        build_families_fn=lambda root, cfg: ([_family("a", 0.0)], [_family("v", 0.2)]),
+        latent_dim=8,
+        calibrate_prior=False,
+    )
+    module, meta = load_neon_stage2_checkpoint(tmp_path / "neon_stage2_best.pt")
+    assert meta["dependency"] == "za_independent"
+    assert module.za_dependent is False
+
+
 def test_runner_auto_calibrates_prior_scale_away_from_placeholder(tmp_path):
     torch.manual_seed(0)
     config = NEONStage2Config(

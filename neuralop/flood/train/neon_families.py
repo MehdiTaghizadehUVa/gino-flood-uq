@@ -13,9 +13,10 @@ The coastal FGN rollout evaluator yields per-hydrograph sample dicts (built by
     structural_dry_mask : optional [Nv] bool
 
 This module turns those into :class:`NEONFamilySample` objects (reference sliced
-to the forecast window; dry/baseline initial histories; wettable-area weights
-from the structural-dry mask) and performs a deterministic family-level split.
-It is torch-only (no dataset/IO deps) so it is unit-testable with fake samples.
+to the forecast window; shared pre-issue history from the reference-ensemble
+mean; wettable/area weights from available mesh metadata) and performs a
+deterministic family-level split. It is torch-only (no dataset/IO deps) so it
+is unit-testable with fake samples.
 """
 
 from __future__ import annotations
@@ -33,6 +34,24 @@ def _get(sample: Any, key: str, default=None):
     return getattr(sample, key, default)
 
 
+def _cell_area_vector(sample: Any, *, nv: int, dtype: torch.dtype) -> torch.Tensor | None:
+    """Return positive cell areas when the grouped sample exposes them."""
+
+    for key in ("cell_area", "cell_area_m2", "area", "areas"):
+        value = _get(sample, key)
+        if value is not None:
+            area = torch.as_tensor(value, dtype=dtype).reshape(-1)
+            if area.numel() == nv:
+                return torch.where(torch.isfinite(area) & (area > 0), area, torch.zeros_like(area))
+    static_raw = _get(sample, "static_raw")
+    if static_raw is not None:
+        raw = torch.as_tensor(static_raw, dtype=dtype)
+        if raw.ndim == 2 and raw.shape[0] == nv and raw.shape[1] > 1:
+            area = raw[:, 1].reshape(-1)
+            return torch.where(torch.isfinite(area) & (area > 0), area, torch.zeros_like(area))
+    return None
+
+
 def grouped_sample_to_family(
     sample: Any,
     *,
@@ -48,8 +67,8 @@ def grouped_sample_to_family(
     skip_before_timestep + n_history`` and ``T`` is ``rollout_length`` (or the
     remaining horizon). The boundary sequence is offset to start at
     ``skip_before_timestep`` so the AR step ``t`` window ``[t : t + n_history]``
-    aligns with the coastal rollout convention. Initial histories are dry/
-    baseline zeros (the plan's default warm start).
+    aligns with the coastal rollout convention. Initial histories are the
+    shared pre-issue reference-ensemble mean over the history window.
     """
     family_id = str(_get(sample, "hydrograph_id", "unknown"))
     geometry = _get(sample, "geometry")
@@ -77,15 +96,28 @@ def grouped_sample_to_family(
     # Boundary offset so step t's window [t : t+n_history] matches the coastal
     # rollout (window covers [skip+t, skip+t+n_history)).
     boundary_sequence = boundary[int(skip_before_timestep):].contiguous()      # [>=T+n_history, Nv, Cb]
-    initial_histories = torch.zeros(int(n_history), nv, c, dtype=reference.dtype)
+    history_start = int(skip_before_timestep)
+    history_stop = history_start + int(n_history)
+    history_ref = dynamic_ref[:, history_start:history_stop]
+    if history_ref.shape[1] != int(n_history):
+        raise ValueError(
+            f"not enough pre-issue history for family {family_id!r}: need {n_history} "
+            f"frames from t={history_start}, got {history_ref.shape[1]}."
+        )
+    initial_histories = history_ref.mean(dim=0).contiguous()  # [n_history, Nv, C]
 
     weights = None
     if wettable_area_weights:
         dry = _get(sample, "structural_dry_mask")
+        wettable = torch.ones(nv, dtype=reference.dtype)
         if dry is not None:
             wettable = (~torch.as_tensor(dry, dtype=torch.bool).reshape(nv)).to(reference.dtype)
-            # [T, Nv, C] weights, zero on structural-dry cells, uniform elsewhere.
-            weights = wettable.view(1, nv, 1).expand(T, nv, c).contiguous()
+        area = _cell_area_vector(sample, nv=nv, dtype=reference.dtype)
+        if area is not None:
+            wettable = wettable * area
+        # [T, Nv, C] weights, zero on structural-dry cells, area-weighted when
+        # physical cell areas are available and uniform otherwise.
+        weights = wettable.view(1, nv, 1).expand(T, nv, c).contiguous()
 
     return NEONFamilySample(
         family_id=family_id,
