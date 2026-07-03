@@ -190,7 +190,7 @@ def test_result_cache_key_uses_scientific_fingerprint_not_csv_bytes(tmp_path):
         build_result_cache_key(run_spec=spec_a, forcing_input=forcing_a, bundle=bundle)
     )
 
-    assert RESULT_CACHE_PRODUCT_SCHEMA_VERSION == "fgn-serving-products-v2-dem-hecras-alpha055"
+    assert RESULT_CACHE_PRODUCT_SCHEMA_VERSION == "fgn-serving-products-v3-dem-context"
     assert build_result_cache_key(
         run_spec=spec_a,
         forcing_input=forcing_a,
@@ -1536,6 +1536,56 @@ def test_geometry_meta_includes_static_context_and_pick_viewport(tmp_path):
     data_bounds = meta["image_data_bounds"]
     assert data_bounds["x_min"] <= min(meta["x"]) <= max(meta["x"]) <= data_bounds["x_max"]
     assert data_bounds["y_min"] <= min(meta["y"]) <= max(meta["y"]) <= data_bounds["y_max"]
+
+
+def test_dem_context_builder_fills_sparse_lattice_for_publication_style_background(tmp_path):
+    from neuralop.flood.serving.dem_context import build_dem_context
+
+    geometry = np.array([[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]], dtype=np.float32)
+    elevation = np.array([1.0, 2.0, 3.0], dtype=np.float32)
+    out = build_dem_context(
+        geometry_xy=geometry,
+        elevation_m=elevation,
+        output_path=tmp_path / "dem_context.npz",
+        upsample_factor=3,
+    )
+
+    data = np.load(out)
+    image = data["image"]
+    extent = data["extent"]
+    payload = json.loads(str(data["metadata_json"].item()))
+    assert image.shape[:2] == (6, 6)
+    assert image.shape[2] == 3
+    assert np.isfinite(image).all()
+    assert extent.tolist() == [-1.0, 2.0, -1.0, 2.0]
+    assert payload["lattice_shape"] == [2, 2]
+    assert payload["structured_coverage"] == pytest.approx(0.75)
+
+
+def test_rivanna_style_viewport_uses_optional_rectangular_dem_context(tmp_path):
+    from neuralop.flood.serving.dem_context import build_dem_context
+    from neuralop.flood.serving.map_rendering import compute_rivanna_style_data_viewport
+
+    geometry = np.array([[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]], dtype=np.float32)
+    elevation = np.array([1.0, 2.0, 3.0], dtype=np.float32)
+    context = build_dem_context(
+        geometry_xy=geometry,
+        elevation_m=elevation,
+        output_path=tmp_path / "dem_context.npz",
+        upsample_factor=2,
+    )
+
+    viewport = compute_rivanna_style_data_viewport(
+        geometry_xy=geometry,
+        elevation_raw=elevation,
+        visualization_config={"map": {"dem_context_path": str(context)}},
+        dpi=80,
+    )
+
+    assert viewport["data_bounds"]["x_min"] == pytest.approx(-1.0)
+    assert viewport["data_bounds"]["x_max"] == pytest.approx(2.0)
+    assert viewport["data_bounds"]["y_min"] == pytest.approx(-1.0)
+    assert viewport["data_bounds"]["y_max"] == pytest.approx(2.0)
 
 
 def test_geometry_meta_returns_none_without_geometry(tmp_path):

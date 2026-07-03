@@ -7,6 +7,9 @@ ground-truth/error diagnostics into user-serving products.
 
 from __future__ import annotations
 
+import json
+import os
+import shutil
 from copy import deepcopy
 from pathlib import Path
 from typing import Any, Mapping
@@ -73,6 +76,119 @@ def serving_visualization_config(visualization_config: Any | None = None) -> dic
     return _deep_merge_mapping(DEFAULT_SERVING_VISUALIZATION_CONFIG, visualization_config)
 
 
+def _map_config_value(visualization_config: Mapping[str, Any], key: str) -> Any | None:
+    map_cfg = visualization_config.get("map")
+    if isinstance(map_cfg, Mapping):
+        return map_cfg.get(key)
+    return None
+
+
+def _candidate_dem_context_paths(visualization_config: Mapping[str, Any]) -> list[Path]:
+    raw_values = [
+        _map_config_value(visualization_config, "dem_context_path"),
+        _map_config_value(visualization_config, "context_npz_path"),
+        os.environ.get("FGN_DEM_CONTEXT_PATH"),
+        "/model_bundle/domain/dem_context.npz",
+    ]
+    paths: list[Path] = []
+    for raw in raw_values:
+        if not raw:
+            continue
+        path = Path(str(raw)).expanduser()
+        paths.append(path)
+        if not path.is_absolute():
+            paths.append(Path("/model_bundle") / path)
+    return paths
+
+
+def _load_dem_context(
+    *,
+    x: np.ndarray,
+    y: np.ndarray,
+    visualization_config: Mapping[str, Any],
+    eval_render: Any,
+) -> dict[str, Any] | None:
+    """Load an optional pre-rendered DEM context image for serving maps.
+
+    The deployed coastal geometry is an irregular subset of a rectangular
+    UTM lattice. The publication figures showed a rectangular DEM context,
+    while forecast values still live only on the 5,904 computational cells.
+    This optional context image restores that publication-style background
+    without changing the scientific arrays being plotted.
+    """
+    for path in _candidate_dem_context_paths(visualization_config):
+        if not path.exists():
+            continue
+        try:
+            data = np.load(path, allow_pickle=False)
+            image = np.asarray(data["image"], dtype=np.float32)
+            extent = tuple(float(v) for v in np.asarray(data["extent"], dtype=np.float64).reshape(4))
+            req = eval_render._spatial_extent(np.asarray(x, dtype=np.float64), np.asarray(y, dtype=np.float64))
+            covers = extent[0] <= req[0] and extent[1] >= req[1] and extent[2] <= req[2] and extent[3] >= req[3]
+            if not covers:
+                continue
+            metadata: dict[str, Any] = {
+                "mode": "external_basemap",
+                "map_mode": "dem_context",
+                "source": str(path),
+                "extent": list(extent),
+            }
+            if "metadata_json" in data.files:
+                try:
+                    metadata.update(json.loads(str(np.asarray(data["metadata_json"]).item())))
+                except Exception:
+                    pass
+            options = eval_render._visualization_options(visualization_config)
+            return {
+                "mode": "external_basemap",
+                "image": image,
+                "extent": extent,
+                "metadata": metadata,
+                "options": options,
+                "source_path": str(path),
+            }
+        except Exception:
+            continue
+    return None
+
+
+def _cartographic_context(
+    *,
+    x: np.ndarray,
+    y: np.ndarray,
+    elevation_raw: np.ndarray | None,
+    out_dir: str,
+    visualization_config: Any | None,
+    eval_render: Any,
+) -> dict[str, Any]:
+    config = serving_visualization_config(visualization_config)
+    dem_context = _load_dem_context(x=x, y=y, visualization_config=config, eval_render=eval_render)
+    if dem_context is not None:
+        cache_dir = Path(out_dir) / "cartographic_context"
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            source_path = dem_context.get("source_path")
+            if source_path:
+                shutil.copyfile(source_path, cache_dir / "basemap_context.npz")
+        except Exception:
+            pass
+        try:
+            (cache_dir / "basemap_metadata.json").write_text(
+                json.dumps(dem_context.get("metadata", {}), indent=2),
+                encoding="utf-8",
+            )
+        except Exception:
+            pass
+        return dem_context
+    return eval_render._cartographic_context(
+        x=x,
+        y=y,
+        elevation_raw=elevation_raw,
+        out_dir=out_dir,
+        visualization_config=config,
+    )
+
+
 def compute_rivanna_style_data_viewport(
     *,
     geometry_xy: np.ndarray,
@@ -108,12 +224,13 @@ def compute_rivanna_style_data_viewport(
 
     tmp_context = tempfile.TemporaryDirectory(prefix="fgn-map-viewport-")
     try:
-        context = eval_render._cartographic_context(
+        context = _cartographic_context(
             x=x,
             y=y,
             elevation_raw=elevation_raw,
             out_dir=tmp_context.name,
-            visualization_config=serving_visualization_config(visualization_config),
+            visualization_config=visualization_config,
+            eval_render=eval_render,
         )
         fig, ax = plt.subplots(
             1,
@@ -235,12 +352,13 @@ def write_rivanna_style_map_png(
         }
     ):
         renderer = eval_render._build_spatial_renderer(x, y, figsize=fig_size, dpi=dpi, n_rows=1, n_cols=1)
-        context = eval_render._cartographic_context(
+        context = _cartographic_context(
             x=x,
             y=y,
             elevation_raw=elevation_raw,
             out_dir=str(Path(output_path).parent),
-            visualization_config=serving_visualization_config(visualization_config),
+            visualization_config=visualization_config,
+            eval_render=eval_render,
         )
         if vmax is None:
             vmax = eval_render._wd_spatial_vmax(arr) if is_wd_depth else eval_render._robust_nonnegative_vmax(arr)
