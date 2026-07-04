@@ -108,6 +108,8 @@ def _discover_model_bundle_terrain_tifs() -> tuple[str, ...]:
         "**/Terrain.DEM1m.tif",
         "**/*DEM1m*.tif",
         "**/*Terrain*.tif",
+        "**/*dem*.tif",
+        "**/*terrain*.tif",
     )
     discovered: list[str] = []
     seen: set[str] = set()

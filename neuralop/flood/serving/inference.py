@@ -98,30 +98,34 @@ class FakeFGNInferenceService:
         member_sample_id = [m % members_per_ensemble for m in range(n_members)]
         if progress_callback is not None:
             progress_callback(1.0, f"GPU rollout complete ({n_members} members x {n_time} steps)")
+        metadata = {
+            "adapter": "fake",
+            "bundle_id": self.bundle.bundle_id,
+            "ensemble_count": int(run_spec.ensemble_count),
+            "members_per_ensemble": members_per_ensemble,
+            "geometry_xy": geometry_xy,
+            "cell_area_m2": np.ones(n_cells, dtype=np.float32),
+            "member_model_id": member_model_id,
+            "member_sample_id": member_sample_id,
+            "initial_condition": {
+                "mode": "dry",
+                "library_id": None,
+                "reference_scope": None,
+                "selected_reference_ids": [],
+                "weights": [],
+                "distances": [],
+                "low_confidence": False,
+                "confidence_label": "synthetic_fake",
+            },
+        }
+        visualization_config = self.bundle.metadata.get("visualization_config")
+        if visualization_config is not None:
+            metadata["visualization_config"] = visualization_config
         return ForecastResult(
             members_wd=members.astype(np.float32),
             lead_time_hours=lead_hours,
             wettable_mask=np.ones(n_cells, dtype=bool),
-            metadata={
-                "adapter": "fake",
-                "bundle_id": self.bundle.bundle_id,
-                "ensemble_count": int(run_spec.ensemble_count),
-                "members_per_ensemble": members_per_ensemble,
-                "geometry_xy": geometry_xy,
-                "cell_area_m2": np.ones(n_cells, dtype=np.float32),
-                "member_model_id": member_model_id,
-                "member_sample_id": member_sample_id,
-                "initial_condition": {
-                    "mode": "dry",
-                    "library_id": None,
-                    "reference_scope": None,
-                    "selected_reference_ids": [],
-                    "weights": [],
-                    "distances": [],
-                    "low_confidence": False,
-                    "confidence_label": "synthetic_fake",
-                },
-            },
+            metadata=metadata,
         )
 
 
@@ -693,37 +697,41 @@ class ProductionFGNInferenceService:
             wettable = (~dry_mask).detach().cpu().numpy().astype(bool)
         else:
             wettable = np.ones(n_cells, dtype=bool)
+        metadata = {
+            "adapter": "production_fgn",
+            "bundle_id": self.bundle.bundle_id,
+            "member_model_id": member_model_id,
+            "member_sample_id": member_sample_id,
+            "ensemble_count": n_models,
+            "members_per_ensemble": n_per_model,
+            "seed": int(run_spec.seed),
+            "geometry_xy": prepared.get("geometry_raw_np"),
+            "elevation_raw": prepared.get("elevation_raw_np"),
+            "cell_area_m2": prepared.get("cell_area_m2_np"),
+            "slope_raw": prepared.get("slope_raw_np"),
+            "flow_accumulation_raw": prepared.get("flow_accumulation_raw_np"),
+            "initial_condition": initial_condition.selection,
+            "fgn_latent_temporal_mode": "persistent",
+            "fgn_ar_state_update": "member_feedback",
+            "performance": {
+                "model_load_seconds": float(model_load_seconds),
+                "initial_condition_seconds": float(initial_condition_seconds),
+                "rollout_seconds": float(rollout_seconds),
+                "configured_member_chunk_size": str(self.member_chunk_size_config),
+                "member_chunk_size": int(selected_chunk_size),
+                "expected_forward_calls": int(expected_forward_calls),
+                "forward_calls": int(forward_calls),
+                "inference_dtype": self.inference_dtype,
+                "device": str(device),
+                "cuda_max_memory_allocated_mb": cuda_peak_mb,
+            },
+        }
+        visualization_config = self.bundle.metadata.get("visualization_config")
+        if visualization_config is not None:
+            metadata["visualization_config"] = visualization_config
         return ForecastResult(
             members_wd=members,
             lead_time_hours=lead_hours,
             wettable_mask=wettable,
-            metadata={
-                "adapter": "production_fgn",
-                "bundle_id": self.bundle.bundle_id,
-                "member_model_id": member_model_id,
-                "member_sample_id": member_sample_id,
-                "ensemble_count": n_models,
-                "members_per_ensemble": n_per_model,
-                "seed": int(run_spec.seed),
-                "geometry_xy": prepared.get("geometry_raw_np"),
-                "elevation_raw": prepared.get("elevation_raw_np"),
-                "cell_area_m2": prepared.get("cell_area_m2_np"),
-                "slope_raw": prepared.get("slope_raw_np"),
-                "flow_accumulation_raw": prepared.get("flow_accumulation_raw_np"),
-                "initial_condition": initial_condition.selection,
-                "fgn_latent_temporal_mode": "persistent",
-                "fgn_ar_state_update": "member_feedback",
-                "performance": {
-                    "model_load_seconds": float(model_load_seconds),
-                    "initial_condition_seconds": float(initial_condition_seconds),
-                    "rollout_seconds": float(rollout_seconds),
-                    "configured_member_chunk_size": str(self.member_chunk_size_config),
-                    "member_chunk_size": int(selected_chunk_size),
-                    "expected_forward_calls": int(expected_forward_calls),
-                    "forward_calls": int(forward_calls),
-                    "inference_dtype": self.inference_dtype,
-                    "device": str(device),
-                    "cuda_max_memory_allocated_mb": cuda_peak_mb,
-                },
-            },
+            metadata=metadata,
         ).validate()

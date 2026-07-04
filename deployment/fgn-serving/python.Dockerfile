@@ -14,4 +14,4 @@ COPY neuralop ./neuralop
 
 RUN pip install --upgrade pip \
     && pip install -r requirements.txt \
-    && pip install -e ".[serve]"
+    && pip install -e ".[serve,geo]"

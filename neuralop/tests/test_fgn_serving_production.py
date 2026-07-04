@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -9,7 +10,7 @@ import torch
 
 from neuralop.flood.serving.forcing import parse_forcing_csv
 from neuralop.flood.serving.initial_conditions import InitialConditionResult
-from neuralop.flood.serving.inference import DomainAssets, ProductionFGNInferenceService
+from neuralop.flood.serving.inference import DomainAssets, FakeFGNInferenceService, ProductionFGNInferenceService
 from neuralop.flood.serving.model_bundle import load_model_bundle
 from neuralop.flood.serving.run_spec import RunSpec
 
@@ -119,6 +120,63 @@ def _forcing_csv(n_rows: int = 24) -> str:
     for i in range(n_rows):
         lines.append(f"{i * 900},{1.0 + 0.1 * i},{2.0 * i}")
     return "\n".join(lines)
+
+
+def test_model_bundle_promotes_visualization_map_config_to_metadata(tmp_path):
+    manifest = tmp_path / "bundle.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "bundle_id": "coastal-fgn-test",
+                "domain_name": "coastal",
+                "git_commit": "test",
+                "checkpoint_dirs": ["ckpt_a", "ckpt_b", "ckpt_c"],
+                "checkpoint_alias": "best_model",
+                "normalizer_path": "normalizers.pt",
+                "static_files": [],
+                "calibration_coefficients_path": "crps_mbm.json",
+                "isotonic_curves_path": "isotonic.json",
+                "boundary_channels": ["stage", "precipitation"],
+                "dt_seconds": 900,
+                "n_history": 3,
+                "skip_before_timestep": 12,
+                "max_forecast_steps": 6,
+                "fgn_noise_dim": 32,
+                "members_per_checkpoint": 20,
+                "visualization": {
+                    "map": {
+                        "mode": "dem_elevation",
+                        "terrain_tif": "domain/terrain/coastal_dem.tif",
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    bundle = load_model_bundle(manifest, validate_paths=False)
+
+    cfg = bundle.metadata["visualization_config"]
+    assert cfg["map"]["mode"] == "dem_elevation"
+    assert cfg["map"]["terrain_tif"] == str(tmp_path / "domain/terrain/coastal_dem.tif")
+
+
+def test_inference_result_carries_bundle_visualization_config(tmp_path):
+    visualization_config = {"map": {"terrain_tif": "/model_bundle/domain/terrain/coastal_dem.tif"}}
+    bundle = replace(_bundle(tmp_path), metadata={"visualization_config": visualization_config})
+    forcing = parse_forcing_csv(_forcing_csv(), bundle=bundle, requested_forecast_steps=4)
+    spec = RunSpec.new(
+        user_id="user@example.com",
+        bundle_id=bundle.bundle_id,
+        input_hash=forcing.input_hash,
+        forecast_steps=forcing.forecast_steps,
+        seed=99,
+    )
+
+    result = FakeFGNInferenceService(bundle).run(spec, forcing)
+
+    assert result.metadata is not None
+    assert result.metadata["visualization_config"] == visualization_config
 
 
 def test_production_fgn_service_runs_reproducible_60_member_rollout(tmp_path):

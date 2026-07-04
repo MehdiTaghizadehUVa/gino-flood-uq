@@ -269,6 +269,25 @@ def _initial_condition_config(raw: Mapping[str, Any], *, base_dir: Path) -> Init
     )
 
 
+def _model_bundle_metadata(raw: Mapping[str, Any], *, base_dir: Path) -> Dict[str, Any]:
+    metadata = dict(raw.get("metadata", {}))
+    visualization_config = metadata.get("visualization_config")
+    if visualization_config is None:
+        visualization_config = raw.get("visualization_config", raw.get("visualization"))
+    if isinstance(visualization_config, Mapping):
+        cfg = dict(visualization_config)
+        map_cfg_raw = cfg.get("map")
+        if isinstance(map_cfg_raw, Mapping):
+            map_cfg = dict(map_cfg_raw)
+            for key in ("terrain_tif", "dem_context_path", "context_npz_path"):
+                raw_path = map_cfg.get(key)
+                if raw_path:
+                    map_cfg[key] = str(_as_path(str(raw_path), base_dir=base_dir))
+            cfg["map"] = map_cfg
+        metadata["visualization_config"] = cfg
+    return metadata
+
+
 def load_model_bundle(path: str | Path, *, validate_paths: bool = True) -> FGNModelBundle:
     """Load and validate a model bundle manifest from JSON/YAML."""
     manifest_path = Path(path).expanduser().resolve()
@@ -304,7 +323,7 @@ def load_model_bundle(path: str | Path, *, validate_paths: bool = True) -> FGNMo
             research_disclaimer=str(
                 raw.get("research_disclaimer", "Research only; not for emergency or operational decision use.")
             ),
-            metadata=dict(raw.get("metadata", {})),
+            metadata=_model_bundle_metadata(raw, base_dir=base_dir),
         )
     except KeyError as exc:
         raise ModelBundleError(f"Missing required model bundle field: {exc.args[0]}") from exc
