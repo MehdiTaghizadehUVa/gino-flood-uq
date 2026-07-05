@@ -8,6 +8,7 @@ import numpy as np
 import torch
 
 from neuralop.flood.neon import (
+    fair_crps_members,
     _weighted_mean,
     anova_corrected_epistemic_variance,
     base_rmse_from_reference,
@@ -199,10 +200,10 @@ def neon_predictive_metrics(
     # Marginal (flattened M*K) fair CRPS needs >= 2 members; a degenerate
     # single-member ensemble is reported as NaN rather than crashing.
     if int(flat.shape[1]) >= 2:
+        # Sort-based exact fair CRPS: the flattened marginal ensemble at eval
+        # budgets (M*K up to 1600 members) makes the pairwise path infeasible.
         out["marginal_fair_crps"] = float(
-            per_epistemic_fair_crps(
-                flat.unsqueeze(1), reference, weights=weights, reduction="mean"
-            ).item()
+            fair_crps_members(flat, reference, weights=weights, reduction="mean").item()
         )
     else:
         out["marginal_fair_crps"] = float("nan")

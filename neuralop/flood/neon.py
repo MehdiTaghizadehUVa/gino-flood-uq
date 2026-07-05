@@ -833,3 +833,94 @@ def load_neon_stage2_checkpoint(
     for param in module.prior_branch.parameters():
         param.requires_grad_(False)
     return module, dict(payload.get("metadata") or {})
+
+
+def fair_crps_members(
+    prediction: torch.Tensor,
+    reference: torch.Tensor,
+    *,
+    weights: torch.Tensor | None = None,
+    reduction: str = "mean",
+    chunk_size: int | None = 65536,
+) -> torch.Tensor:
+    """Exact fair CRPS of one N-member ensemble vs an R-member reference.
+
+    Mathematically identical to per_epistemic_fair_crps(prediction.unsqueeze(1),
+    ...) with the default no-reference-term setting, but O((N + R) log N) per
+    location instead of O(N^2 + N R), using order statistics:
+
+      sum_k |x_k - y|        = (2 c - N) y - 2 P_c + S,   c = #{x_k < y},
+      sum_{i<j} (x_(j)-x_(i)) = sum_i (2 i - 1 - N) x_(i),
+
+    where P is the prefix sum of the sorted members and S their total. This is
+    required at evaluation budgets: the flattened marginal ensemble at
+    M_eval=32 x K_eval=50 has N=1600 members, for which the pairwise
+    self-distance term would be ~1e12 elementwise ops on the coastal mesh.
+    """
+
+    if prediction.ndim != 5:
+        raise ValueError(
+            f"prediction must be [B, N, T, Nv, C]; got {tuple(prediction.shape)}."
+        )
+    B, N, T, Nv, C = (int(v) for v in prediction.shape)
+    if reference.ndim != 5 or int(reference.shape[0]) != B or reference.shape[2:] != prediction.shape[2:]:
+        raise ValueError(
+            "reference must be [B, R, T, Nv, C] matching prediction; got "
+            f"prediction={tuple(prediction.shape)} reference={tuple(reference.shape)}."
+        )
+    R = int(reference.shape[1])
+    if N < 2:
+        raise ValueError("fair CRPS requires N >= 2 ensemble members.")
+
+    n_loc = T * Nv * C
+    flat_pred = prediction.reshape(B, N, n_loc)
+    flat_ref = reference.reshape(B, R, n_loc)
+    if chunk_size is None:
+        chunk_size = n_loc
+    chunk_size = max(1, int(chunk_size))
+
+    flat_weights = None
+    if weights is not None:
+        flat_weights = _normalize_score_weights(
+            weights,
+            batch_size=B,
+            time_steps=T,
+            num_nodes=Nv,
+            channels=C,
+            device=prediction.device,
+            dtype=prediction.dtype,
+        ).reshape(B, n_loc)
+
+    dtype = prediction.dtype
+    coef = torch.arange(1, N + 1, device=prediction.device, dtype=dtype) * 2.0 - float(N + 1)
+    out = prediction.new_zeros((B,))
+    for start in range(0, n_loc, chunk_size):
+        stop = min(start + chunk_size, n_loc)
+        x = flat_pred[..., start:stop].transpose(1, 2).contiguous()  # [B, q, N]
+        y = flat_ref[..., start:stop].transpose(1, 2).contiguous()   # [B, q, R]
+        xs, _ = torch.sort(x, dim=-1)
+        prefix = torch.zeros(
+            xs.shape[0], xs.shape[1], N + 1, device=xs.device, dtype=dtype
+        )
+        prefix[..., 1:] = xs.cumsum(dim=-1)
+        total = prefix[..., -1]                                       # [B, q]
+        c = torch.searchsorted(xs, y)                                 # [B, q, R]
+        pc = prefix.gather(-1, c)
+        cross = ((2.0 * c.to(dtype) - float(N)) * y - 2.0 * pc + total.unsqueeze(-1)).sum(dim=-1)
+        cross = cross / float(N * R)                                  # E|X - Y| term
+        self_term = (xs * coef).sum(dim=-1) / float(N * (N - 1))      # fair self term
+        crps = cross - self_term                                      # [B, q]
+        if flat_weights is not None:
+            out = out + (crps * flat_weights[:, start:stop]).sum(dim=-1)
+        else:
+            out = out + crps.sum(dim=-1)
+    if flat_weights is None:
+        out = out / float(n_loc)
+
+    if reduction == "none":
+        return out
+    if reduction == "sum":
+        return out.sum()
+    if reduction == "mean":
+        return out.mean()
+    raise ValueError(f"reduction must be one of none|sum|mean, got {reduction!r}.")

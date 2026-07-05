@@ -329,3 +329,31 @@ def test_epistemic_chunking_matches_full_fit():
                 stage2_fit_score(pred_m, ref, objective="per_epistemic_fcrps").item()
             ) * (1.0 / M)
     assert abs(acc - full) <= 1e-5 * abs(full) + 1e-6
+
+
+def test_fair_crps_members_matches_pairwise_reference_implementation():
+    # The sort-based O(N log N) fair CRPS must be numerically identical to the
+    # pairwise per_epistemic_fair_crps (flattened, M'=1), weighted and not.
+    torch.manual_seed(0)
+    B, N, T, Nv, C, R = 2, 13, 3, 7, 1, 5
+    pred = torch.randn(B, N, T, Nv, C, dtype=torch.float64).abs()
+    ref = torch.randn(B, R, T, Nv, C, dtype=torch.float64).abs()
+    fast = neon.fair_crps_members(pred, ref, reduction="mean")
+    slow = neon.per_epistemic_fair_crps(pred.unsqueeze(1), ref, reduction="mean")
+    assert abs(float(fast) - float(slow)) < 1e-10
+
+    weights = torch.rand(T, Nv, C, dtype=torch.float64)
+    fast_w = neon.fair_crps_members(pred, ref, weights=weights, reduction="mean")
+    slow_w = neon.per_epistemic_fair_crps(pred.unsqueeze(1), ref, weights=weights, reduction="mean")
+    assert abs(float(fast_w) - float(slow_w)) < 1e-10
+
+    # ties between members and references must not break the identity
+    pred_t = pred.round()
+    ref_t = ref.round()
+    fast_t = neon.fair_crps_members(pred_t, ref_t, reduction="mean")
+    slow_t = neon.per_epistemic_fair_crps(pred_t.unsqueeze(1), ref_t, reduction="mean")
+    assert abs(float(fast_t) - float(slow_t)) < 1e-10
+
+    # chunking must not change the result
+    fast_c = neon.fair_crps_members(pred, ref, reduction="mean", chunk_size=5)
+    assert abs(float(fast_c) - float(slow)) < 1e-10

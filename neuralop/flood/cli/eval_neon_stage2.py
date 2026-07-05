@@ -55,6 +55,10 @@ def _parse_args(argv: Optional[Sequence[str]]) -> argparse.Namespace:
     parser.add_argument("--impact-metrics", action="store_true")
     parser.add_argument("--variance-maps", type=int, default=1,
                         help="Write variance maps for the first N families (default 1).")
+    parser.add_argument("--cache-dir", default=None,
+                        help="Disk cache for frozen K_eval rollouts (one .pt per family; "
+                             "shared across checkpoint evaluations so the frozen model "
+                             "is only rolled once per family).")
     parser.add_argument("--dry-run", action="store_true",
                         help="Print the resolved evaluation plan without loading torch/data.")
     return parser.parse_args(argv)
@@ -79,6 +83,7 @@ def resolve_eval_plan(args: argparse.Namespace) -> dict[str, Any]:
         "write_artifacts": bool(args.write_artifacts),
         "impact_metrics": bool(args.impact_metrics),
         "variance_maps": int(args.variance_maps),
+        "cache_dir": None if args.cache_dir is None else str(args.cache_dir),
     }
 
 
@@ -111,7 +116,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     )
     from neuralop.flood.train.neon import neon_stage2_eval_forward
     from neuralop.flood.train.neon_families import build_families_from_config
-    from neuralop.flood.train.neon_runner import make_feature_collector_from_frozen_model
+    from neuralop.flood.train.neon_runner import (
+        make_cached_feature_collector,
+        make_feature_collector_from_frozen_model,
+    )
     from neuralop.flood.utils.runtime_core import load_config_and_setup, parse_target_variables
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -153,6 +161,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         latent_dim=int(bundle.fgn_noise_dim),
         generator=torch.Generator().manual_seed(int(args.seed)),
     )
+    if args.cache_dir:
+        # Sharing the cache across checkpoint evaluations also fixes the K_eval
+        # aleatory draws per family, so checkpoints are compared on identical
+        # frozen ensembles rather than through resampling noise.
+        collector = make_cached_feature_collector(collector, cache_dir=args.cache_dir)
 
     per_family: list[dict[str, Any]] = []
     pit_total: dict[str, Any] | None = None
