@@ -147,7 +147,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         rollout_length=args.rollout_length,
         val_fraction=float(args.val_fraction),
     )
-    families = {"val": val_fam, "train": train_fam, "all": train_fam + val_fam}[args.families]
+    # Select the requested split and drop the other list immediately: the full
+    # 500-family TR set is ~15 GB of host RAM, and the per-family metric pass
+    # needs that headroom for its fp32/fp64 temporaries.
+    if args.families == "val":
+        families, train_fam, val_fam = val_fam, None, None
+    elif args.families == "train":
+        families, train_fam, val_fam = train_fam, None, None
+    else:
+        families = train_fam + val_fam
+        train_fam = val_fam = None
     families = sorted(families, key=lambda f: f.family_id)
     if args.max_families is not None:
         families = families[: int(args.max_families)]

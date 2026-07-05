@@ -4,7 +4,7 @@
 #SBATCH --partition=gpu
 #SBATCH --gres=gpu:a100:1
 #SBATCH --cpus-per-task=8
-#SBATCH --mem=96G
+#SBATCH --mem=128G
 #SBATCH --time=6:00:00
 #SBATCH --array=0-4
 #SBATCH --output=/scratch/jrj6wm/GINO_Model/neon_stage2_full_train/slurm_evalgrid_%A_%a.out
