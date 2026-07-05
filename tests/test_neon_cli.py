@@ -163,3 +163,4 @@ def test_eval_cli_dry_run_prints_torch_free_plan(capsys):
     assert plan["families"] == "val"
     assert plan["thresholds"] == [0.1, 0.3, 0.5]
     assert plan["cache_dir"] is None
+    assert plan["k_chunk"] == 16

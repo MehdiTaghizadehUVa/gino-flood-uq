@@ -59,6 +59,10 @@ def _parse_args(argv: Optional[Sequence[str]]) -> argparse.Namespace:
                         help="Disk cache for frozen K_eval rollouts (one .pt per family; "
                              "shared across checkpoint evaluations so the frozen model "
                              "is only rolled once per family).")
+    parser.add_argument("--k-chunk", type=int, default=16,
+                        help="Aleatory members per EpiNet eval forward (bounds GPU "
+                             "activation memory; K=50 at full horizon OOMs a 40GB "
+                             "card unchunked).")
     parser.add_argument("--dry-run", action="store_true",
                         help="Print the resolved evaluation plan without loading torch/data.")
     return parser.parse_args(argv)
@@ -84,6 +88,7 @@ def resolve_eval_plan(args: argparse.Namespace) -> dict[str, Any]:
         "impact_metrics": bool(args.impact_metrics),
         "variance_maps": int(args.variance_maps),
         "cache_dir": None if args.cache_dir is None else str(args.cache_dir),
+        "k_chunk": int(args.k_chunk),
     }
 
 
@@ -180,15 +185,23 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             int(args.m_eval), module.epistemic_dim,
             device=batch.features.device, dtype=batch.features.dtype, generator=z_gen,
         )
-        # Chunk the epistemic axis so the eval forward fits on a 40GB card;
+        # Chunk both nested axes (epistemic M outer, aleatory K inner) so the
+        # eval forward fits on a 40GB card at K_eval=50 and full horizon;
         # assemble the nested prediction on CPU.
+        k_total = int(batch.features.shape[1])
+        k_chunk = max(1, min(int(args.k_chunk), k_total))
         chunks = []
         for m in range(int(args.m_eval)):
-            pred_m = neon_stage2_eval_forward(
-                module=module, base_prediction=batch.base_prediction,
-                features=batch.features, z_e=z_e[m : m + 1],
-            )
-            chunks.append(pred_m.detach().to("cpu", torch.float32))
+            k_parts = []
+            for ks in range(0, k_total, k_chunk):
+                pred_mk = neon_stage2_eval_forward(
+                    module=module,
+                    base_prediction=batch.base_prediction[:, ks : ks + k_chunk],
+                    features=batch.features[:, ks : ks + k_chunk],
+                    z_e=z_e[m : m + 1],
+                )
+                k_parts.append(pred_mk.detach().to("cpu", torch.float32))
+            chunks.append(torch.cat(k_parts, dim=2))
         prediction = torch.cat(chunks, dim=1)                       # [1, M, K, T, Nv, C]
         reference = fam.reference.unsqueeze(0).to(prediction.dtype) # [1, R, T, Nv, C]
         weights = fam.weights
