@@ -59,6 +59,11 @@ def _parse_args(argv: Optional[Sequence[str]]) -> argparse.Namespace:
                         help="Disk cache for frozen K_eval rollouts (one .pt per family; "
                              "shared across checkpoint evaluations so the frozen model "
                              "is only rolled once per family).")
+    parser.add_argument("--impact-members", type=int, default=60,
+                        help="Flattened ensemble members used for impact CRPS metrics. "
+                             "The legacy impact CRPS broadcasts pairwise member arrays "
+                             "(members^2 x cells); 1600 members would be ~121 GB. 60 "
+                             "matches the operational 3x20 Stage-1 ensemble.")
     parser.add_argument("--k-chunk", type=int, default=16,
                         help="Aleatory members per EpiNet eval forward (bounds GPU "
                              "activation memory; K=50 at full horizon OOMs a 40GB "
@@ -89,8 +94,20 @@ def resolve_eval_plan(args: argparse.Namespace) -> dict[str, Any]:
         "variance_maps": int(args.variance_maps),
         "cache_dir": None if args.cache_dir is None else str(args.cache_dir),
         "k_chunk": int(args.k_chunk),
+        "impact_members": int(args.impact_members),
     }
 
+
+
+def _rss_gb() -> float:
+    try:
+        with open('/proc/self/status') as fh:
+            for line in fh:
+                if line.startswith('VmRSS'):
+                    return round(int(line.split()[1]) / 1e6, 2)
+    except Exception:
+        pass
+    return -1.0
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = _parse_args(argv)
@@ -160,7 +177,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     families = sorted(families, key=lambda f: f.family_id)
     if args.max_families is not None:
         families = families[: int(args.max_families)]
-    log.info("evaluating %d families (%s split)", len(families), args.families)
+    log.info("evaluating %d families (%s split) | rss=%.1fG", len(families), args.families, _rss_gb())
 
     module, ckpt_meta = load_neon_stage2_checkpoint(args.stage2_checkpoint, map_location="cpu")
     device = "cuda:0" if torch.cuda.is_available() else "cpu"
@@ -190,6 +207,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     for f_idx, fam in enumerate(families):
         batch = collector(fam, num_aleatory=int(args.k_eval))
+        log.info("  [mem] features collected rss=%.1fG", _rss_gb())
         z_e = sample_epistemic_indices(
             int(args.m_eval), module.epistemic_dim,
             device=batch.features.device, dtype=batch.features.dtype, generator=z_gen,
@@ -211,13 +229,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 )
                 k_parts.append(pred_mk.detach().to("cpu", torch.float32))
             chunks.append(torch.cat(k_parts, dim=2))
-        prediction = torch.cat(chunks, dim=1)                       # [1, M, K, T, Nv, C]
+        prediction = torch.cat(chunks, dim=1)
+        log.info("  [mem] forwards assembled rss=%.1fG", _rss_gb())                       # [1, M, K, T, Nv, C]
         reference = fam.reference.unsqueeze(0).to(prediction.dtype) # [1, R, T, Nv, C]
         weights = fam.weights
 
         row: dict[str, Any] = {"family_id": fam.family_id}
         row.update(evaluate_neon_nested(prediction, reference,
                                         thresholds=tuple(args.thresholds), weights=weights))
+        log.info("  [mem] nested metrics rss=%.1fG", _rss_gb())
         per_family.append(row)
 
         pit = nested_pit_rank_histograms(
@@ -230,6 +250,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             pit_total["pit_counts"] = (np.array(pit_total["pit_counts"]) + np.array(pit["pit_counts"])).tolist()
             pit_total["rank_counts"] = (np.array(pit_total["rank_counts"]) + np.array(pit["rank_counts"])).tolist()
 
+        log.info("  [mem] pit done rss=%.1fG", _rss_gb())
         rel = exceedance_reliability(prediction, reference, thresholds=tuple(args.thresholds))
         for key, bins in rel.items():
             if key not in reliability_sums:
@@ -243,6 +264,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 acc["sum_forecast_prob"] += b["sum_forecast_prob"]
                 acc["sum_observed_freq"] += b["sum_observed_freq"]
 
+        log.info("  [mem] reliability done rss=%.1fG", _rss_gb())
         spread = spread_error_diagnostics(prediction, reference)
         spread_corrs.append(spread["spread_error_corr"])
         row["spread_error_corr"] = spread["spread_error_corr"]
@@ -251,6 +273,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             from neuralop.flood.eval.impact_metrics import compute_flood_impact_crps_metrics
 
             flat = prediction.reshape(1, -1, *prediction.shape[3:])[0, :, :, :, 0]  # [MK, T, Nv]
+            mk = int(flat.shape[0])
+            n_sub = max(2, min(int(args.impact_members), mk))
+            if n_sub < mk:
+                # Deterministic stratified subsample across the flattened M*K
+                # grid (linspace strides across epistemic particles).
+                idx = torch.linspace(0, mk - 1, n_sub).round().long().unique()
+                flat = flat[idx]
             static_raw = np.stack(
                 [prepared["elevation_raw_np"], prepared["cell_area_m2_np"]], axis=1
             )
@@ -265,6 +294,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             }
             impact_scalars["family_id"] = fam.family_id
             impact_rows.append(impact_scalars)
+            log.info("  [mem] impact done rss=%.1fG", _rss_gb())
 
         if args.write_artifacts:
             artifact_dir = out_dir / "artifacts"
@@ -285,7 +315,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 prediction, geometry_xy=prepared["geometry_raw_np"],
                 output_dir=out_dir / "variance_maps", label=fam.family_id,
             )
-        log.info("family %s done (%d/%d)", fam.family_id, f_idx + 1, len(families))
+        log.info("family %s done (%d/%d) rss=%.1fG", fam.family_id, f_idx + 1, len(families), _rss_gb())
 
     # ---- Aggregate ----
     scalar_keys = [k for k, v in per_family[0].items() if isinstance(v, float)]

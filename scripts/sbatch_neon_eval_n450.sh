@@ -5,7 +5,7 @@
 #SBATCH --gres=gpu:a100:1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=192G
-#SBATCH --time=10:00:00
+#SBATCH --time=16:00:00
 #SBATCH --output=/scratch/jrj6wm/GINO_Model/neon_stage2_full_train/slurm_eval450_%j.out
 set -euo pipefail
 REPO=/home/jrj6wm/GINO_Model/neuraloperator_clean_mcdropout
