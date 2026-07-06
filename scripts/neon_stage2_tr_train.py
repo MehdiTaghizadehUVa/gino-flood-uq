@@ -13,7 +13,7 @@ Parameterized via environment for the data-ablation grid:
 
 Fixed choices (plan + hardening):
   - families from the TR package config (grouped R=10 references)
-  - full horizon T=94, K_train=8, M_train=4, d_e=16, 30 epochs
+  - full horizon T=94, K_train=8, M_train=4, d_e=D_E, 30 epochs
   - prior auto-calibration at 0.10 x base RMSE, prior_seed recorded
   - fixed validation generator (val_seed) for deterministic model selection
   - m_eval=32, k_eval=50 recorded for downstream nested evaluation
@@ -52,6 +52,9 @@ CACHE_DIR = Path(
 )
 
 PRIOR_SEED = 20260703
+PRIOR_SCALE = os.environ.get("NEON_PRIOR_SCALE") or "auto_0p10_base_rmse"
+D_E = int(os.environ.get("NEON_D_E") or "16")
+N_EPOCHS = int(os.environ.get("NEON_EPOCHS") or "30")
 VAL_SEED = 1234
 
 
@@ -119,13 +122,13 @@ def main() -> int:
         enabled=True,
         feature_source="decoder_pre_projection",
         dependency="za_dependent",
-        d_e=16,
+        d_e=D_E,
         m_train=4,
         k_train=8,
         m_eval=32,
         k_eval=50,
-        prior_scale="auto_0p10_base_rmse",
-        n_epochs=30,
+        prior_scale=PRIOR_SCALE,
+        n_epochs=N_EPOCHS,
         lead_time_dim=0,
     )
 
