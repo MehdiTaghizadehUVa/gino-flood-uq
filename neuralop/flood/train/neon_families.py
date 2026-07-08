@@ -21,6 +21,8 @@ is unit-testable with fake samples.
 
 from __future__ import annotations
 
+import copy
+from collections.abc import MutableMapping
 from typing import Any, Mapping, Optional, Sequence, Tuple
 
 import torch
@@ -32,6 +34,141 @@ def _get(sample: Any, key: str, default=None):
     if isinstance(sample, Mapping):
         return sample.get(key, default)
     return getattr(sample, key, default)
+
+
+def _set(sample: Any, key: str, value: Any) -> None:
+    if isinstance(sample, MutableMapping):
+        sample[key] = value
+    else:
+        setattr(sample, key, value)
+
+
+def _as_lower_name(value: Any) -> str:
+    return str(value or "").strip().lower()
+
+
+def _copy_config_value(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        copied = {key: _copy_config_value(val) for key, val in value.items()}
+        try:
+            return type(value)(copied)
+        except Exception:
+            return copied
+    if isinstance(value, list):
+        return [_copy_config_value(val) for val in value]
+    if isinstance(value, tuple):
+        return tuple(_copy_config_value(val) for val in value)
+    try:
+        return copy.deepcopy(value)
+    except Exception:
+        return value
+
+
+def _clean_boundary_file_for_split(channel: Any, split_name: str) -> str | None:
+    """Return the clean forcing file for a train/test family split.
+
+    Historical NEON scripts load an eval config whose ``rollout_data`` section
+    points at the held-out test package. For Stage-2 training, we intentionally
+    reuse that config shape but switch the grouped-family source to the training
+    package and the matching clean forcing files.
+    """
+
+    current = _get(channel, "clean_boundary_file")
+    if current is None:
+        return None
+
+    split_token = "Train" if split_name == "train" else "Test"
+    other_token = "Test" if split_name == "train" else "Train"
+    updated = str(current)
+    replacements = (
+        (f"_{other_token}_Clean", f"_{split_token}_Clean"),
+        (f"_{other_token.lower()}_clean", f"_{split_token.lower()}_clean"),
+        (f"_{other_token}", f"_{split_token}"),
+        (f"_{other_token.lower()}", f"_{split_token.lower()}"),
+    )
+    for old, new in replacements:
+        if old in updated:
+            return updated.replace(old, new)
+
+    channel_name = _as_lower_name(_get(channel, "name"))
+    file_name = _as_lower_name(current)
+    if "precip" in channel_name or "precip" in file_name:
+        return f"Precipitation_{split_token}_Clean.txt"
+    if "stage" in channel_name or "stage" in file_name:
+        return f"Stage_Hydrographs_{split_token}_Clean.txt"
+    return updated
+
+
+def _rewrite_clean_boundary_files(rollout_section: Any, split_name: str) -> None:
+    boundary = _get(rollout_section, "boundary")
+    if boundary is None:
+        return
+    channels = _get(boundary, "channels")
+    if channels is None:
+        replacement = _clean_boundary_file_for_split(boundary, split_name)
+        if replacement is not None:
+            _set(boundary, "clean_boundary_file", replacement)
+        return
+    for channel in channels:
+        replacement = _clean_boundary_file_for_split(channel, split_name)
+        if replacement is not None:
+            _set(channel, "clean_boundary_file", replacement)
+
+
+def _train_split_txt(config: Any, explicit_split_txt: str | None) -> str:
+    if explicit_split_txt:
+        return str(explicit_split_txt)
+    data = _get(config, "data")
+    candidate = _get(data, "train_txt") if data is not None else None
+    # Several eval configs carry ``data.train_txt: test.txt`` because they were
+    # authored for rollout evaluation. Do not let that stale value leak into
+    # Stage-2 training.
+    if candidate and _as_lower_name(candidate) != "test.txt":
+        return str(candidate)
+    return "train.txt"
+
+
+def _prepare_family_dataset_config(
+    config: Any,
+    *,
+    dataset_split: str = "train",
+    split_txt: str | None = None,
+) -> tuple[Any, str, str | None]:
+    """Return a dataset-builder config for NEON family construction.
+
+    ``dataset_split='train'`` is the default because this module is used by
+    Stage-2 training. It converts an eval-style config into a training-package
+    view while leaving the caller's config untouched.
+    """
+
+    split = _as_lower_name(dataset_split)
+    if split in {"test", "rollout"}:
+        return config, "test", split_txt
+    if split != "train":
+        raise ValueError(f"dataset_split must be 'train' or 'test'; got {dataset_split!r}.")
+
+    try:
+        prepared = copy.deepcopy(config)
+    except Exception:
+        prepared = _copy_config_value(config)
+    data = _get(prepared, "data")
+    rollout = _get(prepared, "rollout_data")
+    if data is None or rollout is None:
+        raise ValueError(
+            "NEON Stage-2 training requires config.data and config.rollout_data sections."
+        )
+
+    train_root = _get(data, "train_root") or _get(data, "root")
+    if not train_root:
+        raise ValueError(
+            "NEON Stage-2 training requires data.train_root (preferred) or data.root "
+            "to locate the grouped training package."
+        )
+    resolved_split_txt = _train_split_txt(prepared, split_txt)
+    _set(rollout, "root", str(train_root))
+    _set(rollout, "test_txt", resolved_split_txt)
+    _rewrite_clean_boundary_files(rollout, "train")
+    return prepared, "train", resolved_split_txt
 
 
 def _cell_area_vector(sample: Any, *, nv: int, dtype: torch.dtype) -> torch.Tensor | None:
@@ -209,6 +346,8 @@ def build_families_from_config(
     val_fraction: float = 0.1,
     val_family_ids: Optional[Sequence[str]] = None,
     wettable_area_weights: bool = True,
+    dataset_split: str = "train",
+    split_txt: str | None = None,
 ) -> Tuple[list[NEONFamilySample], list[NEONFamilySample]]:
     """Build (train, val) NEONFamilySample splits from a flood eval config.
 
@@ -216,26 +355,45 @@ def build_families_from_config(
     the coastal FGN evaluator uses) and converts its per-hydrograph samples
     into NEON families. ``config`` must expose ``data`` (n_history,
     skip_before_timestep, rollout_length, query_res) and ``rollout_data``
-    (grouped test set) sections. Requires grouped hydrographs (R>1 references).
+    sections. By default, an eval-style ``rollout_data`` test view is converted
+    to the grouped training package described by ``data.train_root``. Requires
+    grouped hydrographs (R>1 references).
     """
     # Lazy import so this module's converter unit tests stay free of the heavy
     # dataset/IO dependency chain.
     from neuralop.flood.eval.datasets import _build_rollout_normalized_dataset
 
-    _rollout_ds, hydrograph_samples = _build_rollout_normalized_dataset(
+    family_config, split_name, resolved_split_txt = _prepare_family_dataset_config(
         config,
+        dataset_split=dataset_split,
+        split_txt=split_txt,
+    )
+    rollout_section = _get(family_config, "rollout_data")
+    if logger is not None:
+        logger.info(
+            "building NEON families from %s package: root=%s split_txt=%s",
+            split_name,
+            _get(rollout_section, "root"),
+            resolved_split_txt or _get(rollout_section, "test_txt", "test.txt"),
+        )
+    _rollout_ds, hydrograph_samples = _build_rollout_normalized_dataset(
+        family_config,
         dict(normalizers),
         list(target_variables),
         logger,
         structural_dry_artifact=structural_dry_artifact,
+        split_txt=resolved_split_txt,
+        split_name=split_name,
+        config_section="rollout_data",
     )
     if not hydrograph_samples:
         raise ValueError(
             "dataset builder produced no grouped hydrograph samples; NEON Stage-2 "
             "requires grouped families with R>1 HEC-RAS references per hydrograph."
         )
-    skip = int(_get(config.data, "skip_before_timestep", 0)) if hasattr(config, "data") else 0
-    n_hist = int(_get(config.data, "n_history", 3)) if hasattr(config, "data") else 3
+    data_section = _get(family_config, "data")
+    skip = int(_get(data_section, "skip_before_timestep", 0)) if data_section is not None else 0
+    n_hist = int(_get(data_section, "n_history", 3)) if data_section is not None else 3
     return grouped_samples_to_families(
         hydrograph_samples,
         skip_before_timestep=skip,

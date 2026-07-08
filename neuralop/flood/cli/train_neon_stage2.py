@@ -170,13 +170,12 @@ def _load_frozen_stage1(stage1_checkpoint: Any):  # pragma: no cover - GPU/infra
 def _build_grouped_families(data_root: Any, config: NEONStage2Config):  # pragma: no cover
     """Build (train, val) NEONFamilySample splits from grouped-hydrograph data.
 
-    ``data_root`` is the path to a coastal flood *eval* YAML config whose
-    ``data``/``rollout_data`` sections describe the grouped-hydrograph test set
-    (R>1 HEC-RAS references per hydrograph). Normalizers are taken from the
-    frozen Stage-1 bundle prepared by :func:`_load_frozen_stage1` (so the
-    references are normalized in the same space as the model), and the shared
-    rollout dataset builder + NEON family converter turn the per-hydrograph
-    samples into train/val ``NEONFamilySample`` splits.
+    ``data_root`` is the path to a coastal flood eval-style YAML config. Its
+    ``rollout_data`` section may point at the test package, but the NEON family
+    converter switches to the training package described by ``data.train_root``
+    for Stage-2 training. Normalizers are taken from the frozen Stage-1 bundle
+    prepared by :func:`_load_frozen_stage1` (so the references are normalized
+    in the same space as the model).
     """
     import logging
     import sys as _sys

@@ -36,8 +36,13 @@ scientific_calibration = _load_module(
 )
 
 NEONEpistemicCorrection = neon.NEONEpistemicCorrection
+NEONStage2LossWeights = neon.NEONStage2LossWeights
 anova_corrected_epistemic_variance = neon.anova_corrected_epistemic_variance
+cancellation_diagnostics = neon.cancellation_diagnostics
+epistemic_variance_diagnostics = neon.epistemic_variance_diagnostics
+compute_stage2_loss = neon.compute_stage2_loss
 correction_magnitude_penalty = neon.correction_magnitude_penalty
+epistemic_bootstrap_weights = neon.epistemic_bootstrap_weights
 freeze_stage1_model = neon.freeze_stage1_model
 graph_smoothness_penalty = neon.graph_smoothness_penalty
 nested_variance_components = neon.nested_variance_components
@@ -82,6 +87,60 @@ def test_epinet_correction_preserves_nested_shape_and_gradient_policy():
     assert all(p.grad is None for p in head.prior_branch.parameters())
 
 
+def test_projected_epinet_is_default_and_uses_smaller_prior_when_configured():
+    head = NEONEpistemicCorrection(
+        feature_channels=6,
+        out_channels=1,
+        epistemic_dim=4,
+        train_hidden_channels=32,
+        prior_hidden_channels=5,
+    )
+
+    assert head.branch_type == "projected"
+    assert head.train_hidden_channels == 32
+    assert head.prior_hidden_channels == 5
+    assert all(not p.requires_grad for p in head.prior_branch.parameters())
+
+
+def test_film_branch_remains_available_as_ablation():
+    head = NEONEpistemicCorrection(
+        feature_channels=6,
+        out_channels=1,
+        epistemic_dim=4,
+        hidden_channels=8,
+        branch_type="film",
+    )
+    out = head(torch.zeros(1, 2, 3, 4, 1), torch.randn(1, 2, 3, 4, 6), torch.randn(2, 4))
+
+    assert head.branch_type == "film"
+    assert out.prediction.shape == (1, 2, 2, 3, 4, 1)
+
+
+def test_projected_branch_dot_product_matches_constant_coefficients():
+    head = NEONEpistemicCorrection(
+        feature_channels=2,
+        out_channels=1,
+        epistemic_dim=3,
+        train_hidden_channels=4,
+        prior_hidden_channels=2,
+        alpha=0.0,
+        branch_type="projected",
+        concat_index=False,
+    )
+    for param in head.trainable_branch.mlp.parameters():
+        param.data.zero_()
+    # Final bias is reshaped to [out_channels=1, d_e=3], then dotted with z.
+    head.trainable_branch.mlp[-1].bias.data.copy_(torch.tensor([1.0, 2.0, 3.0]))
+    base = torch.zeros(1, 1, 1, 2, 1)
+    features = torch.randn(1, 1, 1, 2, 2)
+    z_e = torch.tensor([[1.0, 10.0, 100.0], [2.0, 0.0, -1.0]])
+
+    out = head(base, features, z_e)
+
+    expected = torch.tensor([321.0, -1.0]).view(1, 2, 1, 1, 1, 1).expand(1, 2, 1, 1, 2, 1)
+    torch.testing.assert_close(out.prediction, expected)
+
+
 def test_freeze_stage1_model_switches_to_eval_and_removes_gradients():
     model = nn.Sequential(nn.Linear(3, 4), nn.Dropout(p=0.5), nn.Linear(4, 1))
     model.train()
@@ -121,6 +180,7 @@ def test_checkpoint_round_trip_preserves_prior_branch_and_architecture():
     assert metadata["stage1_checkpoint"] == "dummy_fgno.pt"
     assert loaded.n_hidden_layers == 3
     assert loaded.hidden_channels == 7
+    assert loaded.branch_type == "projected"
     assert all(not param.requires_grad for param in loaded.prior_branch.parameters())
     torch.testing.assert_close(actual, expected)
 
@@ -160,6 +220,47 @@ def test_stage2_fit_score_honors_configured_objective_modes():
     assert torch.isclose(l2_mean, torch.tensor(4.0))
 
 
+def test_default_stage2_loss_is_native_fit_only():
+    torch.manual_seed(3)
+    base = torch.zeros(1, 2, 2, 3, 1)
+    features = torch.randn(1, 2, 2, 3, 4)
+    z_e = torch.randn(2, 3)
+    head = NEONEpistemicCorrection(
+        feature_channels=4,
+        out_channels=1,
+        epistemic_dim=3,
+        train_hidden_channels=8,
+        prior_hidden_channels=3,
+        alpha=0.2,
+    )
+    out = head(base, features, z_e)
+    ref = torch.zeros(1, 3, 2, 3, 1)
+
+    default_losses = compute_stage2_loss(
+        prediction=out.prediction,
+        reference=ref,
+        correction=out.correction,
+        module=head,
+    )
+    opt_in_losses = compute_stage2_loss(
+        prediction=out.prediction,
+        reference=ref,
+        correction=out.correction,
+        module=head,
+        loss_weights=NEONStage2LossWeights(rpf=0.1, mag=0.1),
+    )
+
+    torch.testing.assert_close(default_losses.total, default_losses.fit)
+    torch.testing.assert_close(default_losses.rpf, torch.tensor(0.0))
+    torch.testing.assert_close(default_losses.graph, torch.tensor(0.0))
+    torch.testing.assert_close(default_losses.time, torch.tensor(0.0))
+    torch.testing.assert_close(default_losses.pos, torch.tensor(0.0))
+    torch.testing.assert_close(default_losses.mag, torch.tensor(0.0))
+    assert opt_in_losses.rpf > 0.0
+    assert opt_in_losses.mag > 0.0
+    assert opt_in_losses.total > opt_in_losses.fit
+
+
 def test_per_epistemic_fair_crps_honors_normalized_weights():
     pred = torch.tensor(
         [
@@ -184,6 +285,58 @@ def test_per_epistemic_fair_crps_honors_normalized_weights():
     score = per_epistemic_fair_crps(pred, ref, weights=weights, reduction="mean")
 
     assert torch.isclose(score, torch.tensor(0.0))
+
+
+def test_per_epistemic_fair_crps_honors_sample_weights():
+    pred = torch.tensor(
+        [
+            [
+                [[[[0.0]]], [[[2.0]]]],
+                [[[[10.0]]], [[[12.0]]]],
+            ]
+        ]
+    )
+    ref = torch.tensor([[[[[0.0]]], [[[2.0]]]]])
+    weights = torch.tensor([[1.0, 0.0]])
+
+    score = per_epistemic_fair_crps(
+        pred, ref, sample_weights=weights, reduction="mean"
+    )
+
+    # Unweighted per-particle scores are [0, 9]; sample weights [1, 0]
+    # leave mean([0, 0]) = 0.
+    assert torch.isclose(score, torch.tensor(0.0))
+
+
+def test_epistemic_bootstrap_weights_are_reproducible_and_particle_specific():
+    z_e = torch.tensor([[1.0, 0.5, -0.5], [-0.3, 1.2, 0.7]])
+    family_ids = ["fam-a", "fam-b", "fam-c"]
+
+    w1 = epistemic_bootstrap_weights(family_ids, z_e, seed=123)
+    w2 = epistemic_bootstrap_weights(family_ids, z_e, seed=123)
+    disabled = epistemic_bootstrap_weights(family_ids, z_e, distribution="none")
+
+    torch.testing.assert_close(w1, w2)
+    assert w1.shape == (3, 2)
+    assert torch.all(w1 > 0)
+    torch.testing.assert_close(w1.mean(dim=0), torch.ones(2), rtol=1e-6, atol=1e-6)
+    assert not torch.allclose(w1[:, 0], w1[:, 1])
+    torch.testing.assert_close(disabled, torch.ones_like(disabled))
+
+
+def test_cancellation_diagnostics_detect_anti_correlated_prior():
+    train = torch.ones(1, 2, 1, 2, 3, 1)
+    prior = -torch.ones_like(train)
+
+    diag = cancellation_diagnostics(
+        trainable_correction=train,
+        prior_correction=prior,
+        alpha=1.0,
+    )
+
+    assert diag["train_prior_cosine"] < -0.99
+    assert diag["cancellation_fraction"] > 0.99
+    assert diag["total_correction_rms"] == 0.0
 
 
 def test_chunked_fair_crps_matches_unchunked_score():
@@ -357,3 +510,39 @@ def test_fair_crps_members_matches_pairwise_reference_implementation():
     # chunking must not change the result
     fast_c = neon.fair_crps_members(pred, ref, reduction="mean", chunk_size=5)
     assert abs(float(fast_c) - float(slow)) < 1e-10
+
+
+def test_epistemic_variance_survives_size_one_chunking():
+    """Regression: epistemic variance assembled from size-1 z_e chunks must be
+    nonzero and identical to the full-M computation. This is the exact failure
+    mode behind all-zero epistemic-variance logs under epistemic_chunk_size=1."""
+    torch.manual_seed(0)
+    base = torch.zeros(2, 3, 4, 5, 1)          # [B, K, T, Nv, C]
+    features = torch.randn(2, 3, 4, 5, 6)      # [B, K, T, Nv, C_phi]
+    z_e = torch.randn(4, 4)                     # [M, d_e], M=4
+    alpha = 0.2
+    head = NEONEpistemicCorrection(
+        feature_channels=6, out_channels=1, epistemic_dim=4, hidden_channels=8, alpha=alpha
+    )
+    head.eval()
+    with torch.no_grad():
+        full = head(base, features, z_e)
+        mbar_prior = (alpha * full.prior_correction).mean(dim=2)
+        mbar_total = full.trainable_correction.mean(dim=2) + mbar_prior
+        ref = epistemic_variance_diagnostics(mbar_total=mbar_total, mbar_prior_scaled=mbar_prior)
+
+        tr_chunks, pr_chunks = [], []
+        for m in range(int(z_e.shape[0])):
+            o = head(base, features, z_e[m : m + 1])
+            tr_chunks.append(o.trainable_correction.mean(dim=2))
+            pr_chunks.append((alpha * o.prior_correction).mean(dim=2))
+        pr = torch.cat(pr_chunks, dim=1)
+        tot = torch.cat(tr_chunks, dim=1) + pr
+        chunked = epistemic_variance_diagnostics(mbar_total=tot, mbar_prior_scaled=pr)
+
+    assert ref["total_epistemic_variance"] > 0.0
+    assert ref["prior_epistemic_variance"] > 0.0
+    assert chunked["total_epistemic_variance"] > 0.0
+    assert abs(chunked["total_epistemic_variance"] - ref["total_epistemic_variance"]) <= 1e-6
+    assert abs(chunked["prior_epistemic_variance"] - ref["prior_epistemic_variance"]) <= 1e-6
+    assert abs(chunked["prior_retention_ratio"] - ref["prior_retention_ratio"]) <= 1e-6

@@ -1,9 +1,8 @@
 """NEON Stage-2 GPU smoke against the real coastal FGN with REAL HEC-RAS references.
 
 Unlike ``neon_stage2_smoke.py`` (real model, synthetic reference ensembles), this
-smoke sources its grouped-hydrograph families from the coastal FGN *eval* config's
-rollout test set -- the actual multi-simulation HEC-RAS reference ensembles -- via
-the shared rollout dataset builder and the NEON family converter. It then runs one
+smoke sources grouped-hydrograph families from the coastal FGN training package by
+converting the eval-style rollout config into a train split view. It then runs one
 Stage-2 epoch end-to-end (probe -> build EpiNet -> auto-calibrate prior -> train ->
 checkpoint) so we exercise the full real-reference path.
 
@@ -53,7 +52,7 @@ def main() -> int:
     device = "cuda:0" if torch.cuda.is_available() else "cpu"
     LOG.info("device=%s", device)
 
-    # --- 1) Load the coastal flood eval config (grouped rollout test set) ---
+    # --- 1) Load the coastal flood eval config (converted to training package below) ---
     saved_argv = list(sys.argv)
     try:
         sys.argv = ["neon_real_ref_smoke", "--config_path", EVAL_CONFIG]
@@ -84,6 +83,7 @@ def main() -> int:
         rollout_length=ROLLOUT_LENGTH,
         max_families=MAX_FAMILIES,
         val_fraction=VAL_FRACTION,
+        dataset_split="train",
     )
     LOG.info("families: train=%d val=%d", len(train_fam), len(val_fam))
     f0 = train_fam[0]
@@ -123,6 +123,8 @@ def main() -> int:
 
     gen = torch.Generator().manual_seed(0)
     out_dir = Path("/scratch/jrj6wm/GINO_Model/neon_stage2_smoke_out/real_ref")
+    cache_dir = out_dir / "feature_cache"
+    LOG.info("feature_cache_dir=%s", cache_dir)
     result = run_neon_stage2_training(
         config=config,
         stage1_checkpoint=BUNDLE,
@@ -135,10 +137,17 @@ def main() -> int:
         out_channels=len(target_variables),
         generator=gen,
         calibrate_prior=True,
+        cache_features=True,
+        cache_device="cpu",
+        cache_dir=cache_dir,
     )
 
     LOG.info("TRAIN OK best_epoch=%s best_val_fit=%.4f", result.best_epoch, result.best_val_fit)
     ckpt = out_dir / "neon_stage2_best.pt"
+    cache_files = sorted(cache_dir.glob("*.pt"))
+    if not cache_files:
+        raise RuntimeError(f"Expected disk-backed frozen-feature cache files in {cache_dir}")
+    LOG.info("feature cache files=%d first=%s", len(cache_files), cache_files[0])
     LOG.info("checkpoint exists=%s at %s", ckpt.exists(), ckpt)
     print("REAL-REF SMOKE OK")
     return 0

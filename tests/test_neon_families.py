@@ -3,6 +3,7 @@
 import importlib.util
 import sys
 import types
+from types import SimpleNamespace
 from pathlib import Path
 
 import pytest
@@ -33,6 +34,7 @@ fam_mod = _load_module("neuralop.flood.train.neon_families", "neuralop/flood/tra
 grouped_sample_to_family = fam_mod.grouped_sample_to_family
 split_families_by_id = fam_mod.split_families_by_id
 grouped_samples_to_families = fam_mod.grouped_samples_to_families
+_prepare_family_dataset_config = fam_mod._prepare_family_dataset_config
 
 
 Nv, Cs, Cb, C, res = 5, 7, 2, 1, 4
@@ -144,3 +146,73 @@ def test_grouped_samples_to_families_end_to_end_and_max_cap():
     assert len(train) + len(val) == 5  # capped
     # produced real families usable by the training loop
     assert all(f.reference.ndim == 4 for f in train + val)
+
+
+def test_training_family_config_uses_train_package_without_mutating_eval_config():
+    cfg = SimpleNamespace(
+        data=SimpleNamespace(
+            root="/scratch/test-package/test",
+            train_root="/scratch/train-package/train",
+            train_txt="test.txt",  # stale value carried by some eval configs
+            n_history=3,
+            skip_before_timestep=12,
+        ),
+        rollout_data=SimpleNamespace(
+            root="/scratch/test-package/test",
+            test_txt="test.txt",
+            boundary=SimpleNamespace(
+                channels=[
+                    SimpleNamespace(
+                        name="stage",
+                        mode="clean_family",
+                        clean_boundary_file="Stage_Hydrographs_Test_Clean.txt",
+                    ),
+                    SimpleNamespace(
+                        name="precipitation",
+                        mode="clean_family",
+                        clean_boundary_file="Precipitation_Test_Clean.txt",
+                    ),
+                ]
+            ),
+        ),
+    )
+
+    prepared, split_name, split_txt = _prepare_family_dataset_config(
+        cfg,
+        dataset_split="train",
+    )
+
+    assert split_name == "train"
+    assert split_txt == "train.txt"
+    assert prepared.rollout_data.root == "/scratch/train-package/train"
+    assert prepared.rollout_data.test_txt == "train.txt"
+    clean_files = [
+        channel.clean_boundary_file
+        for channel in prepared.rollout_data.boundary.channels
+    ]
+    assert clean_files == [
+        "Stage_Hydrographs_Train_Clean.txt",
+        "Precipitation_Train_Clean.txt",
+    ]
+
+    # The eval config remains a test-package view for ordinary rollout use.
+    assert cfg.rollout_data.root == "/scratch/test-package/test"
+    assert cfg.rollout_data.test_txt == "test.txt"
+    assert cfg.rollout_data.boundary.channels[0].clean_boundary_file.endswith("_Test_Clean.txt")
+
+
+def test_test_family_config_preserves_rollout_package_view():
+    cfg = SimpleNamespace(
+        data=SimpleNamespace(train_root="/scratch/train-package/train"),
+        rollout_data=SimpleNamespace(root="/scratch/test-package/test", test_txt="test.txt"),
+    )
+
+    prepared, split_name, split_txt = _prepare_family_dataset_config(
+        cfg,
+        dataset_split="test",
+    )
+
+    assert prepared is cfg
+    assert split_name == "test"
+    assert split_txt is None
+    assert prepared.rollout_data.root == "/scratch/test-package/test"

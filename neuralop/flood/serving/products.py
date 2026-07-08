@@ -261,7 +261,7 @@ class ForecastProductBuilder:
         xy = np.asarray(geometry, dtype=np.float64)
         if xy.ndim != 2 or xy.shape[1] != 2 or xy.shape[0] != forecast.members_wd.shape[2]:
             raise ValueError("forecast.metadata['geometry_xy'] must have shape [n_cells,2].")
-        from neuralop.flood.serving.map_rendering import write_rivanna_style_map_png
+        from neuralop.flood.serving.map_rendering import serving_visualization_config, write_rivanna_style_map_png
 
         members = np.clip(np.asarray(forecast.members_wd, dtype=np.float64), 0.0, None)
         lead = np.asarray(forecast.lead_time_hours, dtype=np.float64)
@@ -286,7 +286,7 @@ class ForecastProductBuilder:
             and wettable is not None
         )
         elevation_raw = metadata.get("elevation_raw")
-        visualization_config = metadata.get("visualization_config")
+        visualization_config = serving_visualization_config(metadata.get("visualization_config"))
         product_specs = []
         for threshold_m in self.thresholds_m:
             product_specs.append(
@@ -950,8 +950,9 @@ class ForecastProductBuilder:
             return
         xy = np.asarray(geometry, dtype=np.float64)
         elevation_raw = metadata.get("elevation_raw")
-        visualization_config = metadata.get("visualization_config")
-        from neuralop.flood.serving.map_rendering import write_rivanna_style_map_png
+        from neuralop.flood.serving.map_rendering import serving_visualization_config, write_rivanna_style_map_png
+
+        visualization_config = serving_visualization_config(metadata.get("visualization_config"))
 
         def _render(npy_name: str, *, title: str, cbar: str, cmap: str) -> None:
             path = arrays_path.get(npy_name)
@@ -1187,13 +1188,13 @@ class ForecastProductBuilder:
             "wettable": [bool(b) for b in wettable.tolist()],
         }
         try:
-            from neuralop.flood.serving.map_rendering import compute_rivanna_style_data_viewport
+            from neuralop.flood.serving.map_rendering import compute_rivanna_style_data_viewport, serving_visualization_config
 
             elevation_raw = metadata.get("elevation_raw")
             viewport = compute_rivanna_style_data_viewport(
                 geometry_xy=xy,
                 elevation_raw=np.asarray(elevation_raw, dtype=np.float64) if elevation_raw is not None else None,
-                visualization_config=metadata.get("visualization_config"),
+                visualization_config=serving_visualization_config(metadata.get("visualization_config")),
             )
             data_bounds = viewport.pop("data_bounds", None)
             payload["image_data_viewport"] = viewport
@@ -1349,8 +1350,9 @@ class ForecastProductBuilder:
             return
         xy = np.asarray(geometry, dtype=np.float64)
         elevation_raw = metadata.get("elevation_raw")
-        visualization_config = metadata.get("visualization_config")
-        from neuralop.flood.serving.map_rendering import write_rivanna_style_map_png
+        from neuralop.flood.serving.map_rendering import serving_visualization_config, write_rivanna_style_map_png
+
+        visualization_config = serving_visualization_config(metadata.get("visualization_config"))
 
         def _render(npy_name: str, *, title: str, cbar: str, cmap: str, vmin: float, vmax: float | None,
                     is_wd_depth: bool = False, zero_transparent: bool = True) -> None:
@@ -1557,7 +1559,7 @@ class ForecastProductBuilder:
         if xy.ndim != 2 or xy.shape[1] != 2 or xy.shape[0] != forecast.members_wd.shape[2]:
             raise ValueError("forecast.metadata['geometry_xy'] must have shape [n_cells,2].")
         from neuralop.flood.eval import render as eval_render
-        from neuralop.flood.serving.map_rendering import write_rivanna_style_map_png
+        from neuralop.flood.serving.map_rendering import SERVING_MAP_FACE_COLOR, serving_visualization_config, write_rivanna_style_map_png
 
         members = np.clip(np.asarray(forecast.members_wd, dtype=np.float64), 0.0, None)
         lead = np.asarray(forecast.lead_time_hours, dtype=np.float64)
@@ -1567,7 +1569,7 @@ class ForecastProductBuilder:
         out_dir = Path(output_dir)
         out_dir.mkdir(parents=True, exist_ok=True)
         elevation_raw = metadata.get("elevation_raw")
-        visualization_config = metadata.get("visualization_config")
+        visualization_config = serving_visualization_config(metadata.get("visualization_config"))
         wettable = (
             np.asarray(forecast.wettable_mask, dtype=bool)
             if forecast.wettable_mask is not None
@@ -1726,6 +1728,7 @@ class ForecastProductBuilder:
         import matplotlib.pyplot as plt
         from matplotlib.animation import PillowWriter
         from neuralop.flood.eval import render as eval_render
+        from neuralop.flood.serving.map_rendering import SERVING_MAP_FACE_COLOR, serving_visualization_config
 
         with mpl.rc_context(
             {
@@ -1744,7 +1747,7 @@ class ForecastProductBuilder:
             dpi = 180
             renderer = eval_render._build_spatial_renderer(x, y, figsize=fig_size, dpi=dpi, n_rows=1, n_cols=1)
             elevation_raw = metadata.get("elevation_raw")
-            visualization_config = metadata.get("visualization_config")
+            visualization_config = serving_visualization_config(metadata.get("visualization_config"))
             context = eval_render._cartographic_context(
                 x=x,
                 y=y,
@@ -1767,10 +1770,10 @@ class ForecastProductBuilder:
                 figsize=fig_size,
                 dpi=dpi,
                 constrained_layout=True,
-                facecolor="#f7fafb",
+                facecolor=SERVING_MAP_FACE_COLOR,
             )
             try:
-                ax.set_facecolor("#f7fafb")
+                ax.set_facecolor(SERVING_MAP_FACE_COLOR)
                 artist, _ = eval_render._plot_spatial_panel(
                     ax=ax,
                     x=x,
@@ -1855,6 +1858,7 @@ class ForecastProductBuilder:
         import matplotlib.pyplot as plt
         from matplotlib.animation import PillowWriter
         from neuralop.flood.eval import render as eval_render
+        from neuralop.flood.serving.map_rendering import SERVING_MAP_FACE_COLOR, serving_visualization_config
 
         with mpl.rc_context(
             {
@@ -1873,7 +1877,7 @@ class ForecastProductBuilder:
             dpi = 180
             renderer = eval_render._build_spatial_renderer(x, y, figsize=fig_size, dpi=dpi, n_rows=1, n_cols=1)
             elevation_raw = metadata.get("elevation_raw")
-            visualization_config = metadata.get("visualization_config")
+            visualization_config = serving_visualization_config(metadata.get("visualization_config"))
             context = eval_render._cartographic_context(
                 x=x,
                 y=y,
@@ -1888,10 +1892,10 @@ class ForecastProductBuilder:
                 figsize=fig_size,
                 dpi=dpi,
                 constrained_layout=True,
-                facecolor="#f7fafb",
+                facecolor=SERVING_MAP_FACE_COLOR,
             )
             try:
-                ax.set_facecolor("#f7fafb")
+                ax.set_facecolor(SERVING_MAP_FACE_COLOR)
                 artist, _ = eval_render._plot_spatial_panel(
                     ax=ax,
                     x=x,
