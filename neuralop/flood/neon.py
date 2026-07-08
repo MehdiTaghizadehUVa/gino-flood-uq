@@ -7,9 +7,10 @@ interface.  It does not change Stage-1 FGNO training behavior.
 from __future__ import annotations
 
 import math
+import hashlib
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping, Sequence
 
 import torch
 from torch import nn
@@ -40,13 +41,18 @@ class NestedVarianceComponents:
 
 @dataclass
 class NEONStage2LossWeights:
-    """Weights for the Stage-2 objective terms."""
+    """Weights for opt-in Stage-2 ablation penalties.
 
-    rpf: float = 1.0e-4
-    smooth: float = 1.0e-3
-    time: float = 1.0
-    pos: float = 1.0e-2
-    mag: float = 1.0e-4
+    Native EpiNet/NEON training uses the data-fit objective with the
+    randomized prior architecture. Flood-specific smoothness, positivity, and
+    magnitude penalties are retained only as explicit ablation knobs.
+    """
+
+    rpf: float = 0.0
+    smooth: float = 0.0
+    time: float = 0.0
+    pos: float = 0.0
+    mag: float = 0.0
 
 
 @dataclass
@@ -60,6 +66,35 @@ class NEONStage2LossOutput:
     time: torch.Tensor
     pos: torch.Tensor
     mag: torch.Tensor
+    diagnostics: dict[str, float] | None = None
+
+
+def _activation(name: str) -> nn.Module:
+    name = str(name).strip().lower()
+    if name == "gelu":
+        return nn.GELU()
+    if name == "silu":
+        return nn.SiLU()
+    if name == "relu":
+        return nn.ReLU()
+    raise ValueError("branch_activation must be one of {'gelu', 'silu', 'relu'}.")
+
+
+def _pointwise_mlp(
+    *,
+    input_dim: int,
+    hidden_dim: int,
+    output_dim: int,
+    n_hidden_layers: int,
+    activation: str,
+) -> nn.Sequential:
+    layers: list[nn.Module] = []
+    current = int(input_dim)
+    for _ in range(max(0, int(n_hidden_layers))):
+        layers.extend([nn.Linear(current, int(hidden_dim)), _activation(activation)])
+        current = int(hidden_dim)
+    layers.append(nn.Linear(current, int(output_dim)))
+    return nn.Sequential(*layers)
 
 
 def freeze_stage1_model(model: nn.Module) -> nn.Module:
@@ -222,6 +257,158 @@ class _CorrectionBranch(nn.Module):
         return self.output_head(modulated)
 
 
+def _append_projected_lead_features(features: torch.Tensor, lead_time_dim: int) -> torch.Tensor:
+    """Concatenate deterministic lead-time features to ``[B,K,T,Nv,C]`` tensors."""
+
+    lead_time_dim = int(lead_time_dim)
+    if lead_time_dim <= 0:
+        return features
+    n_time = int(features.shape[2])
+    if n_time > 1:
+        t_norm = torch.linspace(0.0, 1.0, n_time, device=features.device, dtype=features.dtype)
+    else:
+        t_norm = torch.zeros(1, device=features.device, dtype=features.dtype)
+    lead = _LeadTimeEncoder._sinusoidal(t_norm, lead_time_dim)
+    lead = lead.view(1, 1, n_time, 1, lead_time_dim).expand(
+        features.shape[0], features.shape[1], -1, features.shape[3], -1
+    )
+    return torch.cat([features, lead], dim=-1)
+
+
+class _ProjectedTrainableBranch(nn.Module):
+    """NEON/ENN-style projected trainable EpiNet branch.
+
+    The MLP emits ``out_channels * d_e`` coefficients at each mesh-time point;
+    the correction is their dot product with the epistemic index. This mirrors
+    DeepMind ENN ``ProjectedMLP`` and PIL NEON ``EpiTrain`` more closely than a
+    FiLM/AdaIN modulator.
+    """
+
+    def __init__(
+        self,
+        *,
+        feature_channels: int,
+        out_channels: int,
+        epistemic_dim: int,
+        hidden_channels: int,
+        n_hidden_layers: int = 2,
+        activation: str = "gelu",
+        concat_index: bool = True,
+        lead_time_dim: int = 0,
+    ) -> None:
+        super().__init__()
+        if feature_channels < 1:
+            raise ValueError("feature_channels must be >= 1.")
+        if out_channels < 1:
+            raise ValueError("out_channels must be >= 1.")
+        if epistemic_dim < 1:
+            raise ValueError("epistemic_dim must be >= 1.")
+        if hidden_channels < 1:
+            raise ValueError("hidden_channels must be >= 1.")
+        self.feature_channels = int(feature_channels)
+        self.out_channels = int(out_channels)
+        self.epistemic_dim = int(epistemic_dim)
+        self.concat_index = bool(concat_index)
+        self.lead_time_dim = int(lead_time_dim)
+        input_dim = self.feature_channels + self.lead_time_dim
+        if self.concat_index:
+            input_dim += self.epistemic_dim
+        self.mlp = _pointwise_mlp(
+            input_dim=input_dim,
+            hidden_dim=int(hidden_channels),
+            output_dim=self.out_channels * self.epistemic_dim,
+            n_hidden_layers=int(n_hidden_layers),
+            activation=activation,
+        )
+
+    def forward(self, features: torch.Tensor, z_e: torch.Tensor) -> torch.Tensor:
+        if features.ndim != 5:
+            raise ValueError(
+                "features must have shape [B, K, T, Nv, C_phi], "
+                f"got {tuple(features.shape)}."
+            )
+        if z_e.ndim != 2:
+            raise ValueError(f"z_e must have shape [M, d_e], got {tuple(z_e.shape)}.")
+        if z_e.shape[-1] != self.epistemic_dim:
+            raise ValueError(
+                f"z_e last dimension must be {self.epistemic_dim}, got {z_e.shape[-1]}."
+            )
+        B, K, T, Nv, _ = (int(v) for v in features.shape)
+        M = int(z_e.shape[0])
+        branch_features = _append_projected_lead_features(features, self.lead_time_dim)
+        expanded = branch_features.unsqueeze(1).expand(B, M, K, T, Nv, -1)
+        if self.concat_index:
+            z_features = z_e.to(device=features.device, dtype=features.dtype).view(
+                1, M, 1, 1, 1, self.epistemic_dim
+            )
+            z_features = z_features.expand(B, M, K, T, Nv, -1)
+            expanded = torch.cat([expanded, z_features], dim=-1)
+        flat = expanded.reshape(-1, expanded.shape[-1])
+        coeff = self.mlp(flat).reshape(B, M, K, T, Nv, self.out_channels, self.epistemic_dim)
+        z_dot = z_e.to(device=features.device, dtype=features.dtype).view(
+            1, M, 1, 1, 1, 1, self.epistemic_dim
+        )
+        return (coeff * z_dot).sum(dim=-1)
+
+
+class _ProjectedPriorBranch(nn.Module):
+    """Fixed randomized-prior branch with one small MLP basis per z dimension."""
+
+    def __init__(
+        self,
+        *,
+        feature_channels: int,
+        out_channels: int,
+        epistemic_dim: int,
+        hidden_channels: int,
+        n_hidden_layers: int = 2,
+        activation: str = "gelu",
+        lead_time_dim: int = 0,
+    ) -> None:
+        super().__init__()
+        if hidden_channels < 1:
+            raise ValueError("hidden_channels must be >= 1.")
+        self.feature_channels = int(feature_channels)
+        self.out_channels = int(out_channels)
+        self.epistemic_dim = int(epistemic_dim)
+        self.lead_time_dim = int(lead_time_dim)
+        input_dim = self.feature_channels + self.lead_time_dim
+        self.basis = nn.ModuleList(
+            [
+                _pointwise_mlp(
+                    input_dim=input_dim,
+                    hidden_dim=int(hidden_channels),
+                    output_dim=self.out_channels,
+                    n_hidden_layers=int(n_hidden_layers),
+                    activation=activation,
+                )
+                for _ in range(self.epistemic_dim)
+            ]
+        )
+
+    def forward(self, features: torch.Tensor, z_e: torch.Tensor) -> torch.Tensor:
+        if features.ndim != 5:
+            raise ValueError(
+                "features must have shape [B, K, T, Nv, C_phi], "
+                f"got {tuple(features.shape)}."
+            )
+        if z_e.ndim != 2 or z_e.shape[-1] != self.epistemic_dim:
+            raise ValueError(
+                f"z_e must have shape [M, {self.epistemic_dim}], got {tuple(z_e.shape)}."
+            )
+        B, K, T, Nv, _ = (int(v) for v in features.shape)
+        branch_features = _append_projected_lead_features(features, self.lead_time_dim)
+        flat = branch_features.reshape(-1, branch_features.shape[-1])
+        basis = torch.stack(
+            [mlp(flat).reshape(B, K, T, Nv, self.out_channels) for mlp in self.basis],
+            dim=-1,
+        )
+        z_dot = z_e.to(device=features.device, dtype=features.dtype).view(
+            1, int(z_e.shape[0]), 1, 1, 1, 1, self.epistemic_dim
+        )
+        return (basis.unsqueeze(1) * z_dot).sum(dim=-1)
+
+
 class NEONEpistemicCorrection(nn.Module):
     """Randomized-prior EpiNet correction head for frozen FGNO features."""
 
@@ -231,9 +418,15 @@ class NEONEpistemicCorrection(nn.Module):
         feature_channels: int,
         out_channels: int,
         epistemic_dim: int,
-        hidden_channels: int = 64,
+        hidden_channels: int | None = None,
+        train_hidden_channels: int | None = None,
+        prior_hidden_channels: int | None = None,
         alpha: float = 0.1,
         n_hidden_layers: int = 2,
+        branch_layers: int | None = None,
+        branch_activation: str = "gelu",
+        branch_type: str = "projected",
+        concat_index: bool = True,
         detach_features: bool = True,
         lead_time_dim: int = 0,
         za_dependent: bool = True,
@@ -242,28 +435,65 @@ class NEONEpistemicCorrection(nn.Module):
         self.feature_channels = int(feature_channels)
         self.out_channels = int(out_channels)
         self.epistemic_dim = int(epistemic_dim)
-        self.hidden_channels = int(hidden_channels)
+        # ``hidden_channels`` is the legacy constructor/checkpoint key. When it
+        # is supplied, it defines the train branch only; projected priors stay
+        # small unless explicitly overridden.
+        if train_hidden_channels is None:
+            train_hidden_channels = 32 if hidden_channels is None else int(hidden_channels)
+        if prior_hidden_channels is None:
+            prior_hidden_channels = 5 if hidden_channels is None else int(hidden_channels)
+        if branch_layers is not None:
+            n_hidden_layers = int(branch_layers)
+        self.train_hidden_channels = int(train_hidden_channels)
+        self.prior_hidden_channels = int(prior_hidden_channels)
+        self.hidden_channels = self.train_hidden_channels
         self.n_hidden_layers = int(n_hidden_layers)
+        self.branch_activation = str(branch_activation).strip().lower()
+        self.branch_type = str(branch_type).strip().lower()
+        if self.branch_type not in {"projected", "film"}:
+            raise ValueError("branch_type must be one of {'projected', 'film'}.")
+        self.concat_index = bool(concat_index)
         self.alpha = float(alpha)
         self.detach_features = bool(detach_features)
         self.lead_time_dim = int(lead_time_dim)
         self.za_dependent = bool(za_dependent)
-        self.trainable_branch = _CorrectionBranch(
-            feature_channels=self.feature_channels,
-            out_channels=self.out_channels,
-            epistemic_dim=self.epistemic_dim,
-            hidden_channels=self.hidden_channels,
-            n_hidden_layers=n_hidden_layers,
-            lead_time_dim=self.lead_time_dim,
-        )
-        self.prior_branch = _CorrectionBranch(
-            feature_channels=self.feature_channels,
-            out_channels=self.out_channels,
-            epistemic_dim=self.epistemic_dim,
-            hidden_channels=self.hidden_channels,
-            n_hidden_layers=n_hidden_layers,
-            lead_time_dim=self.lead_time_dim,
-        )
+        if self.branch_type == "film":
+            self.trainable_branch = _CorrectionBranch(
+                feature_channels=self.feature_channels,
+                out_channels=self.out_channels,
+                epistemic_dim=self.epistemic_dim,
+                hidden_channels=self.train_hidden_channels,
+                n_hidden_layers=n_hidden_layers,
+                lead_time_dim=self.lead_time_dim,
+            )
+            self.prior_branch = _CorrectionBranch(
+                feature_channels=self.feature_channels,
+                out_channels=self.out_channels,
+                epistemic_dim=self.epistemic_dim,
+                hidden_channels=self.prior_hidden_channels,
+                n_hidden_layers=n_hidden_layers,
+                lead_time_dim=self.lead_time_dim,
+            )
+        else:
+            self.trainable_branch = _ProjectedTrainableBranch(
+                feature_channels=self.feature_channels,
+                out_channels=self.out_channels,
+                epistemic_dim=self.epistemic_dim,
+                hidden_channels=self.train_hidden_channels,
+                n_hidden_layers=n_hidden_layers,
+                activation=self.branch_activation,
+                concat_index=self.concat_index,
+                lead_time_dim=self.lead_time_dim,
+            )
+            self.prior_branch = _ProjectedPriorBranch(
+                feature_channels=self.feature_channels,
+                out_channels=self.out_channels,
+                epistemic_dim=self.epistemic_dim,
+                hidden_channels=self.prior_hidden_channels,
+                n_hidden_layers=n_hidden_layers,
+                activation=self.branch_activation,
+                lead_time_dim=self.lead_time_dim,
+            )
         for param in self.prior_branch.parameters():
             param.requires_grad_(False)
 
@@ -324,10 +554,13 @@ class NEONEpistemicCorrection(nn.Module):
     def regularized_parameters(self):
         """Parameters that define the trainable correction modulation/output."""
 
-        yield from self.trainable_branch.epistemic_encoder.parameters()
-        yield from self.trainable_branch.output_head.parameters()
-        if self.trainable_branch.lead_time_encoder is not None:
-            yield from self.trainable_branch.lead_time_encoder.parameters()
+        if self.branch_type == "film":
+            yield from self.trainable_branch.epistemic_encoder.parameters()
+            yield from self.trainable_branch.output_head.parameters()
+            if self.trainable_branch.lead_time_encoder is not None:
+                yield from self.trainable_branch.lead_time_encoder.parameters()
+        else:
+            yield from self.trainable_branch.mlp.parameters()
 
 
 def _validate_nested_prediction(prediction: torch.Tensor) -> tuple[int, int, int, int, int, int]:
@@ -391,6 +624,7 @@ def per_epistemic_fair_crps(
     reference: torch.Tensor,
     *,
     weights: torch.Tensor | None = None,
+    sample_weights: torch.Tensor | None = None,
     include_reference_term: bool = False,
     reduction: str = "mean",
     chunk_size: int | None = 65536,
@@ -406,6 +640,11 @@ def per_epistemic_fair_crps(
     weights
         Optional mesh/time/channel weights.  When supplied, weights are
         normalized per batch item across ``[T, Nv, C]``.
+    sample_weights
+        Optional family-by-epistemic weights with shape ``[B, M]``. These are
+        applied after per-location CRPS aggregation; mesh/time weights keep
+        their separate meaning. The mean reduction uses ``mean(score * weight)``
+        so pre-normalized bootstrap weights keep their intended SGD weighting.
     include_reference_term
         If ``True``, subtract the HEC-RAS reference self-distance term for a
         full distribution-to-distribution diagnostic.  This term is constant
@@ -498,6 +737,15 @@ def per_epistemic_fair_crps(
     if flat_weights is None:
         per_particle = per_particle / max(float(unweighted_count), 1.0)
 
+    if sample_weights is not None:
+        sample_weights = sample_weights.to(device=prediction.device, dtype=prediction.dtype)
+        if sample_weights.shape != (B, M):
+            raise ValueError(
+                f"sample_weights must have shape [B, M] = {(B, M)}, "
+                f"got {tuple(sample_weights.shape)}."
+            )
+        per_particle = per_particle * sample_weights
+
     reduction = str(reduction).strip().lower()
     if reduction == "none":
         return per_particle
@@ -534,6 +782,7 @@ def stage2_fit_score(
     reference: torch.Tensor,
     *,
     weights: torch.Tensor | None = None,
+    sample_weights: torch.Tensor | None = None,
     objective: str = "per_epistemic_fcrps",
     chunk_size: int | None = 65536,
 ) -> torch.Tensor:
@@ -551,10 +800,13 @@ def stage2_fit_score(
             prediction,
             reference,
             weights=weights,
+            sample_weights=sample_weights,
             reduction="mean",
             chunk_size=chunk_size,
         )
     if objective == "pooled_fcrps":
+        if sample_weights is not None:
+            raise ValueError("sample_weights are only supported for per_epistemic_fcrps.")
         return pooled_fair_crps(
             prediction,
             reference,
@@ -725,13 +977,155 @@ def calibrate_prior_scale(
     return float(target_fraction) * float(base_rmse) / max(spread, eps)
 
 
+def _stable_family_seed(seed: int, family_id: str) -> int:
+    payload = f"{int(seed)}::{family_id}".encode("utf-8")
+    digest = hashlib.sha256(payload).digest()
+    return int.from_bytes(digest[:8], byteorder="little", signed=False) % (2**63 - 1)
+
+
+def epistemic_bootstrap_weights(
+    family_ids: Sequence[str],
+    z_e: torch.Tensor,
+    *,
+    seed: int = 0,
+    distribution: str = "tempered_exponential",
+    temperature: float = 0.5,
+    normalize: str = "per_epistemic_batch",
+    min_weight: float = 0.05,
+    max_weight: float = 5.0,
+    eps: float = 1.0e-12,
+) -> torch.Tensor:
+    """Return ENN-style index-dependent bootstrap weights ``[B, M]``.
+
+    Uses the Gaussian-index exponential bootstrap from DeepMind ENN, with an
+    optional tempering step that keeps the expected weight near one while
+    reducing extreme per-family weights for the flood setting.
+    """
+
+    if z_e.ndim != 2:
+        raise ValueError(f"z_e must have shape [M, d_e], got {tuple(z_e.shape)}.")
+    distribution = str(distribution).strip().lower()
+    normalize = str(normalize).strip().lower()
+    family_ids = [str(fid) for fid in family_ids]
+    if len(family_ids) < 1:
+        raise ValueError("family_ids must be non-empty.")
+    M, d_e = (int(v) for v in z_e.shape)
+    if d_e < 1:
+        raise ValueError("z_e must have nonzero epistemic dimension.")
+    if distribution in {"none", "disabled"}:
+        return torch.ones(len(family_ids), M, device=z_e.device, dtype=z_e.dtype)
+    if distribution not in {"tempered_exponential", "exponential", "bernoulli"}:
+        raise ValueError(
+            "distribution must be one of {'tempered_exponential', 'exponential', "
+            f"'bernoulli', 'none'}}, got {distribution!r}."
+        )
+    rows = []
+    scale = 1.0 / math.sqrt(float(d_e))
+    z_cpu = z_e.detach().to(device="cpu", dtype=torch.float32)
+    for family_id in family_ids:
+        generator = torch.Generator(device="cpu")
+        generator.manual_seed(_stable_family_seed(seed, family_id))
+        b = torch.randn(d_e, generator=generator, dtype=torch.float32) * scale
+        if distribution == "bernoulli":
+            raw = 1.0 + torch.sign(z_cpu @ b)
+        else:
+            c = torch.randn(d_e, generator=generator, dtype=torch.float32) * scale
+            raw = 0.5 * ((z_cpu @ b).pow(2) + (z_cpu @ c).pow(2))
+            if distribution == "tempered_exponential":
+                tau = float(temperature)
+                raw = (1.0 - tau) + tau * raw
+        rows.append(raw)
+    weights = torch.stack(rows, dim=0).to(device=z_e.device, dtype=z_e.dtype)
+    weights = weights.clamp(min=float(min_weight), max=float(max_weight))
+    if normalize == "per_epistemic_batch":
+        weights = weights / weights.mean(dim=0, keepdim=True).clamp_min(float(eps))
+    elif normalize in {"none", "disabled"}:
+        pass
+    else:
+        raise ValueError(
+            "normalize must be one of {'per_epistemic_batch', 'none'}, "
+            f"got {normalize!r}."
+        )
+    return weights
+
+
+def cancellation_diagnostics(
+    *,
+    trainable_correction: torch.Tensor,
+    prior_correction: torch.Tensor,
+    alpha: float,
+    eps: float = 1.0e-12,
+) -> dict[str, float]:
+    """Compute train/prior cancellation diagnostics for logging."""
+
+    with torch.no_grad():
+        train = trainable_correction.detach().float()
+        prior_scaled = float(alpha) * prior_correction.detach().float()
+        total = train + prior_scaled
+        train_norm = torch.linalg.vector_norm(train)
+        prior_norm = torch.linalg.vector_norm(prior_scaled)
+        total_norm = torch.linalg.vector_norm(total)
+        train_rms = train.pow(2).mean().sqrt()
+        prior_rms = prior_scaled.pow(2).mean().sqrt()
+        total_rms = total.pow(2).mean().sqrt()
+        cosine = (train * prior_scaled).sum() / (train_norm * prior_norm + eps)
+        cancellation = 1.0 - total_norm / (train_norm + prior_norm + eps)
+    return {
+        "trainable_rms": float(train_rms.item()),
+        "scaled_prior_rms": float(prior_rms.item()),
+        "total_correction_rms": float(total_rms.item()),
+        "train_prior_cosine": float(cosine.item()),
+        "cancellation_fraction": float(cancellation.item()),
+    }
+
+
+def epistemic_variance_diagnostics(
+    *,
+    mbar_total: torch.Tensor,
+    mbar_prior_scaled: torch.Tensor,
+    eps: float = 1.0e-12,
+) -> dict[str, float]:
+    """Epistemic (``z_e``) variance of the aleatory-averaged corrections.
+
+    Computes ``Var_{z_e}[ E_{z_a}[ correction ] ]`` as the variance over the
+    assembled epistemic (``M``) axis of corrections already averaged over the
+    aleatory (``K``) axis. Both inputs are ``[B, M, T, Nv, C]`` and MUST carry
+    the full set of ``M`` epistemic particles.
+
+    This exists because the epistemic variance is inherently a cross-``M``
+    quantity: computing it inside a per-``z_e`` chunk (``M == 1``) is undefined
+    and silently returns zero. That is exactly the failure that produced
+    all-zero epistemic-variance logs under ``epistemic_chunk_size=1``.
+    """
+
+    with torch.no_grad():
+        total = mbar_total.detach().float()
+        prior = mbar_prior_scaled.detach().float()
+        if total.shape[1] > 1:
+            total_var = total.var(dim=1, unbiased=True).mean()
+            prior_var = prior.var(dim=1, unbiased=True).mean()
+            retention = total_var / (prior_var + eps)
+        else:
+            zero = total.new_zeros(())
+            total_var = zero
+            prior_var = zero
+            retention = zero
+    return {
+        "prior_retention_ratio": float(retention.item()),
+        "total_epistemic_variance": float(total_var.item()),
+        "prior_epistemic_variance": float(prior_var.item()),
+    }
+
+
 def compute_stage2_loss(
     *,
     prediction: torch.Tensor,
     reference: torch.Tensor,
     correction: torch.Tensor,
     module: NEONEpistemicCorrection,
+    trainable_correction: torch.Tensor | None = None,
     weights: torch.Tensor | None = None,
+    sample_weights: torch.Tensor | None = None,
     edge_index: torch.Tensor | None = None,
     edge_weights: torch.Tensor | None = None,
     zero_threshold: float | torch.Tensor = 0.0,
@@ -741,15 +1135,35 @@ def compute_stage2_loss(
     """Compute the NEON Stage-2 objective from nested corrected predictions."""
 
     loss_weights = loss_weights or NEONStage2LossWeights()
-    fit = stage2_fit_score(prediction, reference, weights=weights, objective=objective)
-    rpf = rpf_l2_penalty(module)
-    if edge_index is None:
-        graph = torch.tensor(0.0, device=prediction.device, dtype=prediction.dtype)
+    fit = stage2_fit_score(
+        prediction,
+        reference,
+        weights=weights,
+        sample_weights=sample_weights,
+        objective=objective,
+    )
+    zero = torch.tensor(0.0, device=prediction.device, dtype=prediction.dtype)
+    if float(loss_weights.rpf) != 0.0:
+        rpf = rpf_l2_penalty(module)
     else:
+        rpf = zero
+    if float(loss_weights.smooth) != 0.0 and edge_index is not None:
         graph = graph_smoothness_penalty(correction, edge_index, edge_weights=edge_weights)
-    time = temporal_smoothness_penalty(correction)
-    pos = positivity_penalty(prediction, zero_threshold=zero_threshold, weights=weights)
-    mag = correction_magnitude_penalty(correction, weights=weights)
+    else:
+        graph = zero
+    if float(loss_weights.smooth) != 0.0 and float(loss_weights.time) != 0.0:
+        time = temporal_smoothness_penalty(correction)
+    else:
+        time = zero
+    if float(loss_weights.pos) != 0.0:
+        pos = positivity_penalty(prediction, zero_threshold=zero_threshold, weights=weights)
+    else:
+        pos = zero
+    if float(loss_weights.mag) != 0.0:
+        mag_source = correction if trainable_correction is None else trainable_correction
+        mag = correction_magnitude_penalty(mag_source, weights=weights)
+    else:
+        mag = zero
     smooth = graph + float(loss_weights.time) * time
     total = (
         fit
@@ -766,6 +1180,7 @@ def compute_stage2_loss(
         time=time,
         pos=pos,
         mag=mag,
+        diagnostics=None,
     )
 
 
@@ -809,7 +1224,13 @@ def save_neon_stage2_checkpoint(
             "out_channels": module.out_channels,
             "epistemic_dim": module.epistemic_dim,
             "hidden_channels": module.hidden_channels,
+            "train_hidden_channels": module.train_hidden_channels,
+            "prior_hidden_channels": module.prior_hidden_channels,
             "n_hidden_layers": module.n_hidden_layers,
+            "branch_layers": module.n_hidden_layers,
+            "branch_activation": module.branch_activation,
+            "branch_type": module.branch_type,
+            "concat_index": module.concat_index,
             "alpha": module.alpha,
             "detach_features": module.detach_features,
             "lead_time_dim": module.lead_time_dim,
@@ -828,6 +1249,14 @@ def load_neon_stage2_checkpoint(
 
     payload = torch.load(Path(path), map_location=map_location)
     arch = dict(payload["architecture"])
+    if "branch_type" not in arch:
+        # Backward compatibility for early Stage-2 checkpoints: those stored
+        # only the old symmetric FiLM/AdaIN branch architecture.
+        arch["branch_type"] = "film"
+        if "train_hidden_channels" not in arch:
+            arch["train_hidden_channels"] = arch.get("hidden_channels", 64)
+        if "prior_hidden_channels" not in arch:
+            arch["prior_hidden_channels"] = arch.get("hidden_channels", 64)
     module = NEONEpistemicCorrection(**arch)
     module.load_state_dict(payload["state_dict"])
     for param in module.prior_branch.parameters():

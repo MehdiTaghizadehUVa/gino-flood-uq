@@ -102,6 +102,7 @@ def main() -> int:
         rollout_length=ROLLOUT_LENGTH,
         max_families=MAX_FAMILIES,
         val_fraction=0.5,
+        dataset_split="test",
     )
     families = (train_fam + val_fam)
     fam = families[0]

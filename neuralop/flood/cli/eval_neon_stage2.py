@@ -163,6 +163,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         flood_config, normalizers, target_variables, log,
         rollout_length=args.rollout_length,
         val_fraction=float(args.val_fraction),
+        dataset_split="test",
     )
     # Select the requested split and drop the other list immediately: the full
     # 500-family TR set is ~15 GB of host RAM, and the per-family metric pass

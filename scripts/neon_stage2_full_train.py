@@ -1,9 +1,10 @@
 """Full NEON Stage-2 training on the frozen coastal FGN with real HEC-RAS refs.
 
-All 50 grouped-hydrograph families, full forecast horizon (T=94), config-default
+All grouped-hydrograph families, full forecast horizon (T=94), config-default
 scale (M_train=4, K_train=8, d_e=16), 30 epochs, prior-scale auto-calibration,
-uniform (unweighted) loss. Frozen-FGNO features are cached on CPU in fp16 after
-the first epoch's rollout, so epochs 1..N only train the EpiNet.
+uniform (unweighted) loss. Frozen-FGNO features are cached as fp16 tensors in
+an on-disk cache under OUT_DIR, so full 500-family runs do not materialize the
+entire feature bank in process memory.
 
 Run as a batch job (see scripts/sbatch_neon_full_train.sh).
 """
@@ -12,6 +13,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import sys
 import time
 from pathlib import Path
@@ -30,6 +32,17 @@ BUNDLE = (
     "coastal_fgn_60_calibrated_v1_20260510/coastal_fgn_bundle.json"
 )
 OUT_DIR = Path("/scratch/jrj6wm/GINO_Model/neon_stage2_full_train/real_ref_full")
+OUT_DIR = Path(os.environ.get("NEON_STAGE2_OUT_DIR", str(OUT_DIR)))
+_CACHE_DIR_ENV = os.environ.get("NEON_STAGE2_CACHE_DIR")
+CACHE_DIR = Path(_CACHE_DIR_ENV) if _CACHE_DIR_ENV else OUT_DIR / "feature_cache"
+N_EPOCHS = int(os.environ.get("NEON_STAGE2_EPOCHS", "30"))
+PROGRESS_INTERVAL = int(os.environ.get("NEON_STAGE2_PROGRESS_INTERVAL", "10"))
+RESUME_ENABLED = os.environ.get("NEON_STAGE2_RESUME", "1").strip().lower() not in {
+    "0",
+    "false",
+    "no",
+}
+LATEST_STATE = Path(os.environ.get("NEON_STAGE2_LATEST_STATE", str(OUT_DIR / "neon_stage2_latest.pt")))
 
 
 def main() -> int:
@@ -60,7 +73,7 @@ def main() -> int:
     normalizers, normalizer_path = _load_or_fit_normalizers(flood_config, None, None, LOG)
     LOG.info("normalizers from %s", normalizer_path)
 
-    # --- All 50 families, full horizon, uniform weights (no dry artifact) ---
+    # --- All grouped training families, full horizon, uniform weights (no dry artifact) ---
     t0 = time.time()
     train_fam, val_fam = build_families_from_config(
         flood_config,
@@ -71,6 +84,7 @@ def main() -> int:
         rollout_length=None,            # full available horizon (T=94)
         max_families=None,              # all hydrographs
         val_fraction=0.1,
+        dataset_split="train",
     )
     LOG.info(
         "families built in %.1fs: train=%d val=%d T=%d Nv=%d",
@@ -96,14 +110,20 @@ def main() -> int:
         m_eval=16,
         k_eval=50,
         prior_scale="auto_0p10_base_rmse",
-        n_epochs=30,
+        n_epochs=N_EPOCHS,
         lead_time_dim=0,
+        progress_log_interval_effective_batches=PROGRESS_INTERVAL,
     )
     LOG.info("config: %s", json.dumps({
         "d_e": config.d_e, "m_train": config.m_train, "k_train": config.k_train,
         "n_epochs": config.n_epochs, "prior_scale": config.prior_scale,
         "feature_source": config.feature_source, "dependency": config.dependency,
+        "progress_log_interval_effective_batches": config.progress_log_interval_effective_batches,
     }))
+    LOG.info("out_dir=%s", OUT_DIR)
+    LOG.info("feature_cache_dir=%s", CACHE_DIR)
+    LOG.info("latest_state=%s resume_enabled=%s exists=%s",
+             LATEST_STATE, RESUME_ENABLED, LATEST_STATE.exists())
 
     gen = torch.Generator().manual_seed(0)
     t1 = time.time()
@@ -121,7 +141,10 @@ def main() -> int:
         calibrate_prior=True,
         cache_features=True,      # CPU fp16 cache of the frozen rollout
         cache_device="cpu",
+        cache_dir=CACHE_DIR,
         epistemic_chunk_size=1,   # process one z_e at a time so backward fits on a 40GB A100
+        latest_checkpoint_path=LATEST_STATE,
+        resume_state_path=LATEST_STATE if RESUME_ENABLED else None,
     )
     LOG.info("training done in %.1f min", (time.time() - t1) / 60.0)
 

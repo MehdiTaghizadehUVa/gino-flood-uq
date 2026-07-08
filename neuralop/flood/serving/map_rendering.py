@@ -7,10 +7,17 @@ ground-truth/error diagnostics into user-serving products.
 
 from __future__ import annotations
 
+from copy import deepcopy
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 import numpy as np
+
+
+SERVING_DEM_BASEMAP_ALPHA = 0.55
+SERVING_DEM_VMIN_M = -15.1
+SERVING_DEM_VMAX_M = 19.9
+SERVING_MAP_FACE_COLOR = "#FFFFFF"
 
 
 DEFAULT_SERVING_VISUALIZATION_CONFIG = {
@@ -21,7 +28,10 @@ DEFAULT_SERVING_VISUALIZATION_CONFIG = {
         "provider": "local_elevation",
         "fallback": "elevation_hillshade",
         "cache_scope": "run_extent",
+        "alpha": SERVING_DEM_BASEMAP_ALPHA,
         "dem_cmap": "hecras_dem",
+        "dem_vmin": SERVING_DEM_VMIN_M,
+        "dem_vmax": SERVING_DEM_VMAX_M,
         "dem_quantiles": [0.01, 0.99],
     },
     "wd": {
@@ -31,12 +41,36 @@ DEFAULT_SERVING_VISUALIZATION_CONFIG = {
         "wet_edge_threshold_m": 0.05,
     },
     "diagnostics": {
-        "basemap_alpha": 0.28,
+        "basemap_alpha": SERVING_DEM_BASEMAP_ALPHA,
         "zero_fraction": 0.03,
         "zero_threshold": 1.0e-10,
         "spread_colormap": "spread_violet_alpha_ramp",
     },
 }
+
+
+def _deep_merge_mapping(base: dict[str, Any], override: Mapping[str, Any]) -> dict[str, Any]:
+    result = deepcopy(base)
+    for key, value in override.items():
+        if isinstance(value, Mapping) and isinstance(result.get(key), dict):
+            result[key] = _deep_merge_mapping(result[key], value)
+        else:
+            result[key] = value
+    return result
+
+
+def serving_visualization_config(visualization_config: Any | None = None) -> dict[str, Any]:
+    """Return website map styling with publication DEM defaults filled in.
+
+    Run metadata may contain older partial visualization configs. Merging here
+    keeps website artifacts visually consistent while still allowing explicit
+    per-run overrides for map alpha, DEM range, colormaps, or thresholds.
+    """
+    if visualization_config is None:
+        return deepcopy(DEFAULT_SERVING_VISUALIZATION_CONFIG)
+    if not isinstance(visualization_config, Mapping):
+        return deepcopy(DEFAULT_SERVING_VISUALIZATION_CONFIG)
+    return _deep_merge_mapping(DEFAULT_SERVING_VISUALIZATION_CONFIG, visualization_config)
 
 
 def compute_rivanna_style_data_viewport(
@@ -79,7 +113,7 @@ def compute_rivanna_style_data_viewport(
             y=y,
             elevation_raw=elevation_raw,
             out_dir=tmp_context.name,
-            visualization_config=visualization_config or DEFAULT_SERVING_VISUALIZATION_CONFIG,
+            visualization_config=serving_visualization_config(visualization_config),
         )
         fig, ax = plt.subplots(
             1,
@@ -87,10 +121,10 @@ def compute_rivanna_style_data_viewport(
             figsize=fig_size,
             dpi=dpi,
             constrained_layout=True,
-            facecolor="#f7fafb",
+            facecolor=SERVING_MAP_FACE_COLOR,
         )
         try:
-            ax.set_facecolor("#f7fafb")
+            ax.set_facecolor(SERVING_MAP_FACE_COLOR)
             artist, _ = eval_render._plot_spatial_panel(
                 ax=ax,
                 x=x,
@@ -206,7 +240,7 @@ def write_rivanna_style_map_png(
             y=y,
             elevation_raw=elevation_raw,
             out_dir=str(Path(output_path).parent),
-            visualization_config=visualization_config or DEFAULT_SERVING_VISUALIZATION_CONFIG,
+            visualization_config=serving_visualization_config(visualization_config),
         )
         if vmax is None:
             vmax = eval_render._wd_spatial_vmax(arr) if is_wd_depth else eval_render._robust_nonnegative_vmax(arr)
@@ -221,10 +255,10 @@ def write_rivanna_style_map_png(
             figsize=fig_size,
             dpi=dpi,
             constrained_layout=True,
-            facecolor="#f7fafb",
+            facecolor=SERVING_MAP_FACE_COLOR,
         )
         try:
-            ax.set_facecolor("#f7fafb")
+            ax.set_facecolor(SERVING_MAP_FACE_COLOR)
             artist, _ = eval_render._plot_spatial_panel(
                 ax=ax,
                 x=x,

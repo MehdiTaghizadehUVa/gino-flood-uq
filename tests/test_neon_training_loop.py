@@ -8,6 +8,7 @@ and a structured checkpoint schema with the plan's required fields.
 """
 
 import importlib.util
+import json
 import sys
 import tempfile
 import types
@@ -72,11 +73,13 @@ def _make_feature_collector(seed_base: int = 0):
     features are random-but-fixed per family so the EpiNet has signal to fit.
     """
 
-    def collector(family: NEONFamilySample, *, num_aleatory: int, generator=None):
+    def collector(family: NEONFamilySample, *, num_aleatory: int, generator=None, latent_bank_id=None):
         g = torch.Generator().manual_seed(seed_base + abs(hash(family.family_id)) % 10_000)
         base = torch.zeros(1, num_aleatory, T, Nv, C)
         # slight per-member spread so aleatory variance is nonzero
         base = base + 0.1 * torch.arange(num_aleatory).view(1, num_aleatory, 1, 1, 1)
+        if latent_bank_id is not None:
+            base = base + 0.01 * int(latent_bank_id)
         features = torch.randn(1, num_aleatory, T, Nv, Cphi, generator=g)
         return train_neon.FrozenFGNOFeatureBatch(
             base_prediction=base,
@@ -92,6 +95,11 @@ def _module():
     return NEONEpistemicCorrection(
         feature_channels=Cphi, out_channels=C, epistemic_dim=4, hidden_channels=8, alpha=0.1
     )
+
+
+def _read_jsonl(path: Path) -> list[dict]:
+    with path.open("r", encoding="utf-8") as fh:
+        return [json.loads(line) for line in fh if line.strip()]
 
 
 # ---------------------------------------------------------------------------
@@ -118,12 +126,105 @@ def test_epoch_loop_runs_requested_epochs_and_returns_history():
     assert set(result.history[0]) >= {"epoch", "train_fit", "val_fit"}
 
 
+def test_epoch_loop_saves_latest_state_and_resumes_training(tmp_path):
+    module = _module()
+    opt = build_neon_stage2_optimizer(module, learning_rate=1e-2)
+    latest = tmp_path / "neon_stage2_latest.pt"
+
+    first = train_neon_stage2_epochs(
+        module=module,
+        optimizer=opt,
+        train_families=[_family("a", 0.0), _family("b", 0.5)],
+        val_families=[_family("v", 0.2)],
+        feature_collector=_make_feature_collector(),
+        n_epochs=1,
+        m_train=2,
+        k_train=4,
+        d_e=4,
+        latest_checkpoint_path=latest,
+    )
+    assert latest.exists()
+    state = train_neon.load_neon_stage2_training_state(latest)
+    assert state["next_epoch"] == 1
+    assert len(state["history"]) == 1
+    assert state["best_epoch"] == first.best_epoch
+
+    resumed_module = _module()
+    resumed_optimizer = build_neon_stage2_optimizer(resumed_module, learning_rate=1e-2)
+    resumed_module.load_state_dict(state["state_dict"])
+    resumed_optimizer.load_state_dict(state["optimizer_state_dict"])
+    second = train_neon_stage2_epochs(
+        module=resumed_module,
+        optimizer=resumed_optimizer,
+        train_families=[_family("a", 0.0), _family("b", 0.5)],
+        val_families=[_family("v", 0.2)],
+        feature_collector=_make_feature_collector(),
+        n_epochs=2,
+        m_train=2,
+        k_train=4,
+        d_e=4,
+        latest_checkpoint_path=latest,
+        start_epoch=int(state["next_epoch"]),
+        initial_history=state["history"],
+        initial_best_epoch=int(state["best_epoch"]),
+        initial_best_val_fit=float(state["best_val_fit"]),
+    )
+
+    assert [row["epoch"] for row in second.history] == [0, 1]
+    state2 = train_neon.load_neon_stage2_training_state(latest)
+    assert state2["next_epoch"] == 2
+    assert len(state2["history"]) == 2
+
+
+def test_epoch_loop_writes_live_progress_reports(tmp_path):
+    module = _module()
+    opt = build_neon_stage2_optimizer(module, learning_rate=1e-2)
+    reporter = train_neon.NEONTrainingProgressReporter(
+        output_dir=tmp_path,
+        log_interval_effective_batches=1,
+    )
+
+    result = train_neon_stage2_epochs(
+        module=module,
+        optimizer=opt,
+        train_families=[_family("a", 0.0), _family("b", 0.5)],
+        val_families=[_family("v", 0.2)],
+        feature_collector=_make_feature_collector(),
+        n_epochs=2,
+        m_train=2,
+        k_train=4,
+        d_e=4,
+        progress_reporter=reporter,
+    )
+
+    events = _read_jsonl(tmp_path / "progress_events.jsonl")
+    event_names = {event["event"] for event in events}
+    assert {
+        "training_start",
+        "epoch_start",
+        "train_progress",
+        "validation_start",
+        "epoch_end",
+        "training_end",
+    }.issubset(event_names)
+
+    partial_history = _read_jsonl(tmp_path / "history_partial.jsonl")
+    assert [row["epoch"] for row in partial_history] == [0, 1]
+    assert partial_history[-1]["best_epoch"] == result.best_epoch
+    assert "val_fit" in partial_history[-1]
+
+    with (tmp_path / "latest_status.json").open("r", encoding="utf-8") as fh:
+        latest = json.load(fh)
+    assert latest["event"] == "training_end"
+    assert latest["best_epoch"] == result.best_epoch
+    assert latest["best_val_fit"] == pytest.approx(result.best_val_fit)
+
+
 def test_training_updates_only_trainable_epinet_weights():
     module = _module()
     # snapshot params
     prior_before = [p.clone() for p in module.prior_branch.parameters()]
     trainable_before = [p.clone() for p in module.trainable_branch.parameters()]
-    feat_encoder_before = [p.clone() for p in module.trainable_branch.feature_encoder.parameters()]
 
     opt = build_neon_stage2_optimizer(module, learning_rate=1e-2)
     train_neon_stage2_epochs(
@@ -146,6 +247,173 @@ def test_training_updates_only_trainable_epinet_weights():
         for before, after in zip(trainable_before, module.trainable_branch.parameters())
     )
     assert changed
+
+
+def test_epoch_history_includes_cancellation_diagnostics_with_bootstrap():
+    module = _module()
+    opt = build_neon_stage2_optimizer(module, learning_rate=1e-2)
+    result = train_neon_stage2_epochs(
+        module=module,
+        optimizer=opt,
+        train_families=[_family("a", 0.0), _family("b", 0.5), _family("c", 1.0)],
+        val_families=[_family("v", 0.2)],
+        feature_collector=_make_feature_collector(),
+        n_epochs=1,
+        m_train=2,
+        k_train=4,
+        d_e=4,
+        bootstrap_config={
+            "enabled": True,
+            "distribution": "tempered_exponential",
+            "temperature": 0.5,
+            "normalize": "per_epistemic_batch",
+            "min_weight": 0.05,
+            "max_weight": 5.0,
+            "seed": 123,
+        },
+        cancellation_config={"enabled": True},
+    )
+
+    row = result.history[0]
+    assert "train_cancellation_fraction" in row
+    assert "val_cancellation_fraction" in row
+    assert "train_prior_retention_ratio" in row
+
+
+def test_bootstrap_weights_remain_nontrivial_with_single_family_microbatches(monkeypatch):
+    module = _module()
+    opt = build_neon_stage2_optimizer(module, learning_rate=1e-2)
+    captured: list[torch.Tensor] = []
+    original_step = train_neon.neon_stage2_training_step
+
+    def wrapped_step(*args, **kwargs):
+        sample_weights = kwargs.get("sample_weights")
+        if sample_weights is not None:
+            captured.append(sample_weights.detach().cpu().clone())
+        return original_step(*args, **kwargs)
+
+    monkeypatch.setattr(train_neon, "neon_stage2_training_step", wrapped_step)
+    train_neon_stage2_epochs(
+        module=module,
+        optimizer=opt,
+        train_families=[_family(f"fam-{i}", float(i) * 0.1) for i in range(4)],
+        val_families=[_family("v", 0.2)],
+        feature_collector=_make_feature_collector(),
+        n_epochs=1,
+        m_train=3,
+        k_train=4,
+        d_e=4,
+        bootstrap_config={
+            "enabled": True,
+            "distribution": "tempered_exponential",
+            "temperature": 0.5,
+            "normalize": "per_epistemic_batch",
+            "min_weight": 0.05,
+            "max_weight": 5.0,
+            "seed": 321,
+        },
+        family_batch_size=1,
+        effective_batch_size=4,
+        shuffle_families=False,
+        generator=torch.Generator().manual_seed(12),
+    )
+
+    assert captured
+    weights = torch.cat(captured, dim=0)
+    torch.testing.assert_close(weights.mean(dim=0), torch.ones(weights.shape[1]), rtol=1e-6, atol=1e-6)
+    assert not torch.allclose(weights, torch.ones_like(weights))
+
+
+def test_training_steps_once_per_effective_family_batch():
+    module = _module()
+    opt = build_neon_stage2_optimizer(module, learning_rate=1e-2)
+    step_count = 0
+    original_step = opt.step
+
+    def counted_step(*args, **kwargs):
+        nonlocal step_count
+        step_count += 1
+        return original_step(*args, **kwargs)
+
+    opt.step = counted_step
+    train_neon_stage2_epochs(
+        module=module,
+        optimizer=opt,
+        train_families=[_family(f"f{i}", float(i) * 0.1) for i in range(5)],
+        val_families=[_family("v", 0.2)],
+        feature_collector=_make_feature_collector(),
+        n_epochs=1,
+        m_train=2,
+        k_train=4,
+        d_e=4,
+        family_batch_size=2,
+        effective_batch_size=3,
+        shuffle_families=False,
+    )
+    assert step_count == 2
+
+
+def test_training_passes_latent_bank_ids_to_feature_collector():
+    module = _module()
+    opt = build_neon_stage2_optimizer(module, learning_rate=1e-2)
+    calls: list[int] = []
+    base_collector = _make_feature_collector()
+
+    def collector(family: NEONFamilySample, *, num_aleatory: int, generator=None, latent_bank_id=None):
+        calls.append(int(latent_bank_id))
+        return base_collector(
+            family,
+            num_aleatory=num_aleatory,
+            generator=generator,
+            latent_bank_id=latent_bank_id,
+        )
+
+    train_neon_stage2_epochs(
+        module=module,
+        optimizer=opt,
+        train_families=[_family("a", 0.0), _family("b", 0.5), _family("c", 1.0)],
+        val_families=[_family("v", 0.2)],
+        feature_collector=collector,
+        n_epochs=1,
+        m_train=2,
+        k_train=4,
+        d_e=4,
+        latent_bank_count=3,
+        shuffle_families=False,
+        generator=torch.Generator().manual_seed(7),
+    )
+    # Training and validation both go through the collector; every call gets a
+    # valid bank id and training can choose among multiple cached z_a banks.
+    assert calls
+    assert all(0 <= bank_id < 3 for bank_id in calls)
+
+
+def test_training_subsamples_reference_members_for_fit(monkeypatch):
+    module = _module()
+    opt = build_neon_stage2_optimizer(module, learning_rate=1e-2)
+    seen_reference_members: list[int] = []
+    original_step = train_neon.neon_stage2_training_step
+
+    def wrapped_step(*args, **kwargs):
+        seen_reference_members.append(int(kwargs["reference"].shape[1]))
+        return original_step(*args, **kwargs)
+
+    monkeypatch.setattr(train_neon, "neon_stage2_training_step", wrapped_step)
+    train_neon_stage2_epochs(
+        module=module,
+        optimizer=opt,
+        train_families=[_family("a", 0.0, n_ref=7), _family("b", 0.5, n_ref=7)],
+        val_families=[_family("v", 0.2, n_ref=7)],
+        feature_collector=_make_feature_collector(),
+        n_epochs=1,
+        m_train=2,
+        k_train=4,
+        d_e=4,
+        reference_member_subsample=2,
+        shuffle_families=False,
+        generator=torch.Generator().manual_seed(11),
+    )
+    assert seen_reference_members == [2, 2]
 
 
 def test_best_epoch_tracking_picks_lowest_val():
@@ -209,6 +477,14 @@ def test_checkpoint_saved_at_best_epoch_with_structured_metadata(tmp_path):
         prior_seed=1234,
         loss_weights={"rpf": 1e-4, "smooth": 1e-3, "time": 1.0, "pos": 1e-2, "mag": 1e-4},
         optimizer_settings={"learning_rate": 1e-2, "weight_decay": 1e-4},
+        extra={
+            "branch_type": "projected",
+            "train_hidden_channels": 32,
+            "prior_hidden_channels": 5,
+            "bootstrap": {"enabled": True},
+            "cancellation_diagnostics": {"enabled": True},
+            "feature_cache_schema_version": "neon_feature_cache_v2",
+        },
     )
     result = train_neon_stage2_epochs(
         module=module,
@@ -243,6 +519,12 @@ def test_checkpoint_saved_at_best_epoch_with_structured_metadata(tmp_path):
         "prior_seed",
         "loss_weights",
         "optimizer_settings",
+        "branch_type",
+        "train_hidden_channels",
+        "prior_hidden_channels",
+        "bootstrap",
+        "cancellation_diagnostics",
+        "feature_cache_schema_version",
     ):
         assert key in meta, f"missing checkpoint metadata field: {key}"
     # Best-epoch bookkeeping recorded.
@@ -270,3 +552,44 @@ def test_reference_accepts_bare_R_T_Nv_C_without_batch_dim():
         d_e=4,
     )
     assert len(result.history) == 1
+
+
+def test_epistemic_chunk_size_one_still_logs_nonzero_epistemic_variance():
+    """End-to-end regression for the epistemic_chunk_size=1 production config.
+
+    Before the fix, chunking the epistemic (M) axis to size 1 made the per-chunk
+    variance collapse to exactly 0.0, so total/prior epistemic variance and the
+    retention ratio logged as 0.0 every epoch. With assembly across chunks the
+    caller must now log strictly positive epistemic variance under chunk=1, and
+    it must track the unchunked (full-M) computation.
+    """
+    def _run(chunk):
+        module = _module()
+        opt = build_neon_stage2_optimizer(module, learning_rate=1e-2)
+        result = train_neon_stage2_epochs(
+            module=module,
+            optimizer=opt,
+            train_families=[_family("a", 0.0), _family("b", 0.5), _family("c", 1.0)],
+            val_families=[_family("v", 0.2)],
+            feature_collector=_make_feature_collector(),
+            n_epochs=1,
+            m_train=3,
+            k_train=4,
+            d_e=4,
+            epistemic_chunk_size=chunk,
+            cancellation_config={"enabled": True},
+        )
+        return result.history[0]
+
+    chunked = _run(1)
+    full = _run(None)
+
+    # Core regression: the live chunk=1 config no longer logs zeros.
+    assert chunked["train_total_epistemic_variance"] > 0.0
+    assert chunked["train_prior_epistemic_variance"] > 0.0
+    assert chunked["val_total_epistemic_variance"] > 0.0
+    assert chunked["train_prior_retention_ratio"] > 0.0
+
+    # And chunk=1 must track the full-M computation (identical gradients/seeds).
+    for key in ("train_total_epistemic_variance", "train_prior_epistemic_variance"):
+        assert abs(chunked[key] - full[key]) <= 1e-5 * abs(full[key]) + 1e-8

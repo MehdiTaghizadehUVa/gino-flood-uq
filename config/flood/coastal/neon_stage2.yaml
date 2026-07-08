@@ -40,12 +40,13 @@ neon:
   spatial_weights: wettable_area   # wettable_area | wet_front | uniform
   lead_time_weights: uniform       # uniform | lead_emphasis
 
-  # Regularization weights.
-  lambda_rpf: 1.0e-4
-  lambda_smooth: 1.0e-3
-  lambda_time: 1.0
-  lambda_pos: 1.0e-2
-  lambda_mag: 1.0e-4
+  # Native EpiNet/NEON objective uses the fit loss with randomized priors and
+  # bootstrap-indexed data views. Flood-specific penalties are opt-in ablations.
+  lambda_rpf: 0.0
+  lambda_smooth: 0.0
+  lambda_time: 0.0
+  lambda_pos: 0.0
+  lambda_mag: 0.0
 
   # Optimizer.
   learning_rate: 1.0e-4

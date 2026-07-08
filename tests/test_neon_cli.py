@@ -89,11 +89,11 @@ def test_resolve_training_plan_surfaces_key_settings():
     assert plan["prior_scale_mode"] == "auto"
     assert plan["prior_scale_fraction"] == pytest.approx(0.10)
     assert plan["loss_weights"] == {
-        "rpf": pytest.approx(1e-4),
-        "smooth": pytest.approx(1e-3),
-        "time": pytest.approx(1.0),
-        "pos": pytest.approx(1e-2),
-        "mag": pytest.approx(1e-4),
+        "rpf": pytest.approx(0.0),
+        "smooth": pytest.approx(0.0),
+        "time": pytest.approx(0.0),
+        "pos": pytest.approx(0.0),
+        "mag": pytest.approx(0.0),
     }
     assert plan["optimizer"]["learning_rate"] == pytest.approx(1e-4)
 

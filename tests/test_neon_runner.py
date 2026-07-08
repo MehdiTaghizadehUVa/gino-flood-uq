@@ -6,6 +6,7 @@ checkpoint or dataset.
 """
 
 import importlib.util
+import json
 import sys
 import types
 from pathlib import Path
@@ -102,7 +103,18 @@ def test_runner_trains_saves_and_records_metadata(tmp_path):
     assert meta["feature_source"] == "decoder_pre_projection"
     assert meta["d_a"] == 8
     assert meta["d_e"] == 4
+    assert meta["branch_type"] == "projected"
+    assert meta["prior_hidden_channels"] == 5
+    assert meta["bootstrap"]["enabled"] is True
+    assert meta["feature_cache_schema_version"] == "neon_feature_cache_v2"
+    assert meta["progress_log_interval_effective_batches"] == 10
     assert "best_epoch" in meta and "val_metrics" in meta
+    assert (tmp_path / "progress_events.jsonl").exists()
+    assert (tmp_path / "history_partial.jsonl").exists()
+    with (tmp_path / "latest_status.json").open("r", encoding="utf-8") as fh:
+        latest = json.load(fh)
+    assert latest["event"] == "training_end"
+    assert latest["best_epoch"] == result.best_epoch
     # Frozen Stage-1 stayed frozen (orchestration froze it and never unfroze).
     assert all(not p.requires_grad for p in stage1.parameters())
     assert not stage1.training
@@ -155,13 +167,32 @@ def test_runner_auto_calibrates_prior_scale_away_from_placeholder(tmp_path):
     assert torch.isfinite(torch.tensor(meta["alpha"]))
 
 
+def test_frozen_model_collector_uses_stable_family_bank_latents():
+    stage1 = _DummyStage1()
+    collector = runner.make_feature_collector_from_frozen_model(
+        stage1,
+        feature_source="decoder_pre_projection",
+        n_history=n_hist,
+        latent_dim=8,
+        generator=torch.Generator().manual_seed(123),
+    )
+    fam = _family("TR000123", 0.0)
+
+    bank1_first = collector(fam, num_aleatory=3, latent_bank_id=1)
+    bank0 = collector(fam, num_aleatory=3, latent_bank_id=0)
+    bank1_second = collector(fam, num_aleatory=3, latent_bank_id=1)
+
+    torch.testing.assert_close(bank1_first.aleatory_latents, bank1_second.aleatory_latents)
+    assert not torch.allclose(bank0.aleatory_latents, bank1_first.aleatory_latents)
+
+
 def test_disk_cache_collects_once_and_round_trips(tmp_path):
     # cache_dir mode: first call rolls the base collector and writes one file;
     # second call must load from disk (no recollection) and reproduce the
     # tensors up to fp16 quantization.
     calls = {"n": 0}
 
-    def base(family, *, num_aleatory, generator=None):
+    def base(family, *, num_aleatory, generator=None, latent_bank_id=None):
         calls["n"] += 1
         g = torch.Generator().manual_seed(7)
         return train_neon.FrozenFGNOFeatureBatch(
@@ -175,7 +206,123 @@ def test_disk_cache_collects_once_and_round_trips(tmp_path):
     first = coll(fam, num_aleatory=4)
     second = coll(fam, num_aleatory=4)
     assert calls["n"] == 1
-    assert (tmp_path / "TR000001_k4.pt").exists()
+    assert (tmp_path / "TR000001_bank0_k4.pt").exists()
     assert second.features.dtype == first.features.dtype
     assert torch.allclose(first.features, second.features, atol=1e-2)
     assert torch.allclose(first.base_prediction, second.base_prediction, atol=1e-2)
+
+
+def test_disk_cache_key_separates_incompatible_feature_entries(tmp_path):
+    calls = {"n": 0}
+
+    def base(family, *, num_aleatory, generator=None, latent_bank_id=None):
+        calls["n"] += 1
+        return train_neon.FrozenFGNOFeatureBatch(
+            base_prediction=torch.full((1, num_aleatory, T, Nv, C), float(calls["n"])),
+            features=torch.full((1, num_aleatory, T, Nv, Cphi), float(calls["n"])),
+            aleatory_latents=torch.zeros(num_aleatory, 2),
+        )
+
+    fam = NEONFamilySample(family_id="TR000001", reference=torch.zeros(R, T, Nv, C))
+    coll_a = runner.make_cached_feature_collector(base, cache_dir=tmp_path, cache_key="schema_a")
+    coll_b = runner.make_cached_feature_collector(base, cache_dir=tmp_path, cache_key="schema_b")
+
+    a = coll_a(fam, num_aleatory=4)
+    b = coll_b(fam, num_aleatory=4)
+
+    assert calls["n"] == 2
+    assert (tmp_path / "schema_a_TR000001_bank0_k4.pt").exists()
+    assert (tmp_path / "schema_b_TR000001_bank0_k4.pt").exists()
+    assert not torch.allclose(a.features, b.features)
+
+
+def test_disk_cache_key_separates_latent_banks(tmp_path):
+    calls = {"n": 0}
+
+    def base(family, *, num_aleatory, generator=None, latent_bank_id=None):
+        calls["n"] += 1
+        value = float(latent_bank_id or 0)
+        return train_neon.FrozenFGNOFeatureBatch(
+            base_prediction=torch.full((1, num_aleatory, T, Nv, C), value),
+            features=torch.full((1, num_aleatory, T, Nv, Cphi), value),
+            aleatory_latents=torch.zeros(num_aleatory, 2),
+        )
+
+    fam = NEONFamilySample(family_id="TR000001", reference=torch.zeros(R, T, Nv, C))
+    coll = runner.make_cached_feature_collector(base, cache_dir=tmp_path)
+
+    bank0 = coll(fam, num_aleatory=4, latent_bank_id=0)
+    bank1 = coll(fam, num_aleatory=4, latent_bank_id=1)
+    bank1_again = coll(fam, num_aleatory=4, latent_bank_id=1)
+
+    assert calls["n"] == 2
+    assert (tmp_path / "TR000001_bank0_k4.pt").exists()
+    assert (tmp_path / "TR000001_bank1_k4.pt").exists()
+    assert not torch.allclose(bank0.features, bank1.features)
+    torch.testing.assert_close(bank1.features, bank1_again.features)
+
+
+def test_runner_rejects_large_in_memory_feature_cache(tmp_path):
+    config = NEONStage2Config(
+        enabled=True,
+        d_e=4,
+        m_train=2,
+        k_train=2,
+        m_eval=2,
+        k_eval=2,
+        n_epochs=1,
+        prior_scale="auto_0p10_base_rmse",
+        alpha=None,
+    )
+    stage1 = _DummyStage1()
+    train_families = [_family(f"f{i}", 0.0) for i in range(3)]
+    val_families = [_family("v", 0.2)]
+
+    try:
+        run_neon_stage2_training(
+            config=config,
+            stage1_checkpoint="dummy_fgno.pt",
+            output_dir=tmp_path,
+            data_root="ignored",
+            load_stage1_fn=lambda ckpt: stage1,
+            build_families_fn=lambda root, cfg: (train_families, val_families),
+            latent_dim=8,
+            cache_features=True,
+            memory_cache_limit_bytes=1,
+        )
+    except ValueError as exc:
+        assert "cache_dir" in str(exc)
+        assert "In-memory NEON frozen-feature cache" in str(exc)
+    else:
+        raise AssertionError("large in-memory feature cache should fail early")
+
+
+def test_runner_allows_large_disk_feature_cache(tmp_path):
+    config = NEONStage2Config(
+        enabled=True,
+        d_e=4,
+        m_train=2,
+        k_train=2,
+        m_eval=2,
+        k_eval=2,
+        n_epochs=1,
+        prior_scale="auto_0p10_base_rmse",
+        alpha=None,
+    )
+    stage1 = _DummyStage1()
+
+    result = run_neon_stage2_training(
+        config=config,
+        stage1_checkpoint="dummy_fgno.pt",
+        output_dir=tmp_path / "out",
+        data_root="ignored",
+        load_stage1_fn=lambda ckpt: stage1,
+        build_families_fn=lambda root, cfg: ([_family("a", 0.0)], [_family("v", 0.2)]),
+        latent_dim=8,
+        cache_features=True,
+        cache_dir=tmp_path / "feature_cache",
+        memory_cache_limit_bytes=1,
+    )
+
+    assert result.history
+    assert list((tmp_path / "feature_cache").glob("*_bank0_k2.pt"))

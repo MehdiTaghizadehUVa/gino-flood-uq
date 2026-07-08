@@ -20,6 +20,13 @@ _VALID_DEPENDENCIES = frozenset({"za_dependent", "za_independent"})
 _VALID_OBJECTIVES = frozenset({"per_epistemic_fcrps", "pooled_fcrps", "l2_mean"})
 _VALID_SPATIAL_WEIGHTS = frozenset({"wettable_area", "wet_front", "uniform"})
 _VALID_LEAD_WEIGHTS = frozenset({"uniform", "lead_emphasis"})
+_VALID_BRANCH_TYPES = frozenset({"projected", "film"})
+_VALID_BRANCH_ACTIVATIONS = frozenset({"gelu", "silu", "relu"})
+_VALID_EPISTEMIC_RESAMPLE = frozenset({"epoch", "effective_batch"})
+_VALID_BOOTSTRAP_DISTRIBUTIONS = frozenset(
+    {"tempered_exponential", "exponential", "bernoulli", "none"}
+)
+_VALID_BOOTSTRAP_NORMALIZE = frozenset({"per_epistemic_batch", "none"})
 
 _PRIOR_SCALE_MIN = 0.05
 _PRIOR_SCALE_MAX = 0.20
@@ -31,6 +38,7 @@ _KEY_ALIASES = {
     "K_train": "k_train",
     "M_eval": "m_eval",
     "K_eval": "k_eval",
+    "hidden_channels": "train_hidden_channels",
 }
 
 
@@ -42,8 +50,9 @@ class NEONConfigError(ValueError):
 class NEONStage2Config:
     """Typed, validated NEON Stage-2 configuration.
 
-    Defaults mirror the plan's ``neon:`` block so an empty override yields the
-    documented reference configuration.
+    Defaults yield the NEON-aligned reference objective: per-epistemic fit
+    scoring with bootstrap-indexed views and randomized priors. Flood-specific
+    penalties remain available only as opt-in ablation knobs.
     """
 
     enabled: bool = False
@@ -59,15 +68,38 @@ class NEONStage2Config:
     prior_scale: Union[str, float] = "auto_0p10_base_rmse"
     alpha: Optional[float] = None
     lead_time_dim: int = 0
+    branch_type: str = "projected"
+    train_hidden_channels: int = 32
+    prior_hidden_channels: int = 5
+    branch_layers: int = 2
+    branch_activation: str = "gelu"
+    concat_index: bool = True
+    family_batch_size: int = 1
+    effective_batch_size: int = 8
+    shuffle_families: bool = True
+    epistemic_resample: str = "effective_batch"
+    latent_bank_count: int = 4
+    reference_member_subsample: Optional[int] = 32
+    progress_log_interval_effective_batches: int = 10
     objective: str = "per_epistemic_fcrps"
     reference_term_for_logging: bool = True
     spatial_weights: str = "wettable_area"
     lead_time_weights: str = "uniform"
-    lambda_rpf: float = 1.0e-4
-    lambda_smooth: float = 1.0e-3
-    lambda_time: float = 1.0
-    lambda_pos: float = 1.0e-2
-    lambda_mag: float = 1.0e-4
+    bootstrap_enabled: bool = True
+    bootstrap_distribution: str = "tempered_exponential"
+    bootstrap_temperature: float = 0.5
+    bootstrap_normalize: str = "per_epistemic_batch"
+    bootstrap_min_weight: float = 0.05
+    bootstrap_max_weight: float = 5.0
+    bootstrap_seed: int = 0
+    cancellation_diagnostics_enabled: bool = True
+    cancellation_warn_cosine_below: float = -0.90
+    cancellation_warn_cancellation_above: float = 0.80
+    lambda_rpf: float = 0.0
+    lambda_smooth: float = 0.0
+    lambda_time: float = 0.0
+    lambda_pos: float = 0.0
+    lambda_mag: float = 0.0
     learning_rate: float = 1.0e-4
     weight_decay: float = 1.0e-4
     n_epochs: int = 30
@@ -140,9 +172,55 @@ class NEONStage2Config:
                 f"lead_time_weights must be one of {sorted(_VALID_LEAD_WEIGHTS)}, "
                 f"got {self.lead_time_weights!r}."
             )
+        if self.branch_type not in _VALID_BRANCH_TYPES:
+            raise NEONConfigError(
+                f"branch_type must be one of {sorted(_VALID_BRANCH_TYPES)}, "
+                f"got {self.branch_type!r}."
+            )
+        if self.branch_activation not in _VALID_BRANCH_ACTIVATIONS:
+            raise NEONConfigError(
+                f"branch_activation must be one of {sorted(_VALID_BRANCH_ACTIVATIONS)}, "
+                f"got {self.branch_activation!r}."
+            )
+        if self.epistemic_resample not in _VALID_EPISTEMIC_RESAMPLE:
+            raise NEONConfigError(
+                f"epistemic_resample must be one of {sorted(_VALID_EPISTEMIC_RESAMPLE)}, "
+                f"got {self.epistemic_resample!r}."
+            )
+        if self.bootstrap_distribution not in _VALID_BOOTSTRAP_DISTRIBUTIONS:
+            raise NEONConfigError(
+                "bootstrap_distribution must be one of "
+                f"{sorted(_VALID_BOOTSTRAP_DISTRIBUTIONS)}, got {self.bootstrap_distribution!r}."
+            )
+        if self.bootstrap_normalize not in _VALID_BOOTSTRAP_NORMALIZE:
+            raise NEONConfigError(
+                f"bootstrap_normalize must be one of {sorted(_VALID_BOOTSTRAP_NORMALIZE)}, "
+                f"got {self.bootstrap_normalize!r}."
+            )
         # Positive-integer dimensions.
         if int(self.d_e) < 1:
             raise NEONConfigError(f"d_e must be >= 1, got {self.d_e}.")
+        for name in (
+            "train_hidden_channels",
+            "prior_hidden_channels",
+            "branch_layers",
+            "family_batch_size",
+            "effective_batch_size",
+            "latent_bank_count",
+            "progress_log_interval_effective_batches",
+        ):
+            if int(getattr(self, name)) < 1:
+                raise NEONConfigError(f"{name} must be >= 1, got {getattr(self, name)}.")
+        if int(self.effective_batch_size) < int(self.family_batch_size):
+            raise NEONConfigError(
+                "effective_batch_size must be >= family_batch_size, got "
+                f"{self.effective_batch_size} < {self.family_batch_size}."
+            )
+        if self.reference_member_subsample is not None and int(self.reference_member_subsample) < 1:
+            raise NEONConfigError(
+                "reference_member_subsample must be >= 1 when set, got "
+                f"{self.reference_member_subsample}."
+            )
         for name in ("m_train", "m_eval"):
             if int(getattr(self, name)) < 1:
                 raise NEONConfigError(f"{name} must be >= 1, got {getattr(self, name)}.")
@@ -157,6 +235,19 @@ class NEONStage2Config:
             raise NEONConfigError(f"n_epochs must be >= 1, got {self.n_epochs}.")
         if int(self.lead_time_dim) < 0:
             raise NEONConfigError(f"lead_time_dim must be >= 0, got {self.lead_time_dim}.")
+        if not (0.0 <= float(self.bootstrap_temperature) <= 1.0):
+            raise NEONConfigError(
+                f"bootstrap_temperature must be in [0, 1], got {self.bootstrap_temperature}."
+            )
+        if float(self.bootstrap_min_weight) <= 0.0:
+            raise NEONConfigError(
+                f"bootstrap_min_weight must be > 0, got {self.bootstrap_min_weight}."
+            )
+        if float(self.bootstrap_max_weight) < float(self.bootstrap_min_weight):
+            raise NEONConfigError(
+                "bootstrap_max_weight must be >= bootstrap_min_weight, got "
+                f"{self.bootstrap_max_weight} < {self.bootstrap_min_weight}."
+            )
         # Non-negative regularization weights.
         for name in ("lambda_rpf", "lambda_smooth", "lambda_time", "lambda_pos", "lambda_mag", "weight_decay"):
             if float(getattr(self, name)) < 0.0:
@@ -174,6 +265,24 @@ class NEONStage2Config:
         elif float(self.alpha) < 0.0:
             raise NEONConfigError(f"alpha must be >= 0 when set, got {self.alpha}.")
         return self
+
+    def to_bootstrap_config_dict(self) -> dict[str, Any]:
+        return {
+            "enabled": bool(self.bootstrap_enabled),
+            "distribution": str(self.bootstrap_distribution),
+            "temperature": float(self.bootstrap_temperature),
+            "normalize": str(self.bootstrap_normalize),
+            "min_weight": float(self.bootstrap_min_weight),
+            "max_weight": float(self.bootstrap_max_weight),
+            "seed": int(self.bootstrap_seed),
+        }
+
+    def to_cancellation_diagnostics_config_dict(self) -> dict[str, Any]:
+        return {
+            "enabled": bool(self.cancellation_diagnostics_enabled),
+            "warn_cosine_below": float(self.cancellation_warn_cosine_below),
+            "warn_cancellation_above": float(self.cancellation_warn_cancellation_above),
+        }
 
 
 def _parse_prior_scale_fraction(prior_scale: Union[str, float]) -> float:
@@ -209,6 +318,22 @@ def load_neon_config(mapping: Mapping[str, Any]) -> NEONStage2Config:
     field_names = {f.name for f in fields(NEONStage2Config)}
     kwargs: dict[str, Any] = {}
     for raw_key, value in block.items():
+        if raw_key == "bootstrap" and hasattr(value, "items"):
+            for nested_key, nested_value in value.items():
+                mapped = f"bootstrap_{nested_key}"
+                if mapped in field_names:
+                    kwargs[mapped] = nested_value
+            continue
+        if raw_key == "cancellation_diagnostics" and hasattr(value, "items"):
+            for nested_key, nested_value in value.items():
+                mapped = f"cancellation_{nested_key}"
+                if mapped == "cancellation_warn_cosine_below":
+                    kwargs[mapped] = nested_value
+                elif mapped == "cancellation_warn_cancellation_above":
+                    kwargs[mapped] = nested_value
+                elif mapped == "cancellation_enabled":
+                    kwargs["cancellation_diagnostics_enabled"] = nested_value
+            continue
         key = _KEY_ALIASES.get(raw_key, raw_key)
         if key in field_names:
             kwargs[key] = value
