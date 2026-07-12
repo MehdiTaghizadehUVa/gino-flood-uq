@@ -33,6 +33,9 @@ def resolve_training_plan(config: NEONStage2Config) -> dict[str, Any]:
         "dependency": config.dependency,
         "objective": config.objective,
         "d_e": int(config.d_e),
+        "epistemic_index_mode": config.epistemic_index_mode,
+        "dirichlet_num_particles": int(config.dirichlet_num_particles),
+        "dirichlet_particle_seed": int(config.dirichlet_particle_seed),
         "m_train": int(config.m_train),
         "k_train": int(config.k_train),
         "m_eval": int(config.m_eval),
@@ -48,13 +51,24 @@ def resolve_training_plan(config: NEONStage2Config) -> dict[str, Any]:
         "spatial_weights": config.spatial_weights,
         "lead_time_weights": config.lead_time_weights,
         "reference_term_for_logging": bool(config.reference_term_for_logging),
-        "prior_scale_mode": "auto" if config.uses_auto_prior_scale else "explicit",
-        "prior_scale_fraction": float(config.prior_scale_fraction),
+        "prior_scale_mode": (
+            "de_spread_target"
+            if config.uses_de_spread_prior_scale
+            else "auto"
+            if config.uses_auto_prior_scale
+            else "explicit"
+        ),
+        "prior_scale_fraction": (
+            None if config.uses_de_spread_prior_scale else float(config.prior_scale_fraction)
+        ),
+        "prior_scale_target_std_m": config.de_spread_target_std_m,
         "alpha": None if config.alpha is None else float(config.alpha),
         "loss_weights": config.to_loss_weights_dict(),
         "bootstrap": config.to_bootstrap_config_dict(),
         "member_bootstrap": config.to_member_bootstrap_config_dict(),
         "selection_min_retention": float(config.selection_min_retention),
+        "selection_metric": config.selection_metric,
+        "selection_enforce_rmse": bool(config.selection_enforce_rmse),
         "calibration_families": int(config.calibration_families),
         "calibration_m": int(config.calibration_m),
         "optimizer": {
@@ -218,11 +232,14 @@ def _build_grouped_families(data_root: Any, config: NEONStage2Config):  # pragma
         getattr(flood_config.data, "target_variables", ["wd"])
     )
     logger = logging.getLogger("neon_stage2.families")
+    dry_mask = prepared.get("structural_dry_mask")
+    structural_dry_artifact = None if dry_mask is None else {"dry_mask": dry_mask}
     return build_families_from_config(
         flood_config,
         normalizers,
         target_variables,
         logger,
+        structural_dry_artifact=structural_dry_artifact,
         rollout_length=getattr(config, "rollout_length", None),
         max_families=getattr(config, "max_families", None),
         val_fraction=float(getattr(config, "val_fraction", 0.1)),

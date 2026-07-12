@@ -26,8 +26,132 @@ class NEONCorrectionOutput:
 
     prediction: torch.Tensor
     correction: torch.Tensor
+    deterministic_correction: torch.Tensor
     trainable_correction: torch.Tensor
     prior_correction: torch.Tensor
+
+
+@dataclass(frozen=True)
+class PersistentDirichletParticleControl:
+    """Fixed finite epistemic support and family bootstrap laws for B5.
+
+    The support and complete particle-by-family weight matrix are generated
+    once and serialized. Training may cycle through subsets of particles, but
+    evaluation always uses the same complete support.
+    """
+
+    family_ids: tuple[str, ...]
+    weights: torch.Tensor
+    support: torch.Tensor
+    seed: int
+    split_fingerprint: str
+
+    @classmethod
+    def create(
+        cls,
+        family_ids: Sequence[str],
+        *,
+        num_particles: int = 16,
+        seed: int = 0,
+    ) -> "PersistentDirichletParticleControl":
+        ordered = tuple(str(value) for value in family_ids)
+        if not ordered or len(set(ordered)) != len(ordered):
+            raise ValueError("family_ids must be non-empty and unique in persisted order.")
+        particles = int(num_particles)
+        if particles < 2:
+            raise ValueError("num_particles must be >= 2.")
+        generator = torch.Generator(device="cpu").manual_seed(int(seed))
+        uniform = torch.rand(
+            particles, len(ordered), generator=generator, dtype=torch.float64
+        ).clamp_min(torch.finfo(torch.float64).tiny)
+        raw = -torch.log(uniform)
+        weights = raw / raw.mean(dim=1, keepdim=True)
+        support = torch.eye(particles, dtype=torch.float64) - 1.0 / float(particles)
+        fingerprint = hashlib.sha256("\n".join(ordered).encode("utf-8")).hexdigest()
+        return cls(ordered, weights, support, int(seed), fingerprint)
+
+    @classmethod
+    def from_metadata(
+        cls, payload: Mapping[str, Any]
+    ) -> "PersistentDirichletParticleControl":
+        control = cls(
+            tuple(str(value) for value in payload["family_ids"]),
+            torch.as_tensor(payload["weights"], dtype=torch.float64),
+            torch.as_tensor(payload["support"], dtype=torch.float64),
+            int(payload["seed"]),
+            str(payload["split_fingerprint"]),
+        )
+        expected = cls.create(
+            control.family_ids,
+            num_particles=int(control.support.shape[0]),
+            seed=control.seed,
+        )
+        if control.split_fingerprint != expected.split_fingerprint:
+            raise ValueError("Dirichlet particle family split fingerprint mismatch.")
+        if control.weights.shape != expected.weights.shape:
+            raise ValueError("Dirichlet particle weight matrix shape mismatch.")
+        if control.support.shape != expected.support.shape:
+            raise ValueError("Dirichlet particle support shape mismatch.")
+        return control
+
+    @property
+    def num_particles(self) -> int:
+        return int(self.support.shape[0])
+
+    def training_indices(self, step: int, count: int) -> torch.Tensor:
+        count = int(count)
+        if count < 1 or count > self.num_particles:
+            raise ValueError("particle subset count must be in [1, num_particles].")
+        generator = torch.Generator(device="cpu").manual_seed(int(self.seed))
+        order = torch.randperm(self.num_particles, generator=generator)
+        start = (int(step) * count) % self.num_particles
+        positions = (torch.arange(count) + start) % self.num_particles
+        return order.index_select(0, positions)
+
+    def indices_to_epistemic(
+        self,
+        indices: torch.Tensor | Sequence[int],
+        *,
+        device: torch.device | str | None = None,
+        dtype: torch.dtype | None = None,
+    ) -> torch.Tensor:
+        idx = torch.as_tensor(indices, dtype=torch.long).reshape(-1)
+        return self.support.index_select(0, idx).to(device=device, dtype=dtype)
+
+    def eval_epistemic_indices(
+        self, *, device: torch.device | str | None = None, dtype: torch.dtype | None = None
+    ) -> torch.Tensor:
+        return self.support.to(device=device, dtype=dtype)
+
+    def family_particle_weights(
+        self,
+        family_ids: Sequence[str],
+        particle_indices: torch.Tensor | Sequence[int],
+        *,
+        device: torch.device | str | None = None,
+        dtype: torch.dtype | None = None,
+    ) -> torch.Tensor:
+        lookup = {family_id: index for index, family_id in enumerate(self.family_ids)}
+        try:
+            family_index = torch.tensor(
+                [lookup[str(family_id)] for family_id in family_ids], dtype=torch.long
+            )
+        except KeyError as exc:
+            raise ValueError(f"unknown Dirichlet-control family {exc.args[0]!r}.") from exc
+        particle_index = torch.as_tensor(particle_indices, dtype=torch.long).reshape(-1)
+        selected = self.weights.index_select(0, particle_index).index_select(1, family_index)
+        return selected.transpose(0, 1).to(device=device, dtype=dtype)
+
+    def to_metadata(self) -> dict[str, Any]:
+        return {
+            "mode": "dirichlet_particles",
+            "num_particles": self.num_particles,
+            "family_ids": list(self.family_ids),
+            "weights": self.weights.tolist(),
+            "support": self.support.tolist(),
+            "seed": int(self.seed),
+            "split_fingerprint": self.split_fingerprint,
+        }
 
 
 @dataclass
@@ -137,6 +261,76 @@ def sample_epistemic_indices(
         dtype=dtype,
         generator=generator,
     )
+
+
+class CenteredHermiteBasis(nn.Module):
+    """Low-rank analytically centered basis for Gaussian epistemic indices.
+
+    Linear coordinates and projected second-order Hermite terms all have zero
+    expectation under ``z ~ N(0, I)``. The projection vectors are persistent
+    buffers: checkpointed vectors, not a regeneration seed, define behavior.
+    """
+
+    def __init__(
+        self,
+        epistemic_dim: int,
+        *,
+        linear_terms: bool = True,
+        quadratic_terms: int = 16,
+        seed: int = 123,
+    ) -> None:
+        super().__init__()
+        self.epistemic_dim = int(epistemic_dim)
+        self.linear_terms = bool(linear_terms)
+        self.quadratic_terms = int(quadratic_terms)
+        self.seed = int(seed)
+        if self.epistemic_dim < 1:
+            raise ValueError("epistemic_dim must be >= 1")
+        if self.quadratic_terms < 0:
+            raise ValueError("quadratic_terms must be >= 0")
+        if not self.linear_terms and self.quadratic_terms == 0:
+            raise ValueError("at least one Hermite basis term must be enabled")
+        generator = torch.Generator(device="cpu").manual_seed(self.seed)
+        vectors = torch.randn(
+            self.quadratic_terms,
+            self.epistemic_dim,
+            generator=generator,
+            dtype=torch.float32,
+        )
+        if self.quadratic_terms:
+            vectors = vectors / vectors.norm(dim=1, keepdim=True).clamp_min(1.0e-12)
+        self.register_buffer("quadratic_vectors", vectors)
+
+    @property
+    def output_dim(self) -> int:
+        return (self.epistemic_dim if self.linear_terms else 0) + self.quadratic_terms
+
+    def _validate_vectors(self) -> None:
+        expected = (self.quadratic_terms, self.epistemic_dim)
+        if tuple(self.quadratic_vectors.shape) != expected:
+            raise RuntimeError(
+                f"stored Hermite vectors must have shape {expected}, got "
+                f"{tuple(self.quadratic_vectors.shape)}"
+            )
+        if self.quadratic_terms:
+            norms = self.quadratic_vectors.float().norm(dim=1)
+            if not torch.allclose(norms, torch.ones_like(norms), rtol=1.0e-5, atol=1.0e-6):
+                raise RuntimeError("stored Hermite projection vectors must be unit-normalized")
+
+    def forward(self, z_e: torch.Tensor) -> torch.Tensor:
+        if z_e.ndim != 2 or int(z_e.shape[1]) != self.epistemic_dim:
+            raise ValueError(
+                f"z_e must have shape [M,{self.epistemic_dim}], got {tuple(z_e.shape)}"
+            )
+        self._validate_vectors()
+        terms = []
+        if self.linear_terms:
+            terms.append(z_e)
+        if self.quadratic_terms:
+            vectors = self.quadratic_vectors.to(device=z_e.device, dtype=z_e.dtype)
+            projected = z_e @ vectors.transpose(0, 1)
+            terms.append(projected.pow(2) - 1.0)
+        return torch.cat(terms, dim=-1)
 
 
 class _LeadTimeEncoder(nn.Module):
@@ -463,6 +657,12 @@ class NEONEpistemicCorrection(nn.Module):
         prior_rff_dim: int = 0,
         prior_rff_lengthscale: float = 0.25,
         prior_rff_include_lead: bool = True,
+        epistemic_basis: str = "identity",
+        epistemic_linear_terms: bool = True,
+        epistemic_quadratic_terms: int = 16,
+        epistemic_basis_seed: int = 123,
+        deterministic_head: bool = False,
+        deterministic_head_feature: str = "canonical_aleatory_mean",
     ) -> None:
         super().__init__()
         self.feature_channels = int(feature_channels)
@@ -493,6 +693,23 @@ class NEONEpistemicCorrection(nn.Module):
         self.prior_rff_dim = int(prior_rff_dim)
         self.prior_rff_lengthscale = float(prior_rff_lengthscale)
         self.prior_rff_include_lead = bool(prior_rff_include_lead)
+        self.epistemic_basis = str(epistemic_basis).strip().lower()
+        self.epistemic_linear_terms = bool(epistemic_linear_terms)
+        self.epistemic_quadratic_terms = int(epistemic_quadratic_terms)
+        self.epistemic_basis_seed = int(epistemic_basis_seed)
+        self.deterministic_head_enabled = bool(deterministic_head)
+        self.deterministic_head_feature = str(deterministic_head_feature).strip().lower()
+        if self.epistemic_basis not in {"identity", "hermite_random_projection"}:
+            raise ValueError(
+                "epistemic_basis must be one of {'identity', 'hermite_random_projection'}"
+            )
+        if self.deterministic_head_feature not in {
+            "canonical_aleatory_mean",
+            "aleatory_mean",
+            "fixed_zero_latent",
+            "member_specific",
+        }:
+            raise ValueError("unsupported deterministic_head_feature")
         if self.prior_rff_dim < 0:
             raise ValueError("prior_rff_dim must be >= 0.")
         if self.prior_rff_dim % 2 != 0:
@@ -501,13 +718,54 @@ class NEONEpistemicCorrection(nn.Module):
             raise ValueError("prior_rff_lengthscale must be > 0.")
         if self.prior_rff_dim > 0 and self.branch_type != "projected":
             raise ValueError("prior_rff_dim > 0 is only supported for branch_type='projected'.")
+        if self.epistemic_basis == "hermite_random_projection":
+            if self.branch_type != "projected":
+                raise ValueError("centered Hermite basis requires branch_type='projected'")
+            if self.concat_index:
+                raise ValueError(
+                    "centered Hermite basis requires concat_index=False so coefficients "
+                    "do not depend on z_e"
+                )
+            if self.prior_rff_dim:
+                raise ValueError(
+                    "prior_rff_dim must be 0 for identical centered-Hermite train/prior branches"
+                )
         if self.prior_rff_dim > 0:
             rff_input_dim = 3 if self.prior_rff_include_lead else 2
             freqs = torch.randn(rff_input_dim, self.prior_rff_dim // 2) / self.prior_rff_lengthscale
             self.register_buffer("prior_rff_freqs", freqs)
         else:
             self.register_buffer("prior_rff_freqs", torch.empty(0))
-        if self.branch_type == "film":
+        if self.epistemic_basis == "hermite_random_projection":
+            self.epistemic_basis_module = CenteredHermiteBasis(
+                self.epistemic_dim,
+                linear_terms=self.epistemic_linear_terms,
+                quadratic_terms=self.epistemic_quadratic_terms,
+                seed=self.epistemic_basis_seed,
+            )
+            basis_dim = self.epistemic_basis_module.output_dim
+            self.trainable_branch = _ProjectedTrainableBranch(
+                feature_channels=self.feature_channels,
+                out_channels=self.out_channels,
+                epistemic_dim=basis_dim,
+                hidden_channels=self.train_hidden_channels,
+                n_hidden_layers=n_hidden_layers,
+                activation=self.branch_activation,
+                concat_index=False,
+                lead_time_dim=self.lead_time_dim,
+            )
+            self.prior_branch = _ProjectedTrainableBranch(
+                feature_channels=self.feature_channels,
+                out_channels=self.out_channels,
+                epistemic_dim=basis_dim,
+                hidden_channels=self.prior_hidden_channels,
+                n_hidden_layers=n_hidden_layers,
+                activation=self.branch_activation,
+                concat_index=False,
+                lead_time_dim=self.lead_time_dim,
+            )
+        elif self.branch_type == "film":
+            self.epistemic_basis_module = None
             self.trainable_branch = _CorrectionBranch(
                 feature_channels=self.feature_channels,
                 out_channels=self.out_channels,
@@ -525,6 +783,7 @@ class NEONEpistemicCorrection(nn.Module):
                 lead_time_dim=self.lead_time_dim,
             )
         else:
+            self.epistemic_basis_module = None
             self.trainable_branch = _ProjectedTrainableBranch(
                 feature_channels=self.feature_channels,
                 out_channels=self.out_channels,
@@ -548,6 +807,17 @@ class NEONEpistemicCorrection(nn.Module):
         for param in self.prior_branch.parameters():
             param.requires_grad_(False)
         self.prior_rff_freqs.requires_grad_(False)
+        self.deterministic_head = (
+            _pointwise_mlp(
+                input_dim=self.feature_channels,
+                hidden_dim=self.train_hidden_channels,
+                output_dim=self.out_channels,
+                n_hidden_layers=self.n_hidden_layers,
+                activation=self.branch_activation,
+            )
+            if self.deterministic_head_enabled
+            else None
+        )
 
     def set_prior_scale(self, alpha: float) -> None:
         """Set the randomized-prior scale ``alpha`` (e.g. from auto-calibration)."""
@@ -624,6 +894,9 @@ class NEONEpistemicCorrection(nn.Module):
         """Compute the unit-scale fixed prior correction for frozen features."""
 
         branch_features = self._prepare_branch_features(features)
+        if self.epistemic_basis_module is not None:
+            psi = self.epistemic_basis_module(z_e)
+            return self.prior_branch(branch_features, psi)
         extra = self._prior_extra_features(branch_features, node_coords)
         if self.branch_type == "projected":
             return self.prior_branch(branch_features, z_e, extra_features=extra)
@@ -638,6 +911,7 @@ class NEONEpistemicCorrection(nn.Module):
         z_e: torch.Tensor,
         *,
         node_coords: torch.Tensor | None = None,
+        canonical_mean_features: torch.Tensor | None = None,
     ) -> NEONCorrectionOutput:
         if base_prediction.ndim != 5:
             raise ValueError(
@@ -666,18 +940,57 @@ class NEONEpistemicCorrection(nn.Module):
 
         branch_features = self._prepare_branch_features(features)
         base = base_prediction.detach() if self.detach_features else base_prediction
-        trainable = self.trainable_branch(branch_features, z_e)
+        branch_index = (
+            self.epistemic_basis_module(z_e)
+            if self.epistemic_basis_module is not None
+            else z_e
+        )
+        trainable = self.trainable_branch(branch_features, branch_index)
         with torch.no_grad():
-            extra = self._prior_extra_features(branch_features, node_coords)
-            if self.branch_type == "projected":
-                prior = self.prior_branch(branch_features, z_e, extra_features=extra)
+            if self.epistemic_basis_module is not None:
+                prior = self.prior_branch(branch_features, branch_index)
             else:
-                prior = self.prior_branch(branch_features, z_e)
-        correction = trainable + self.alpha * prior
+                extra = self._prior_extra_features(branch_features, node_coords)
+                if self.branch_type == "projected":
+                    prior = self.prior_branch(branch_features, z_e, extra_features=extra)
+                else:
+                    prior = self.prior_branch(branch_features, z_e)
+        if self.deterministic_head is None:
+            deterministic = torch.zeros_like(base.unsqueeze(1))
+        else:
+            if self.deterministic_head_feature in {
+                "canonical_aleatory_mean",
+                "fixed_zero_latent",
+            }:
+                if canonical_mean_features is None:
+                    raise ValueError(
+                        f"canonical_mean_features are required for "
+                        f"deterministic_head_feature={self.deterministic_head_feature!r}"
+                    )
+                mean_features = canonical_mean_features
+                if mean_features.ndim == 4:
+                    mean_features = mean_features.unsqueeze(1)
+                if mean_features.ndim != 5 or mean_features.shape[1] != 1:
+                    raise ValueError(
+                        "canonical_mean_features must have shape [B,T,Nv,C_phi] "
+                        "or [B,1,T,Nv,C_phi]"
+                    )
+                mean_features = mean_features.expand(-1, base.shape[1], -1, -1, -1)
+            elif self.deterministic_head_feature == "aleatory_mean":
+                mean_features = branch_features.mean(dim=1, keepdim=True).expand_as(
+                    branch_features
+                )
+            else:
+                mean_features = branch_features
+            deterministic_member = self.deterministic_head(mean_features)
+            deterministic = deterministic_member.unsqueeze(1)
+        epistemic_correction = trainable + self.alpha * prior
+        correction = deterministic + epistemic_correction
         prediction = base.unsqueeze(1) + correction
         return NEONCorrectionOutput(
             prediction=prediction,
             correction=correction,
+            deterministic_correction=deterministic,
             trainable_correction=trainable,
             prior_correction=prior,
         )
@@ -692,6 +1005,8 @@ class NEONEpistemicCorrection(nn.Module):
                 yield from self.trainable_branch.lead_time_encoder.parameters()
         else:
             yield from self.trainable_branch.mlp.parameters()
+        if self.deterministic_head is not None:
+            yield from self.deterministic_head.parameters()
 
 
 def _validate_nested_prediction(prediction: torch.Tensor) -> tuple[int, int, int, int, int, int]:
@@ -1147,9 +1462,10 @@ def calibrate_prior_scale(
     base_rmse: float,
     node_coords: torch.Tensor | None = None,
     target_fraction: float = 0.10,
+    target_std: float | None = None,
     eps: float = 1.0e-8,
 ) -> float:
-    """Return ``alpha`` s.t. ``Std_ze[alpha * E^P(phi, z_e)] ~= f * RMSE_base``.
+    """Return ``alpha`` matching either an explicit target std or a base-RMSE fraction.
 
     Measures the epistemic (z_e) standard deviation of the *unit-scale* prior
     correction ``E^P`` on a calibration batch and picks ``alpha`` so the scaled
@@ -1163,7 +1479,14 @@ def calibrate_prior_scale(
             spread = float(prior.std(dim=1, unbiased=True).mean().item())
         else:
             spread = 0.0
-    return float(target_fraction) * float(base_rmse) / max(spread, eps)
+    target = (
+        float(target_std)
+        if target_std is not None
+        else float(target_fraction) * float(base_rmse)
+    )
+    if target < 0.0 or not math.isfinite(target):
+        raise ValueError(f"prior target_std must be finite and nonnegative, got {target!r}.")
+    return target / max(spread, eps)
 
 
 def _stable_payload_seed(*parts: object) -> int:
@@ -1174,6 +1497,44 @@ def _stable_payload_seed(*parts: object) -> int:
 
 def _stable_family_seed(seed: int, family_id: str) -> int:
     return _stable_payload_seed(int(seed), family_id)
+
+
+def probit_exponential_raw_weights(
+    family_ids: Sequence[str],
+    z_e: torch.Tensor,
+    *,
+    seed: int = 0,
+    eps: float = 1.0e-7,
+) -> torch.Tensor:
+    """Map Gaussian epistemic indices to raw Exp(1) family weights.
+
+    For each family a fixed unit vector ``b_hat`` defines
+    ``u = Phi(b_hat @ z_e)``. Under a standard-normal epistemic index, ``u``
+    is uniform and ``-log(1-u)`` is Exp(1). This raw map is intentionally
+    exposed so distributional tests are evaluated before tempering, clipping,
+    or cross-family normalization.
+    """
+
+    if z_e.ndim != 2:
+        raise ValueError(f"z_e must have shape [M, d_e], got {tuple(z_e.shape)}.")
+    family_ids = [str(fid) for fid in family_ids]
+    if not family_ids:
+        raise ValueError("family_ids must be non-empty.")
+    d_e = int(z_e.shape[1])
+    if d_e < 1:
+        raise ValueError("z_e must have nonzero epistemic dimension.")
+    z_cpu = z_e.detach().to(device="cpu", dtype=torch.float64)
+    rows = []
+    for family_id in family_ids:
+        generator = torch.Generator(device="cpu")
+        generator.manual_seed(_stable_family_seed(seed, family_id))
+        direction = torch.randn(d_e, generator=generator, dtype=torch.float64)
+        direction = direction / direction.norm().clamp_min(1.0e-12)
+        projection = z_cpu @ direction
+        uniform = 0.5 * (1.0 + torch.erf(projection / math.sqrt(2.0)))
+        uniform = uniform.clamp(min=float(eps), max=1.0 - float(eps))
+        rows.append(-torch.log1p(-uniform))
+    return torch.stack(rows, dim=0).to(device=z_e.device, dtype=z_e.dtype)
 
 
 def epistemic_member_bootstrap_weights(
@@ -1276,28 +1637,40 @@ def epistemic_bootstrap_weights(
         raise ValueError("z_e must have nonzero epistemic dimension.")
     if distribution in {"none", "disabled"}:
         return torch.ones(len(family_ids), M, device=z_e.device, dtype=z_e.dtype)
-    if distribution not in {"tempered_exponential", "exponential", "bernoulli"}:
+    if distribution not in {
+        "probit_exponential",
+        "tempered_exponential",
+        "exponential",
+        "bernoulli",
+    }:
         raise ValueError(
-            "distribution must be one of {'tempered_exponential', 'exponential', "
-            f"'bernoulli', 'none'}}, got {distribution!r}."
+            "distribution must be one of {'probit_exponential', "
+            "'tempered_exponential', 'exponential', 'bernoulli', 'none'}, "
+            f"got {distribution!r}."
         )
-    rows = []
-    scale = 1.0 / math.sqrt(float(d_e))
-    z_cpu = z_e.detach().to(device="cpu", dtype=torch.float32)
-    for family_id in family_ids:
-        generator = torch.Generator(device="cpu")
-        generator.manual_seed(_stable_family_seed(seed, family_id))
-        b = torch.randn(d_e, generator=generator, dtype=torch.float32) * scale
-        if distribution == "bernoulli":
-            raw = 1.0 + torch.sign(z_cpu @ b)
-        else:
-            c = torch.randn(d_e, generator=generator, dtype=torch.float32) * scale
-            raw = 0.5 * ((z_cpu @ b).pow(2) + (z_cpu @ c).pow(2))
-            if distribution == "tempered_exponential":
-                tau = float(temperature)
-                raw = (1.0 - tau) + tau * raw
-        rows.append(raw)
-    weights = torch.stack(rows, dim=0).to(device=z_e.device, dtype=z_e.dtype)
+    if distribution == "probit_exponential":
+        weights = probit_exponential_raw_weights(family_ids, z_e, seed=seed)
+        tau = float(temperature)
+        if tau != 1.0:
+            weights = (1.0 - tau) + tau * weights
+    else:
+        rows = []
+        scale = 1.0 / math.sqrt(float(d_e))
+        z_cpu = z_e.detach().to(device="cpu", dtype=torch.float32)
+        for family_id in family_ids:
+            generator = torch.Generator(device="cpu")
+            generator.manual_seed(_stable_family_seed(seed, family_id))
+            b = torch.randn(d_e, generator=generator, dtype=torch.float32) * scale
+            if distribution == "bernoulli":
+                raw = 1.0 + torch.sign(z_cpu @ b)
+            else:
+                c = torch.randn(d_e, generator=generator, dtype=torch.float32) * scale
+                raw = 0.5 * ((z_cpu @ b).pow(2) + (z_cpu @ c).pow(2))
+                if distribution == "tempered_exponential":
+                    tau = float(temperature)
+                    raw = (1.0 - tau) + tau * raw
+            rows.append(raw)
+        weights = torch.stack(rows, dim=0).to(device=z_e.device, dtype=z_e.dtype)
     weights = weights.clamp(min=float(min_weight), max=float(max_weight))
     if normalize == "per_epistemic_batch":
         weights = weights / weights.mean(dim=0, keepdim=True).clamp_min(float(eps))
@@ -1532,6 +1905,12 @@ def save_neon_stage2_checkpoint(
             "prior_rff_dim": module.prior_rff_dim,
             "prior_rff_lengthscale": module.prior_rff_lengthscale,
             "prior_rff_include_lead": module.prior_rff_include_lead,
+            "epistemic_basis": module.epistemic_basis,
+            "epistemic_linear_terms": module.epistemic_linear_terms,
+            "epistemic_quadratic_terms": module.epistemic_quadratic_terms,
+            "epistemic_basis_seed": module.epistemic_basis_seed,
+            "deterministic_head": module.deterministic_head_enabled,
+            "deterministic_head_feature": module.deterministic_head_feature,
         },
     }
     torch.save(payload, path)
@@ -1557,8 +1936,16 @@ def load_neon_stage2_checkpoint(
     arch.setdefault("prior_rff_dim", 0)
     arch.setdefault("prior_rff_lengthscale", 0.25)
     arch.setdefault("prior_rff_include_lead", True)
+    arch.setdefault("epistemic_basis", "identity")
+    arch.setdefault("epistemic_linear_terms", True)
+    arch.setdefault("epistemic_quadratic_terms", 16)
+    arch.setdefault("epistemic_basis_seed", 123)
+    arch.setdefault("deterministic_head", False)
+    arch.setdefault("deterministic_head_feature", "canonical_aleatory_mean")
     module = NEONEpistemicCorrection(**arch)
     module.load_state_dict(payload["state_dict"])
+    if module.epistemic_basis_module is not None:
+        module.epistemic_basis_module._validate_vectors()
     for param in module.prior_branch.parameters():
         param.requires_grad_(False)
     return module, dict(payload.get("metadata") or {})

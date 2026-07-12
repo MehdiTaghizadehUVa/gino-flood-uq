@@ -38,14 +38,30 @@ neon:
   prior_hidden_channels: 16
   branch_layers: 2
   branch_activation: gelu
-  concat_index: true
+  concat_index: false
 
-  # Index-dependent data views. The family bootstrap perturbs the finite
-  # training-family objective; the member bootstrap perturbs each family's
-  # HEC-RAS empirical reference law for each epistemic particle.
+  # Population-centered low-rank epistemic basis. Stored projection vectors,
+  # not regeneration from the seed, define checkpoint behavior.
+  epistemic_basis: hermite_random_projection
+  epistemic_linear_terms: true
+  epistemic_quadratic_terms: 16
+  epistemic_basis_seed: 123
+  epistemic_index_mode: continuous
+  dirichlet_num_particles: 16
+  dirichlet_particle_seed: 123
+
+  # The deterministic Stage-2 mean correction is conditioned on a fixed
+  # antithetic Stage-1 latent bank, independent of K_train/K_eval.
+  deterministic_head: true
+  deterministic_head_feature: canonical_aleatory_mean
+  deterministic_head_canonical_k: 32
+  deterministic_head_latent_seed: 123
+
+  # Index-dependent family views. Probit-exponential weights break the even-z
+  # symmetry that otherwise encourages cancellation of the odd prior branch.
   bootstrap:
     enabled: true
-    distribution: tempered_exponential
+    distribution: probit_exponential
     temperature: 0.5
     normalize: per_epistemic_batch
     min_weight: 0.05
@@ -53,20 +69,25 @@ neon:
     seed: 0
 
   member_bootstrap:
-    enabled: true
+    # Reference members represent aleatory simulator uncertainty and are not
+    # resampled as epistemic observations in the main method.
+    enabled: false
     temperature: 1.0
     seed: 1
 
   # Prior-only random Fourier features make the fixed prior branch see mesh
   # coordinate/lead-time structure that the trainable branch cannot cancel
   # exactly. Set prior_rff_dim: 0 for legacy projected-branch behavior.
-  prior_rff_dim: 32
+  prior_rff_dim: 0
   prior_rff_lengthscale: 0.25
   prior_rff_include_lead: true
 
   # Checkpoint selection uses validation fit only among epochs with retained
   # randomized-prior variance above this floor. Set 0.0 for legacy selection.
-  selection_min_retention: 0.3
+  selection_min_retention: 0.0
+  selection_rmse_margin_m: 0.001
+  selection_metric: mixture_crps
+  selection_enforce_rmse: true
 
   # Auto alpha calibration probes several families with at least 64 epistemic
   # indices to reduce the noisy one-family / M_train estimate.

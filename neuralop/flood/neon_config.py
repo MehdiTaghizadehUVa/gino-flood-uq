@@ -11,6 +11,7 @@ The plan's YAML block uses capitalized ensemble keys (``M_train``, ``K_train``,
 
 from __future__ import annotations
 
+import math
 import re
 from dataclasses import dataclass, fields
 from typing import Any, Mapping, Optional, Union
@@ -24,9 +25,15 @@ _VALID_BRANCH_TYPES = frozenset({"projected", "film"})
 _VALID_BRANCH_ACTIVATIONS = frozenset({"gelu", "silu", "relu"})
 _VALID_EPISTEMIC_RESAMPLE = frozenset({"epoch", "effective_batch"})
 _VALID_BOOTSTRAP_DISTRIBUTIONS = frozenset(
-    {"tempered_exponential", "exponential", "bernoulli", "none"}
+    {"probit_exponential", "tempered_exponential", "exponential", "bernoulli", "none"}
 )
 _VALID_BOOTSTRAP_NORMALIZE = frozenset({"per_epistemic_batch", "none"})
+_VALID_EPISTEMIC_BASES = frozenset({"identity", "hermite_random_projection"})
+_VALID_EPISTEMIC_INDEX_MODES = frozenset({"continuous", "dirichlet_particles"})
+_VALID_SELECTION_METRICS = frozenset({"mixture_crps", "per_epistemic_fit"})
+_VALID_DETERMINISTIC_HEAD_FEATURES = frozenset(
+    {"canonical_aleatory_mean", "aleatory_mean", "fixed_zero_latent", "member_specific"}
+)
 
 _PRIOR_SCALE_MIN = 0.05
 _PRIOR_SCALE_MAX = 0.20
@@ -65,7 +72,8 @@ class NEONStage2Config:
     k_train: int = 8
     m_eval: int = 16
     k_eval: int = 50
-    prior_scale: Union[str, float] = "auto_0p10_base_rmse"
+    prior_scale: Union[str, float, Mapping[str, Any]] = "auto_0p10_base_rmse"
+    prior_scale_target_std_m: Optional[float] = None
     alpha: Optional[float] = None
     lead_time_dim: int = 0
     branch_type: str = "projected"
@@ -73,10 +81,21 @@ class NEONStage2Config:
     prior_hidden_channels: int = 16
     branch_layers: int = 2
     branch_activation: str = "gelu"
-    concat_index: bool = True
-    prior_rff_dim: int = 32
+    concat_index: bool = False
+    prior_rff_dim: int = 0
     prior_rff_lengthscale: float = 0.25
     prior_rff_include_lead: bool = True
+    epistemic_basis: str = "hermite_random_projection"
+    epistemic_linear_terms: bool = True
+    epistemic_quadratic_terms: int = 16
+    epistemic_basis_seed: int = 123
+    epistemic_index_mode: str = "continuous"
+    dirichlet_num_particles: int = 16
+    dirichlet_particle_seed: int = 123
+    deterministic_head: bool = True
+    deterministic_head_feature: str = "canonical_aleatory_mean"
+    deterministic_head_canonical_k: int = 32
+    deterministic_head_latent_seed: int = 123
     family_batch_size: int = 1
     effective_batch_size: int = 8
     shuffle_families: bool = True
@@ -89,13 +108,13 @@ class NEONStage2Config:
     spatial_weights: str = "wettable_area"
     lead_time_weights: str = "uniform"
     bootstrap_enabled: bool = True
-    bootstrap_distribution: str = "tempered_exponential"
+    bootstrap_distribution: str = "probit_exponential"
     bootstrap_temperature: float = 0.5
     bootstrap_normalize: str = "per_epistemic_batch"
     bootstrap_min_weight: float = 0.05
     bootstrap_max_weight: float = 5.0
     bootstrap_seed: int = 0
-    member_bootstrap_enabled: bool = True
+    member_bootstrap_enabled: bool = False
     member_bootstrap_temperature: float = 1.0
     member_bootstrap_seed: int = 1
     cancellation_diagnostics_enabled: bool = True
@@ -109,7 +128,10 @@ class NEONStage2Config:
     learning_rate: float = 1.0e-4
     weight_decay: float = 1.0e-4
     n_epochs: int = 30
-    selection_min_retention: float = 0.3
+    selection_min_retention: float = 0.0
+    selection_rmse_margin_m: float = 0.001
+    selection_metric: str = "mixture_crps"
+    selection_enforce_rmse: bool = True
     calibration_families: int = 4
     calibration_m: int = 64
 
@@ -128,6 +150,26 @@ class NEONStage2Config:
         if self.alpha is not None:
             return False
         return isinstance(self.prior_scale, str) and self.prior_scale.startswith("auto_")
+
+    @property
+    def uses_de_spread_prior_scale(self) -> bool:
+        if self.alpha is not None:
+            return False
+        if isinstance(self.prior_scale, Mapping):
+            return str(self.prior_scale.get("mode", "")).strip() == "de_spread_target"
+        return str(self.prior_scale).strip() == "de_spread_target"
+
+    @property
+    def uses_calibrated_prior_scale(self) -> bool:
+        return self.uses_auto_prior_scale or self.uses_de_spread_prior_scale
+
+    @property
+    def de_spread_target_std_m(self) -> Optional[float]:
+        if isinstance(self.prior_scale, Mapping):
+            value = self.prior_scale.get("target_std_m", self.prior_scale_target_std_m)
+        else:
+            value = self.prior_scale_target_std_m
+        return None if value is None else float(value)
 
     @property
     def prior_scale_fraction(self) -> float:
@@ -206,6 +248,38 @@ class NEONStage2Config:
                 f"bootstrap_normalize must be one of {sorted(_VALID_BOOTSTRAP_NORMALIZE)}, "
                 f"got {self.bootstrap_normalize!r}."
             )
+        if self.epistemic_basis not in _VALID_EPISTEMIC_BASES:
+            raise NEONConfigError(
+                f"epistemic_basis must be one of {sorted(_VALID_EPISTEMIC_BASES)}, "
+                f"got {self.epistemic_basis!r}."
+            )
+        if self.epistemic_index_mode not in _VALID_EPISTEMIC_INDEX_MODES:
+            raise NEONConfigError(
+                "epistemic_index_mode must be one of "
+                f"{sorted(_VALID_EPISTEMIC_INDEX_MODES)}, got {self.epistemic_index_mode!r}."
+            )
+        if self.selection_metric not in _VALID_SELECTION_METRICS:
+            raise NEONConfigError(
+                f"selection_metric must be one of {sorted(_VALID_SELECTION_METRICS)}."
+            )
+        if self.epistemic_index_mode == "dirichlet_particles":
+            if int(self.dirichlet_num_particles) < 2:
+                raise NEONConfigError("dirichlet_num_particles must be >= 2.")
+            if int(self.d_e) != int(self.dirichlet_num_particles):
+                raise NEONConfigError(
+                    "dirichlet_particles requires d_e == dirichlet_num_particles."
+                )
+            if self.epistemic_basis != "identity" or self.concat_index:
+                raise NEONConfigError(
+                    "dirichlet_particles requires epistemic_basis='identity' and "
+                    "concat_index=false; centered particle support is supplied directly."
+                )
+        if self.deterministic_head_feature not in _VALID_DETERMINISTIC_HEAD_FEATURES:
+            raise NEONConfigError(
+                "deterministic_head_feature must be one of "
+                f"{sorted(_VALID_DETERMINISTIC_HEAD_FEATURES)}, got "
+                f"{self.deterministic_head_feature!r}."
+            )
         # Positive-integer dimensions.
         if int(self.d_e) < 1:
             raise NEONConfigError(f"d_e must be >= 1, got {self.d_e}.")
@@ -250,6 +324,17 @@ class NEONStage2Config:
             raise NEONConfigError(f"prior_rff_dim must be even, got {self.prior_rff_dim}.")
         if int(self.prior_rff_dim) > 0 and self.branch_type != "projected":
             raise NEONConfigError("prior_rff_dim > 0 is only supported for branch_type='projected'.")
+        if int(self.epistemic_quadratic_terms) < 0:
+            raise NEONConfigError("epistemic_quadratic_terms must be >= 0.")
+        if self.epistemic_basis == "hermite_random_projection":
+            if self.branch_type != "projected":
+                raise NEONConfigError("hermite_random_projection requires branch_type='projected'.")
+            if self.concat_index:
+                raise NEONConfigError("hermite_random_projection requires concat_index=false.")
+            if int(self.prior_rff_dim) != 0:
+                raise NEONConfigError("hermite_random_projection requires prior_rff_dim=0.")
+        if int(self.deterministic_head_canonical_k) < 2:
+            raise NEONConfigError("deterministic_head_canonical_k must be >= 2.")
         if float(self.prior_rff_lengthscale) <= 0.0:
             raise NEONConfigError(
                 f"prior_rff_lengthscale must be > 0, got {self.prior_rff_lengthscale}."
@@ -267,6 +352,8 @@ class NEONStage2Config:
             raise NEONConfigError(
                 f"selection_min_retention must be in [0, 1], got {self.selection_min_retention}."
             )
+        if float(self.selection_rmse_margin_m) < 0.0:
+            raise NEONConfigError("selection_rmse_margin_m must be >= 0.")
         if int(self.calibration_families) < 1:
             raise NEONConfigError(
                 f"calibration_families must be >= 1, got {self.calibration_families}."
@@ -289,7 +376,13 @@ class NEONStage2Config:
         if float(self.learning_rate) <= 0.0:
             raise NEONConfigError(f"learning_rate must be > 0, got {self.learning_rate}.")
         # Prior-scale range (only meaningful when alpha is not explicitly set).
-        if self.alpha is None:
+        if self.alpha is None and self.uses_de_spread_prior_scale:
+            target = self.de_spread_target_std_m
+            if target is None or not math.isfinite(target) or target <= 0.0:
+                raise NEONConfigError(
+                    "de_spread_target prior_scale requires finite target_std_m > 0."
+                )
+        elif self.alpha is None:
             frac = _parse_prior_scale_fraction(self.prior_scale)
             if not (_PRIOR_SCALE_MIN - 1e-9 <= frac <= _PRIOR_SCALE_MAX + 1e-9):
                 raise NEONConfigError(
@@ -359,6 +452,11 @@ def load_neon_config(mapping: Mapping[str, Any]) -> NEONStage2Config:
     field_names = {f.name for f in fields(NEONStage2Config)}
     kwargs: dict[str, Any] = {}
     for raw_key, value in block.items():
+        if raw_key == "prior_scale" and hasattr(value, "items"):
+            kwargs["prior_scale"] = str(value.get("mode", "")).strip()
+            if "target_std_m" in value:
+                kwargs["prior_scale_target_std_m"] = value["target_std_m"]
+            continue
         if raw_key == "bootstrap" and hasattr(value, "items"):
             for nested_key, nested_value in value.items():
                 mapped = f"bootstrap_{nested_key}"

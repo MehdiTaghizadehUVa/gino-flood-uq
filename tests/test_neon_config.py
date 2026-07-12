@@ -61,10 +61,15 @@ def test_default_config_matches_plan_defaults():
     assert cfg.prior_hidden_channels == 16
     assert cfg.branch_layers == 2
     assert cfg.branch_activation == "gelu"
-    assert cfg.concat_index is True
-    assert cfg.prior_rff_dim == 32
+    assert cfg.concat_index is False
+    assert cfg.prior_rff_dim == 0
     assert cfg.prior_rff_lengthscale == pytest.approx(0.25)
     assert cfg.prior_rff_include_lead is True
+    assert cfg.epistemic_basis == "hermite_random_projection"
+    assert cfg.epistemic_quadratic_terms == 16
+    assert cfg.deterministic_head is True
+    assert cfg.deterministic_head_feature == "canonical_aleatory_mean"
+    assert cfg.deterministic_head_canonical_k == 32
     assert cfg.family_batch_size == 1
     assert cfg.effective_batch_size == 8
     assert cfg.shuffle_families is True
@@ -76,13 +81,13 @@ def test_default_config_matches_plan_defaults():
     assert cfg.spatial_weights == "wettable_area"
     assert cfg.lead_time_weights == "uniform"
     assert cfg.bootstrap_enabled is True
-    assert cfg.bootstrap_distribution == "tempered_exponential"
+    assert cfg.bootstrap_distribution == "probit_exponential"
     assert cfg.bootstrap_temperature == pytest.approx(0.5)
     assert cfg.bootstrap_normalize == "per_epistemic_batch"
     assert cfg.bootstrap_min_weight == pytest.approx(0.05)
     assert cfg.bootstrap_max_weight == pytest.approx(5.0)
     assert cfg.bootstrap_seed == 0
-    assert cfg.member_bootstrap_enabled is True
+    assert cfg.member_bootstrap_enabled is False
     assert cfg.member_bootstrap_temperature == pytest.approx(1.0)
     assert cfg.member_bootstrap_seed == 1
     assert cfg.cancellation_diagnostics_enabled is True
@@ -96,7 +101,10 @@ def test_default_config_matches_plan_defaults():
     assert cfg.learning_rate == pytest.approx(1.0e-4)
     assert cfg.weight_decay == pytest.approx(1.0e-4)
     assert cfg.n_epochs == 30
-    assert cfg.selection_min_retention == pytest.approx(0.3)
+    assert cfg.selection_min_retention == pytest.approx(0.0)
+    assert cfg.selection_rmse_margin_m == pytest.approx(0.001)
+    assert cfg.selection_metric == "mixture_crps"
+    assert cfg.selection_enforce_rmse is True
     assert cfg.calibration_families == 4
     assert cfg.calibration_m == 64
 
@@ -129,6 +137,8 @@ def _plan_block():
         "prior_rff_dim": 32,
         "prior_rff_lengthscale": 0.25,
         "prior_rff_include_lead": True,
+        "epistemic_basis": "identity",
+        "deterministic_head": False,
         "family_batch_size": 1,
         "effective_batch_size": 8,
         "shuffle_families": True,
@@ -384,6 +394,44 @@ def test_uses_auto_prior_scale_flag():
     assert NEONStage2Config(prior_scale="auto_0p10_base_rmse", alpha=0.1).uses_auto_prior_scale is False
 
 
+def test_de_spread_target_prior_scale_is_unit_aware_and_not_fraction_capped():
+    cfg = load_neon_config(
+        {"neon": {"prior_scale": {"mode": "de_spread_target", "target_std_m": 0.5}}}
+    )
+    assert cfg.uses_de_spread_prior_scale is True
+    assert cfg.uses_calibrated_prior_scale is True
+    assert cfg.de_spread_target_std_m == pytest.approx(0.5)
+
+
+def test_de_spread_target_requires_positive_physical_target():
+    with pytest.raises(NEONConfigError, match="target_std_m"):
+        load_neon_config({"neon": {"prior_scale": {"mode": "de_spread_target"}}})
+
+
+def test_dirichlet_particle_mode_requires_matching_persistent_support():
+    cfg = NEONStage2Config(
+        epistemic_index_mode="dirichlet_particles",
+        d_e=16,
+        dirichlet_num_particles=16,
+        epistemic_basis="identity",
+        concat_index=False,
+    ).validate()
+    assert cfg.dirichlet_num_particles == 16
+    with pytest.raises(NEONConfigError, match="d_e =="):
+        NEONStage2Config(
+            epistemic_index_mode="dirichlet_particles",
+            d_e=8,
+            dirichlet_num_particles=16,
+            epistemic_basis="identity",
+            concat_index=False,
+        ).validate()
+
+
+def test_selection_metric_rejects_unknown_mode():
+    with pytest.raises(NEONConfigError, match="selection_metric"):
+        NEONStage2Config(selection_metric="retention_gate").validate()
+
+
 # ---------------------------------------------------------------------------
 # Loss-weight adapter
 # ---------------------------------------------------------------------------
@@ -438,19 +486,23 @@ def test_shipped_default_yaml_parses_and_validates():
     assert cfg.train_hidden_channels == 16
     assert cfg.prior_hidden_channels == 16
     assert cfg.bootstrap_enabled is True
-    assert cfg.bootstrap_distribution == "tempered_exponential"
+    assert cfg.bootstrap_distribution == "probit_exponential"
     assert cfg.bootstrap_temperature == pytest.approx(0.5)
     assert cfg.bootstrap_normalize == "per_epistemic_batch"
     assert cfg.bootstrap_min_weight == pytest.approx(0.05)
     assert cfg.bootstrap_max_weight == pytest.approx(5.0)
     assert cfg.bootstrap_seed == 0
-    assert cfg.member_bootstrap_enabled is True
+    assert cfg.member_bootstrap_enabled is False
     assert cfg.member_bootstrap_temperature == pytest.approx(1.0)
     assert cfg.member_bootstrap_seed == 1
-    assert cfg.prior_rff_dim == 32
+    assert cfg.prior_rff_dim == 0
     assert cfg.prior_rff_lengthscale == pytest.approx(0.25)
     assert cfg.prior_rff_include_lead is True
-    assert cfg.selection_min_retention == pytest.approx(0.3)
+    assert cfg.selection_min_retention == pytest.approx(0.0)
+    assert cfg.selection_rmse_margin_m == pytest.approx(0.001)
+    assert cfg.epistemic_basis == "hermite_random_projection"
+    assert cfg.deterministic_head is True
+    assert cfg.deterministic_head_feature == "canonical_aleatory_mean"
     assert cfg.calibration_families == 4
     assert cfg.calibration_m == 64
     assert cfg.cancellation_diagnostics_enabled is True

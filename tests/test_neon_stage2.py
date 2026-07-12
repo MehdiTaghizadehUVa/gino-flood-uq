@@ -5,6 +5,7 @@ import types
 from pathlib import Path
 
 import torch
+import pytest
 from torch import nn
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -29,6 +30,20 @@ def _load_module(name: str, rel_path: str):
 
 
 neon = _load_module("neuralop.flood.neon", "neuralop/flood/neon.py")
+_ensure_pkg("neuralop.flood.data")
+structural_dry = types.ModuleType("neuralop.flood.data.structural_dry")
+
+
+def _clamp_structural_dry_normalized_values(values, *, structural_dry_mask, normalizer):
+    out = values.clone()
+    out[..., structural_dry_mask, :] = 0.0
+    return out
+
+
+structural_dry.clamp_structural_dry_normalized_values = (
+    _clamp_structural_dry_normalized_values
+)
+sys.modules["neuralop.flood.data.structural_dry"] = structural_dry
 train_neon = _load_module("neuralop.flood.train.neon", "neuralop/flood/train/neon.py")
 scientific_calibration = _load_module(
     "neuralop.flood.eval.scientific_calibration",
@@ -36,14 +51,18 @@ scientific_calibration = _load_module(
 )
 
 NEONEpistemicCorrection = neon.NEONEpistemicCorrection
+CenteredHermiteBasis = neon.CenteredHermiteBasis
+PersistentDirichletParticleControl = neon.PersistentDirichletParticleControl
 NEONStage2LossWeights = neon.NEONStage2LossWeights
 anova_corrected_epistemic_variance = neon.anova_corrected_epistemic_variance
 anova_corrected_epistemic_variance_independent = neon.anova_corrected_epistemic_variance_independent
 cancellation_diagnostics = neon.cancellation_diagnostics
+calibrate_prior_scale = neon.calibrate_prior_scale
 epistemic_variance_diagnostics = neon.epistemic_variance_diagnostics
 compute_stage2_loss = neon.compute_stage2_loss
 correction_magnitude_penalty = neon.correction_magnitude_penalty
 epistemic_bootstrap_weights = neon.epistemic_bootstrap_weights
+probit_exponential_raw_weights = neon.probit_exponential_raw_weights
 freeze_stage1_model = neon.freeze_stage1_model
 graph_smoothness_penalty = neon.graph_smoothness_penalty
 nested_variance_components = neon.nested_variance_components
@@ -54,6 +73,7 @@ load_neon_stage2_checkpoint = neon.load_neon_stage2_checkpoint
 save_neon_stage2_checkpoint = neon.save_neon_stage2_checkpoint
 temporal_smoothness_penalty = neon.temporal_smoothness_penalty
 collect_frozen_fgno_features = train_neon.collect_frozen_fgno_features
+collect_frozen_fgno_rollout_features = train_neon.collect_frozen_fgno_rollout_features
 save_forecast_artifact = scientific_calibration.save_forecast_artifact
 load_forecast_artifact = scientific_calibration.load_forecast_artifact
 save_nested_forecast_artifact = _load_module(
@@ -382,6 +402,50 @@ def test_collect_frozen_fgno_features_adds_single_time_dimension_for_one_step_ou
     assert all(not p.requires_grad for p in stage1.parameters())
 
 
+def test_frozen_rollout_clamps_structural_dry_cells_before_member_feedback():
+    class IdentityNormalizer:
+        def inverse_transform(self, value):
+            return value
+
+        def transform(self, value):
+            return value
+
+    class DummyStage1(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.weight = nn.Parameter(torch.tensor(1.0))
+            self.inputs = []
+
+        def forward(self, **kwargs):
+            x = kwargs["x"]
+            self.inputs.append(x.detach().clone())
+            nv = x.shape[1]
+            return {
+                "prediction": torch.ones(1, nv, 1),
+                "features": {"decoder_pre_projection": torch.zeros(1, nv, 3)},
+            }
+
+    stage1 = DummyStage1()
+    batch = collect_frozen_fgno_rollout_features(
+        stage1_model=stage1,
+        static=torch.zeros(1, 2, 1),
+        geometry=torch.zeros(1, 2, 2),
+        query_points=torch.zeros(1, 2, 2),
+        boundary_sequence=torch.zeros(2, 2, 1),
+        initial_histories=torch.zeros(1, 1, 2, 1),
+        aleatory_latents=torch.zeros(1, 2),
+        rollout_length=2,
+        n_history=1,
+        structural_dry_mask=torch.tensor([False, True]),
+        target_normalizer=IdentityNormalizer(),
+    )
+
+    assert batch.base_prediction[0, 0, 0, 0, 0] == 1.0
+    assert batch.base_prediction[0, 0, 0, 1, 0] == 0.0
+    assert stage1.inputs[1][0, 0, -1] == 1.0
+    assert stage1.inputs[1][0, 1, -1] == 0.0
+
+
 def test_nested_variance_components_and_anova_correction():
     pred = torch.tensor(
         [[[[[[0.0]]], [[[2.0]]]], [[[[10.0]]], [[[12.0]]]]]]
@@ -423,6 +487,168 @@ def test_tempered_exponential_bootstrap_is_even_in_epistemic_index():
     negative = epistemic_bootstrap_weights(["a", "b", "c"], -z_e, seed=17)
 
     torch.testing.assert_close(positive, negative)
+
+
+def test_probit_exponential_bootstrap_is_not_even_in_epistemic_index():
+    z_e = torch.tensor([[0.2, -0.4, 0.7], [-1.0, 0.5, 0.3]])
+    positive = epistemic_bootstrap_weights(
+        ["a", "b", "c"], z_e, seed=17, distribution="probit_exponential"
+    )
+    negative = epistemic_bootstrap_weights(
+        ["a", "b", "c"], -z_e, seed=17, distribution="probit_exponential"
+    )
+
+    assert not torch.allclose(positive, negative)
+
+
+def test_raw_probit_exponential_weights_have_exp1_moments_before_tempering():
+    generator = torch.Generator().manual_seed(123)
+    z_e = torch.randn(50000, 16, generator=generator)
+
+    raw = probit_exponential_raw_weights(["family"], z_e, seed=19)[0]
+
+    mean_se = 1.0 / (raw.numel() ** 0.5)
+    variance_se = (8.0 / raw.numel()) ** 0.5
+    assert abs(float(raw.mean()) - 1.0) <= 3.0 * mean_se
+    assert abs(float(raw.var(unbiased=True)) - 1.0) <= 3.0 * variance_se
+
+
+def test_normalized_probit_bootstrap_is_positive_deterministic_and_mean_one():
+    z_e = torch.randn(32, 8, generator=torch.Generator().manual_seed(4))
+    kwargs = dict(
+        seed=7,
+        distribution="probit_exponential",
+        temperature=0.7,
+        normalize="per_epistemic_batch",
+    )
+
+    first = epistemic_bootstrap_weights(["a", "b", "c", "d"], z_e, **kwargs)
+    second = epistemic_bootstrap_weights(["a", "b", "c", "d"], z_e, **kwargs)
+
+    torch.testing.assert_close(first, second)
+    assert torch.all(first > 0)
+    torch.testing.assert_close(first.mean(dim=0), torch.ones(32))
+
+
+def test_persistent_dirichlet_particles_round_trip_family_order_and_weights():
+    control = PersistentDirichletParticleControl.create(
+        ["family-a", "family-b", "family-c"], num_particles=4, seed=31
+    )
+    restored = PersistentDirichletParticleControl.from_metadata(control.to_metadata())
+
+    assert restored.family_ids == control.family_ids
+    assert restored.split_fingerprint == control.split_fingerprint
+    torch.testing.assert_close(restored.weights, control.weights)
+    torch.testing.assert_close(restored.support, control.support)
+    torch.testing.assert_close(
+        control.weights.mean(dim=1), torch.ones_like(control.weights.mean(dim=1))
+    )
+
+
+def test_persistent_dirichlet_training_subsets_cycle_over_full_support():
+    control = PersistentDirichletParticleControl.create(
+        ["a", "b"], num_particles=16, seed=9
+    )
+    seen = torch.cat([control.training_indices(step, 4) for step in range(4)])
+
+    assert sorted(seen.tolist()) == list(range(16))
+    assert control.indices_to_epistemic(seen[:4]).shape == (4, 16)
+
+
+def test_persistent_dirichlet_eval_uses_complete_training_support():
+    control = PersistentDirichletParticleControl.create(
+        ["a", "b"], num_particles=5, seed=3
+    )
+    eval_z = control.eval_epistemic_indices()
+
+    assert eval_z.shape == (5, 5)
+    torch.testing.assert_close(
+        eval_z.mean(dim=0), torch.zeros_like(eval_z.mean(dim=0)), atol=1e-7, rtol=0.0
+    )
+
+
+def test_centered_hermite_basis_has_zero_population_mean_and_unit_vectors():
+    basis = CenteredHermiteBasis(
+        epistemic_dim=4,
+        linear_terms=True,
+        quadratic_terms=3,
+        seed=123,
+    )
+    z_e = torch.randn(100000, 4, generator=torch.Generator().manual_seed(9))
+
+    psi = basis(z_e)
+
+    torch.testing.assert_close(
+        basis.quadratic_vectors.norm(dim=1), torch.ones(3), rtol=1e-6, atol=1e-6
+    )
+    assert torch.all(psi.mean(dim=0).abs() < 0.02)
+
+
+def test_centered_hermite_basis_behavior_is_defined_by_saved_vectors():
+    first = CenteredHermiteBasis(4, linear_terms=True, quadratic_terms=3, seed=1)
+    second = CenteredHermiteBasis(4, linear_terms=True, quadratic_terms=3, seed=999)
+    second.load_state_dict(first.state_dict())
+    z_e = torch.randn(12, 4, generator=torch.Generator().manual_seed(2))
+
+    torch.testing.assert_close(first(z_e), second(z_e))
+
+
+def test_centered_epistemic_operator_is_invariant_to_particle_chunk_composition():
+    head = NEONEpistemicCorrection(
+        feature_channels=3,
+        out_channels=1,
+        epistemic_dim=4,
+        branch_type="projected",
+        concat_index=False,
+        epistemic_basis="hermite_random_projection",
+        epistemic_quadratic_terms=3,
+        epistemic_basis_seed=7,
+        deterministic_head=False,
+        prior_rff_dim=0,
+    ).eval()
+    base = torch.zeros(1, 2, 1, 5, 1)
+    features = torch.randn(1, 2, 1, 5, 3)
+    z_target = torch.tensor([[0.2, -0.4, 0.1, 0.7]])
+    z_other = torch.randn(4, 4, generator=torch.Generator().manual_seed(2))
+
+    alone = head(base, features, z_target).correction[:, 0]
+    together = head(base, features, torch.cat([z_other, z_target], dim=0)).correction[:, -1]
+
+    torch.testing.assert_close(alone, together)
+
+
+def test_deterministic_head_uses_canonical_mean_feature_not_runtime_member_count():
+    head = NEONEpistemicCorrection(
+        feature_channels=3,
+        out_channels=1,
+        epistemic_dim=2,
+        branch_type="projected",
+        concat_index=False,
+        epistemic_basis="hermite_random_projection",
+        epistemic_quadratic_terms=2,
+        deterministic_head=True,
+        deterministic_head_feature="canonical_aleatory_mean",
+        prior_rff_dim=0,
+    ).eval()
+    canonical = torch.randn(1, 1, 4, 3)
+    z_e = torch.zeros(1, 2)
+    out_k2 = head(
+        torch.zeros(1, 2, 1, 4, 1),
+        torch.randn(1, 2, 1, 4, 3),
+        z_e,
+        canonical_mean_features=canonical,
+    )
+    out_k7 = head(
+        torch.zeros(1, 7, 1, 4, 1),
+        torch.randn(1, 7, 1, 4, 3),
+        z_e,
+        canonical_mean_features=canonical,
+    )
+
+    torch.testing.assert_close(
+        out_k2.deterministic_correction[:, :, :1],
+        out_k7.deterministic_correction[:, :, :1],
+    )
 
 
 def test_nested_variance_handles_single_epistemic_particle():
@@ -540,6 +766,44 @@ def test_fair_crps_members_matches_pairwise_reference_implementation():
     # chunking must not change the result
     fast_c = neon.fair_crps_members(pred, ref, reduction="mean", chunk_size=5)
     assert abs(float(fast_c) - float(slow)) < 1e-10
+
+
+def test_mixture_crps_cannot_identify_epistemic_grouping():
+    """The same predictive mixture has identical skill under different M/K nesting."""
+
+    collapsed = torch.tensor([[[[[[0.0]]], [[[2.0]]]], [[[[0.0]]], [[[2.0]]]]]])
+    separated = torch.tensor([[[[[[0.0]]], [[[0.0]]]], [[[[2.0]]], [[[2.0]]]]]])
+    reference = torch.tensor([[[[[1.0]]], [[[1.5]]]]])
+
+    def score(nested):
+        return neon.fair_crps_members(
+            nested.reshape(1, 4, 1, 1, 1), reference, reduction="mean"
+        )
+
+    torch.testing.assert_close(score(collapsed), score(separated))
+
+
+def test_prior_scale_calibration_hits_explicit_target_standard_deviation():
+    class KnownPrior(nn.Module):
+        def compute_prior(self, features, z_e, node_coords=None):
+            values = z_e[:, 0].reshape(1, -1, 1, 1, 1, 1)
+            return values.expand(features.shape[0], -1, features.shape[1], 1, 1, 1)
+
+    module = KnownPrior()
+    features = torch.zeros(1, 2, 1, 1, 3)
+    z_e = torch.tensor([[-1.0], [0.0], [1.0]])
+    target = 0.25
+    alpha = calibrate_prior_scale(
+        module=module,
+        features=features,
+        z_e=z_e,
+        base_rmse=99.0,
+        target_fraction=0.9,
+        target_std=target,
+    )
+    scaled = alpha * module.compute_prior(features, z_e)
+    observed = float(scaled.std(dim=1, unbiased=True).mean())
+    assert observed == pytest.approx(target)
 
 
 def test_epistemic_variance_survives_size_one_chunking():

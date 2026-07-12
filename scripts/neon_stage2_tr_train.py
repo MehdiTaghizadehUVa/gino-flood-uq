@@ -8,6 +8,7 @@ Parameterized via environment for the data-ablation grid:
   NEON_N_TRAIN   number of training families from the 450-family fit pool
                  (default 450; ablation grid uses 25/50/100/250/400)
   NEON_OUT_DIR   output directory (default .../tr_n<NEON_N_TRAIN>)
+  NEON_SUBSET_REPLICATE seeded nested-subset replicate (optional; 0--4 grid)
   NEON_CACHE_DIR shared frozen-feature disk cache (default shared across runs,
                  so grid runs reuse the same cached rollouts)
 
@@ -42,9 +43,18 @@ BUNDLE = (
 )
 
 N_TRAIN = int(os.environ.get("NEON_N_TRAIN") or "450")
+_SUBSET_REPLICATE_ENV = os.environ.get("NEON_SUBSET_REPLICATE")
+LADDER_RUNG = os.environ.get("NEON_LADDER_RUNG") or "B3"
+SUBSET_REPLICATE = int(_SUBSET_REPLICATE_ENV or "0")
+SUBSET_BASE_SEED = int(os.environ.get("NEON_SUBSET_BASE_SEED") or "20260712")
+_DEFAULT_OUT_NAME = (
+    f"tr_n{N_TRAIN}_rep{SUBSET_REPLICATE}_{LADDER_RUNG.lower()}"
+    if _SUBSET_REPLICATE_ENV is not None
+    else f"tr_n{N_TRAIN}_{LADDER_RUNG.lower()}"
+)
 OUT_DIR = Path(
     os.environ.get("NEON_OUT_DIR")
-    or f"/scratch/jrj6wm/GINO_Model/neon_stage2_full_train/tr_n{N_TRAIN}"
+    or f"/scratch/jrj6wm/GINO_Model/neon_stage2_full_train/{_DEFAULT_OUT_NAME}"
 )
 CACHE_DIR = Path(
     os.environ.get("NEON_CACHE_DIR")
@@ -58,6 +68,56 @@ N_EPOCHS = int(os.environ.get("NEON_EPOCHS") or "30")
 VAL_SEED = 1234
 
 
+def _ladder_overrides(rung: str) -> dict:
+    rung = str(rung).strip().upper()
+    if rung not in {"B0", "B1A", "B1B", "B2", "B3", "B4", "B5"}:
+        raise ValueError(f"unsupported NEON ladder rung {rung!r}.")
+    values = {
+        "bootstrap_distribution": "tempered_exponential",
+        "member_bootstrap_enabled": True,
+        "epistemic_basis": "identity",
+        "concat_index": True,
+        "prior_rff_dim": 32,
+        "deterministic_head": False,
+        "selection_metric": "per_epistemic_fit",
+        "selection_enforce_rmse": False,
+        "selection_min_retention": 0.0,
+    }
+    if rung in {"B1A", "B1B", "B2", "B3", "B4", "B5"}:
+        values["member_bootstrap_enabled"] = False
+    if rung in {"B1B", "B2", "B3", "B4", "B5"}:
+        values["bootstrap_distribution"] = "probit_exponential"
+    if rung in {"B2", "B3", "B4", "B5"}:
+        values.update(
+            epistemic_basis="hermite_random_projection",
+            concat_index=False,
+            prior_rff_dim=0,
+            deterministic_head=True,
+            deterministic_head_feature="canonical_aleatory_mean",
+        )
+    if rung in {"B3", "B4", "B5"}:
+        values.update(selection_metric="mixture_crps", selection_enforce_rmse=True)
+    if rung == "B4":
+        multiplier = float(os.environ.get("NEON_DE_SPREAD_MULTIPLIER") or "1.0")
+        if multiplier not in {0.5, 1.0, 2.0}:
+            raise ValueError("B4 requires NEON_DE_SPREAD_MULTIPLIER in {0.5,1.0,2.0}.")
+        values["prior_scale"] = {
+            "mode": "de_spread_target",
+            "target_std_m": 0.046 * multiplier,
+        }
+    if rung == "B5":
+        values.update(
+            epistemic_index_mode="dirichlet_particles",
+            epistemic_basis="identity",
+            concat_index=False,
+            prior_rff_dim=0,
+            d_e=16,
+            dirichlet_num_particles=16,
+            m_eval=16,
+        )
+    return values
+
+
 def _sha256(path: str) -> str:
     h = hashlib.sha256()
     with open(path, "rb") as fh:
@@ -68,7 +128,6 @@ def _sha256(path: str) -> str:
 
 def main() -> int:
     from neuralop.flood.cli.train_neon_stage2 import _load_frozen_stage1
-    from neuralop.flood.eval.datasets import _load_or_fit_normalizers
     from neuralop.flood.neon_config import NEONStage2Config
     from neuralop.flood.train.neon_families import build_families_from_config
     from neuralop.flood.train.neon_runner import run_neon_stage2_training
@@ -90,7 +149,12 @@ def main() -> int:
     target_variables = parse_target_variables(
         getattr(flood_config.data, "target_variables", ["wd"])
     )
-    normalizers, normalizer_path = _load_or_fit_normalizers(flood_config, None, None, LOG)
+    stage1 = _load_frozen_stage1(BUNDLE)
+    bundle = _load_frozen_stage1.last_bundle  # type: ignore[attr-defined]
+    prepared = _load_frozen_stage1.last_prepared  # type: ignore[attr-defined]
+    normalizers = prepared["normalizers"]
+    normalizer_path = bundle.normalizer_path
+    dry_mask = prepared.get("structural_dry_mask")
 
     t0 = time.time()
     train_fam, val_fam = build_families_from_config(
@@ -98,14 +162,19 @@ def main() -> int:
         normalizers,
         target_variables,
         LOG,
-        structural_dry_artifact=None,
+        structural_dry_artifact=(None if dry_mask is None else {"dry_mask": dry_mask}),
         rollout_length=None,      # full horizon
         max_families=None,        # all 500 TR families
         val_fraction=0.1,         # deterministic: last 50 by sorted family ID
     )
-    # Fixed validation set across all grid runs; training subset = first
-    # N_TRAIN of the sorted 450-family fit pool.
-    train_fam = sorted(train_fam, key=lambda f: f.family_id)[:N_TRAIN]
+    # Fixed validation set; each replicate uses one seeded permutation whose
+    # prefixes define nested N=25,...,400 subsets.
+    fit_pool = sorted(train_fam, key=lambda f: f.family_id)
+    subset_generator = torch.Generator().manual_seed(
+        SUBSET_BASE_SEED + SUBSET_REPLICATE
+    )
+    subset_order = torch.randperm(len(fit_pool), generator=subset_generator).tolist()
+    train_fam = [fit_pool[index] for index in subset_order[:N_TRAIN]]
     LOG.info(
         "families built in %.1fs: train=%d (of 450 pool) val=%d T=%d Nv=%d | val ids %s..%s",
         time.time() - t0, len(train_fam), len(val_fam),
@@ -113,24 +182,26 @@ def main() -> int:
         val_fam[0].family_id, val_fam[-1].family_id,
     )
 
-    stage1 = _load_frozen_stage1(BUNDLE)
-    bundle = _load_frozen_stage1.last_bundle  # type: ignore[attr-defined]
     latent_dim = int(bundle.fgn_noise_dim)
     n_history = int(bundle.n_history)
 
-    config = NEONStage2Config(
+    config_kwargs = dict(
         enabled=True,
         feature_source="decoder_pre_projection",
         dependency="za_dependent",
         d_e=D_E,
         m_train=4,
         k_train=8,
-        m_eval=32,
+        m_eval=16,
         k_eval=50,
         prior_scale=PRIOR_SCALE,
         n_epochs=N_EPOCHS,
         lead_time_dim=0,
     )
+    config_kwargs.update(_ladder_overrides(LADDER_RUNG))
+    if "prior_scale" not in config_kwargs:
+        config_kwargs["prior_scale"] = PRIOR_SCALE
+    config = NEONStage2Config(**config_kwargs).validate()
 
     normalizer_fingerprint = {
         "path": str(normalizer_path),
@@ -140,12 +211,16 @@ def main() -> int:
 
     gen = torch.Generator().manual_seed(0)
     t1 = time.time()
+    def load_prepared_stage1(_checkpoint):
+        return stage1
+
+    load_prepared_stage1.last_prepared = prepared
     result = run_neon_stage2_training(
         config=config,
         stage1_checkpoint=BUNDLE,
         output_dir=OUT_DIR,
         data_root=TR_CONFIG,
-        load_stage1_fn=lambda _ckpt: stage1,
+        load_stage1_fn=load_prepared_stage1,
         build_families_fn=lambda _root, _cfg: (train_fam, val_fam),
         latent_dim=latent_dim,
         n_history=n_history,
@@ -160,9 +235,9 @@ def main() -> int:
         prior_seed=PRIOR_SEED,
         normalizer_fingerprint=normalizer_fingerprint,
         structural_dry_policy={
-            "policy": "none",
-            "weights": "wettable_area_from_cell_area" ,
-            "note": "no masked_primary artifact in TR config; family weights are cell-area based when static_raw is present, else uniform",
+            "policy": "frozen_stage1_bundle",
+            "feedback_clamp": dry_mask is not None,
+            "weights": "wettable_area_from_cell_area",
         },
     )
     LOG.info("training done in %.1f min", (time.time() - t1) / 60.0)
@@ -171,8 +246,12 @@ def main() -> int:
     with hist_path.open("w") as fh:
         json.dump({
             "n_train": N_TRAIN,
+            "ladder_rung": LADDER_RUNG,
             "val_seed": VAL_SEED,
             "prior_seed": PRIOR_SEED,
+            "subset_replicate": SUBSET_REPLICATE,
+            "subset_seed": SUBSET_BASE_SEED + SUBSET_REPLICATE,
+            "train_family_ids": [family.family_id for family in train_fam],
             "best_epoch": result.best_epoch,
             "best_val_fit": result.best_val_fit,
             "history": result.history,

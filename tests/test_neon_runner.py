@@ -106,15 +106,24 @@ def test_runner_trains_saves_and_records_metadata(tmp_path):
     assert meta["branch_type"] == "projected"
     assert meta["prior_hidden_channels"] == 16
     assert meta["bootstrap"]["enabled"] is True
-    assert meta["member_bootstrap"]["enabled"] is True
-    assert meta["prior_rff_dim"] == 32
-    assert meta["selection_min_retention"] == 0.3
+    assert meta["member_bootstrap"]["enabled"] is False
+    assert meta["prior_rff_dim"] == 0
+    assert meta["epistemic_basis"] == "hermite_random_projection"
+    assert meta["deterministic_head"] is True
+    assert meta["selection_min_retention"] == 0.0
+    assert meta["selection_rmse_margin_m"] == 0.001
+    assert meta["validation_metrics_inverse_transformed"] is False
     assert meta["calibration_m"] == 64
-    assert meta["feature_cache_schema_version"] == "neon_feature_cache_v2"
+    assert meta["feature_cache_schema_version"] == "neon_feature_cache_v3"
     assert meta["progress_log_interval_effective_batches"] == 10
     assert "best_epoch" in meta and "val_metrics" in meta
     assert (tmp_path / "progress_events.jsonl").exists()
     assert (tmp_path / "history_partial.jsonl").exists()
+    paired_paths = sorted(tmp_path.glob("validation_rmse_pairs_epoch_*.json"))
+    assert len(paired_paths) == 2
+    with paired_paths[-1].open("r", encoding="utf-8") as fh:
+        paired = json.load(fh)
+    assert paired["pairs"][0]["family_id"] == "v"
     with (tmp_path / "latest_status.json").open("r", encoding="utf-8") as fh:
         latest = json.load(fh)
     assert latest["event"] == "training_end"
@@ -171,6 +180,61 @@ def test_runner_auto_calibrates_prior_scale_away_from_placeholder(tmp_path):
     assert torch.isfinite(torch.tensor(meta["alpha"]))
 
 
+def test_runner_persists_complete_dirichlet_particle_control(tmp_path):
+    config = NEONStage2Config(
+        enabled=True,
+        epistemic_index_mode="dirichlet_particles",
+        epistemic_basis="identity",
+        concat_index=False,
+        deterministic_head=False,
+        d_e=4,
+        dirichlet_num_particles=4,
+        dirichlet_particle_seed=17,
+        m_train=2,
+        k_train=2,
+        m_eval=4,
+        k_eval=2,
+        n_epochs=1,
+        alpha=0.05,
+    )
+    stage1 = _DummyStage1()
+    train = [_family("a", 0.0), _family("b", 0.2)]
+    val = [_family("v", 0.1)]
+
+    run_neon_stage2_training(
+        config=config,
+        stage1_checkpoint="dummy_fgno.pt",
+        output_dir=tmp_path,
+        data_root="ignored",
+        load_stage1_fn=lambda ckpt: stage1,
+        build_families_fn=lambda root, cfg: (train, val),
+        latent_dim=8,
+        calibrate_prior=False,
+    )
+    _, metadata = load_neon_stage2_checkpoint(tmp_path / "neon_stage2_best.pt")
+    control = metadata["dirichlet_particle_control"]
+    assert metadata["epistemic_index_mode"] == "dirichlet_particles"
+    assert control["num_particles"] == 4
+    assert control["family_ids"] == ["a", "b"]
+    assert len(control["weights"]) == 4
+    assert all(len(row) == 2 for row in control["weights"])
+
+
+def test_production_training_scripts_preserve_frozen_normalizers_and_dry_mask():
+    for script_name in ("neon_stage2_full_train.py", "neon_stage2_tr_train.py"):
+        source = (REPO_ROOT / "scripts" / script_name).read_text(encoding="utf-8")
+        assert 'normalizers = prepared["normalizers"]' in source
+        assert '{"dry_mask": dry_mask}' in source
+        assert "load_prepared_stage1.last_prepared = prepared" in source
+        assert "structural_dry_artifact=None" not in source
+    tr_source = (REPO_ROOT / "scripts" / "neon_stage2_tr_train.py").read_text(
+        encoding="utf-8"
+    )
+    assert "SUBSET_BASE_SEED + SUBSET_REPLICATE" in tr_source
+    assert "subset_order[:N_TRAIN]" in tr_source
+    assert '"B0", "B1A", "B1B", "B2", "B3", "B4", "B5"' in tr_source
+
+
 def test_frozen_model_collector_uses_stable_family_bank_latents():
     stage1 = _DummyStage1()
     collector = runner.make_feature_collector_from_frozen_model(
@@ -188,6 +252,99 @@ def test_frozen_model_collector_uses_stable_family_bank_latents():
 
     torch.testing.assert_close(bank1_first.aleatory_latents, bank1_second.aleatory_latents)
     assert not torch.allclose(bank0.aleatory_latents, bank1_first.aleatory_latents)
+
+
+def test_canonical_mean_feature_is_independent_of_runtime_aleatory_count():
+    stage1 = _DummyStage1()
+    collector = runner.make_feature_collector_from_frozen_model(
+        stage1,
+        feature_source="decoder_pre_projection",
+        n_history=n_hist,
+        latent_dim=8,
+        generator=torch.Generator().manual_seed(123),
+        canonical_k=4,
+        canonical_seed=19,
+    )
+    fam = _family("TR000123", 0.0)
+
+    k2 = collector(fam, num_aleatory=2, latent_bank_id=0)
+    k5 = collector(fam, num_aleatory=5, latent_bank_id=1)
+
+    torch.testing.assert_close(k2.canonical_mean_features, k5.canonical_mean_features)
+    assert k2.canonical_latent_hash == k5.canonical_latent_hash
+
+
+def test_canonical_latent_bank_is_shared_across_families():
+    model = _DummyStage1()
+    collector = runner.make_feature_collector_from_frozen_model(
+        model,
+        feature_source="decoder_pre_projection",
+        n_history=n_hist,
+        latent_dim=8,
+        canonical_k=4,
+        canonical_seed=19,
+    )
+    family_a = _family("family-a", 0.0)
+    family_b = _family("family-b", 0.5)
+
+    batch_a = collector(family_a, num_aleatory=2, latent_bank_id=0)
+    batch_b = collector(family_b, num_aleatory=2, latent_bank_id=0)
+
+    assert batch_a.canonical_latent_hash == batch_b.canonical_latent_hash
+
+
+def test_fixed_zero_latent_feature_uses_one_zero_latent_not_canonical_sampling():
+    model = _DummyStage1()
+    collector = runner.make_feature_collector_from_frozen_model(
+        model,
+        feature_source="decoder_pre_projection",
+        n_history=n_hist,
+        latent_dim=8,
+        canonical_k=32,
+        canonical_seed=19,
+        canonical_zero_latent=True,
+    )
+    batch = collector(_family("family-a", 0.0), num_aleatory=2, latent_bank_id=0)
+
+    torch.testing.assert_close(
+        batch.canonical_mean_features,
+        torch.zeros_like(batch.canonical_mean_features),
+    )
+
+
+def test_canonical_feature_rollout_is_computed_once_per_family_across_latent_banks():
+    model = _DummyStage1()
+    model.forward_calls = 0
+    original_forward = model.forward
+
+    def counted_forward(**kwargs):
+        model.forward_calls += 1
+        return original_forward(**kwargs)
+
+    model.forward = counted_forward
+    collector = runner.make_feature_collector_from_frozen_model(
+        model,
+        feature_source="decoder_pre_projection",
+        n_history=n_hist,
+        latent_dim=8,
+        canonical_k=4,
+        canonical_seed=19,
+    )
+    family = _family("family-a", 0.0)
+
+    collector(family, num_aleatory=2, latent_bank_id=0)
+    calls_after_first = model.forward_calls
+    collector(family, num_aleatory=2, latent_bank_id=1)
+
+    assert calls_after_first > 2 * T
+    assert model.forward_calls == calls_after_first + 2 * T
+
+
+def test_target_normalizer_scale_converts_normalized_spread_to_meters():
+    class Normalizer:
+        std = torch.tensor([2.5])
+
+    assert runner._normalizer_physical_scale(Normalizer()) == 2.5
 
 
 def test_disk_cache_collects_once_and_round_trips(tmp_path):
@@ -214,6 +371,29 @@ def test_disk_cache_collects_once_and_round_trips(tmp_path):
     assert second.features.dtype == first.features.dtype
     assert torch.allclose(first.features, second.features, atol=1e-2)
     assert torch.allclose(first.base_prediction, second.base_prediction, atol=1e-2)
+
+
+def test_disk_cache_round_trips_canonical_mean_features_and_bank_hash(tmp_path):
+    def base(family, *, num_aleatory, generator=None, latent_bank_id=None):
+        return train_neon.FrozenFGNOFeatureBatch(
+            base_prediction=torch.zeros(1, num_aleatory, T, Nv, C),
+            features=torch.zeros(1, num_aleatory, T, Nv, Cphi),
+            aleatory_latents=torch.zeros(num_aleatory, 2),
+            canonical_mean_features=torch.randn(1, T, Nv, Cphi),
+            canonical_latent_hash="canonical-sha256",
+        )
+
+    fam = NEONFamilySample(family_id="TR000001", reference=torch.zeros(R, T, Nv, C))
+    coll = runner.make_cached_feature_collector(base, cache_dir=tmp_path)
+    first = coll(fam, num_aleatory=4)
+    second = coll(fam, num_aleatory=4)
+
+    assert torch.allclose(
+        first.canonical_mean_features,
+        second.canonical_mean_features,
+        atol=1e-2,
+    )
+    assert second.canonical_latent_hash == "canonical-sha256"
 
 
 def test_disk_cache_key_separates_incompatible_feature_entries(tmp_path):

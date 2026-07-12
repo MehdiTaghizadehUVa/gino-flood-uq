@@ -242,6 +242,11 @@ def grouped_sample_to_family(
             f"frames from t={history_start}, got {history_ref.shape[1]}."
         )
     initial_histories = history_ref.mean(dim=0).contiguous()  # [n_history, Nv, C]
+    structural_dry_mask = _get(sample, "structural_dry_mask")
+    if structural_dry_mask is not None:
+        structural_dry_mask = torch.as_tensor(
+            structural_dry_mask, dtype=torch.bool
+        ).reshape(nv).contiguous()
 
     weights = None
     if wettable_area_weights:
@@ -265,6 +270,7 @@ def grouped_sample_to_family(
         query_points=query_points.unsqueeze(0).contiguous(),
         boundary_sequence=boundary_sequence,
         initial_histories=initial_histories,
+        structural_dry_mask=structural_dry_mask,
     )
 
 

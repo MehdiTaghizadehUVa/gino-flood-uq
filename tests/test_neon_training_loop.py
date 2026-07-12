@@ -462,7 +462,7 @@ def test_training_threads_member_bootstrap_weights_and_keeps_validation_unweight
     assert all(value is None for value in validation_member_weights)
 
 
-def test_best_epoch_tracking_picks_lowest_val():
+def test_best_epoch_tracking_picks_lowest_eligible_mixture_crps():
     module = _module()
     opt = build_neon_stage2_optimizer(module, learning_rate=1e-2)
     result = train_neon_stage2_epochs(
@@ -475,13 +475,15 @@ def test_best_epoch_tracking_picks_lowest_val():
         m_train=2,
         k_train=4,
         d_e=4,
+        selection_rmse_margin_m=float("inf"),
     )
-    val_series = [h["val_fit"] for h in result.history]
-    assert result.best_epoch == int(min(range(len(val_series)), key=lambda i: val_series[i]))
-    assert result.best_val_fit == pytest.approx(min(val_series))
+    score_series = [h["selection_score_mixture_fair_crps_physical"] for h in result.history]
+    expected = int(min(range(len(score_series)), key=lambda i: score_series[i]))
+    assert result.best_epoch == expected
+    assert result.best_val_fit == pytest.approx(min(score_series))
 
 
-def test_retention_gate_blocks_lower_val_fit_when_prior_retention_is_too_low(monkeypatch):
+def test_retention_floor_is_warning_only_and_does_not_override_skill_selection(monkeypatch):
     module = _module()
     opt = build_neon_stage2_optimizer(module, learning_rate=1e-2)
     calls = {"n": 0}
@@ -506,9 +508,10 @@ def test_retention_gate_blocks_lower_val_fit_when_prior_retention_is_too_low(mon
         selection_min_retention=0.3,
     )
 
-    assert result.best_epoch == 0
-    assert result.best_val_fit == pytest.approx(10.0)
-    assert result.history[1]["selection_eligible"] == 0.0
+    assert result.best_epoch == 1
+    assert result.best_val_fit == pytest.approx(1.0)
+    assert result.history[1]["selection_eligible"] == 1.0
+    assert result.history[1]["retention_warning"] == 1.0
 
 
 def test_retention_gate_disabled_recovers_lowest_val_fit(monkeypatch):
@@ -538,6 +541,109 @@ def test_retention_gate_disabled_recovers_lowest_val_fit(monkeypatch):
 
     assert result.best_epoch == 1
     assert result.best_val_fit == pytest.approx(1.0)
+
+
+def test_rmse_noninferiority_margin_blocks_lower_mixture_crps(monkeypatch):
+    module = _module()
+    opt = build_neon_stage2_optimizer(module, learning_rate=1e-2)
+    calls = {"n": 0}
+
+    def fake_eval(**kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return 5.0, {
+                "mixture_fair_crps_physical": 0.03,
+                "stage2_minus_base_rmse_physical": 0.0005,
+            }
+        return 1.0, {
+            "mixture_fair_crps_physical": 0.01,
+            "stage2_minus_base_rmse_physical": 0.002,
+        }
+
+    monkeypatch.setattr(train_neon, "_evaluate_neon_validation", fake_eval)
+    result = train_neon_stage2_epochs(
+        module=module,
+        optimizer=opt,
+        train_families=[_family("a", 0.0)],
+        val_families=[_family("v", 0.2)],
+        feature_collector=_make_feature_collector(),
+        n_epochs=2,
+        m_train=2,
+        k_train=4,
+        d_e=4,
+        selection_rmse_margin_m=0.001,
+    )
+
+    assert result.best_epoch == 0
+    assert result.best_val_fit == pytest.approx(0.03)
+    assert result.history[1]["selection_eligible"] == 0.0
+
+
+def test_legacy_ladder_selector_uses_per_epistemic_fit_without_rmse_gate(monkeypatch):
+    module = _module()
+    opt = build_neon_stage2_optimizer(module, learning_rate=1e-2)
+    calls = {"n": 0}
+
+    def fake_eval(**kwargs):
+        calls["n"] += 1
+        return (
+            (2.0, {"mixture_fair_crps_physical": 0.01, "stage2_minus_base_rmse_physical": 1.0})
+            if calls["n"] == 1
+            else (1.0, {"mixture_fair_crps_physical": 0.50, "stage2_minus_base_rmse_physical": 1.0})
+        )
+
+    monkeypatch.setattr(train_neon, "_evaluate_neon_validation", fake_eval)
+    result = train_neon_stage2_epochs(
+        module=module,
+        optimizer=opt,
+        train_families=[_family("a", 0.0)],
+        val_families=[_family("v", 0.2)],
+        feature_collector=_make_feature_collector(),
+        n_epochs=2,
+        m_train=2,
+        k_train=4,
+        d_e=4,
+        selection_metric="per_epistemic_fit",
+        selection_enforce_rmse=False,
+    )
+
+    assert result.best_epoch == 1
+    assert result.best_val_fit == pytest.approx(1.0)
+
+
+def test_validation_selection_metrics_are_inverse_transformed_to_physical_space():
+    class AffineNormalizer:
+        def to(self, device):
+            return self
+
+        def inverse_transform(self, value):
+            return 10.0 + 2.0 * value
+
+    module = _module()
+    kwargs = dict(
+        module=module,
+        families=[_family("v", 0.2)],
+        feature_collector=_make_feature_collector(),
+        m=2,
+        k=4,
+        d_e=4,
+    )
+    _, normalized = train_neon._evaluate_neon_validation(
+        **kwargs, generator=torch.Generator().manual_seed(7)
+    )
+    _, physical = train_neon._evaluate_neon_validation(
+        **kwargs,
+        generator=torch.Generator().manual_seed(7),
+        target_normalizer=AffineNormalizer(),
+        reference_normalizer=AffineNormalizer(),
+    )
+
+    assert physical["mixture_fair_crps_physical"] == pytest.approx(
+        2.0 * normalized["mixture_fair_crps_physical"], rel=1e-5
+    )
+    assert physical["base_rmse_physical"] == pytest.approx(
+        2.0 * normalized["base_rmse_physical"], rel=1e-5
+    )
 
 
 def test_validation_runs_without_grad_and_leaves_module_in_train_mode_between_epochs():

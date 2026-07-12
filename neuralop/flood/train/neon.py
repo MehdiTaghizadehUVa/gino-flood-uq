@@ -15,7 +15,9 @@ import torch
 from torch import nn
 
 from neuralop.flood.neon import (
+    base_rmse_from_reference,
     NEONEpistemicCorrection,
+    PersistentDirichletParticleControl,
     NEONStage2LossOutput,
     NEONStage2LossWeights,
     cancellation_diagnostics,
@@ -24,6 +26,7 @@ from neuralop.flood.neon import (
     epistemic_bootstrap_weights,
     epistemic_member_bootstrap_weights,
     freeze_stage1_model,
+    fair_crps_members,
     per_epistemic_fair_crps,
     prior_psi_floor_diagnostic,
     sample_epistemic_indices,
@@ -39,6 +42,8 @@ class FrozenFGNOFeatureBatch:
     base_prediction: torch.Tensor
     features: torch.Tensor
     aleatory_latents: torch.Tensor
+    canonical_mean_features: torch.Tensor | None = None
+    canonical_latent_hash: str | None = None
 
 
 def _json_safe(value: Any) -> Any:
@@ -549,6 +554,8 @@ def _build_frozen_gino_step_fn(
     boundary_sequence: torch.Tensor,
     n_history: int,
     feature_source: str,
+    structural_dry_mask: torch.Tensor | None = None,
+    target_normalizer=None,
 ) -> ARStepFn:
     """Build the per-step closure that runs one frozen GINO forward.
 
@@ -596,6 +603,16 @@ def _build_frozen_gino_step_fn(
         n_cells = int(pred.shape[0])
         if feat.shape[0] != n_cells and feat.shape[-1] == n_cells:
             feat = feat.transpose(0, 1).contiguous()
+        if structural_dry_mask is not None:
+            from neuralop.flood.data.structural_dry import (
+                clamp_structural_dry_normalized_values,
+            )
+
+            pred = clamp_structural_dry_normalized_values(
+                pred,
+                structural_dry_mask=structural_dry_mask.to(pred.device),
+                normalizer=target_normalizer,
+            )
         return pred, feat
 
     return step_fn
@@ -613,6 +630,8 @@ def collect_frozen_fgno_rollout_features(
     rollout_length: int,
     n_history: int = 3,
     feature_source: str = "decoder_pre_projection",
+    structural_dry_mask: torch.Tensor | None = None,
+    target_normalizer=None,
 ) -> "FrozenFGNOFeatureBatch":
     """Autoregressively roll out a frozen FGNO, collecting base predictions + features.
 
@@ -631,6 +650,8 @@ def collect_frozen_fgno_rollout_features(
         boundary_sequence=boundary_sequence,
         n_history=int(n_history),
         feature_source=feature_source,
+        structural_dry_mask=structural_dry_mask,
+        target_normalizer=target_normalizer,
     )
     with torch.no_grad():
         rollout = autoregressive_feature_rollout(
@@ -666,6 +687,7 @@ def neon_stage2_training_step(
     epistemic_chunk_size: int | None = None,
     sample_weights: torch.Tensor | None = None,
     member_weights: torch.Tensor | None = None,
+    canonical_mean_features: torch.Tensor | None = None,
     zero_grad: bool = True,
     optimizer_step: bool = True,
     loss_scale: float = 1.0,
@@ -686,7 +708,13 @@ def neon_stage2_training_step(
     chunk = int(epistemic_chunk_size) if epistemic_chunk_size else total_m
     chunk = max(1, min(chunk, total_m))
     if chunk >= total_m:
-        out = module(base_prediction, features, z_e, node_coords=node_coords)
+        out = module(
+            base_prediction,
+            features,
+            z_e,
+            node_coords=node_coords,
+            canonical_mean_features=canonical_mean_features,
+        )
         losses = compute_stage2_loss(
             prediction=out.prediction,
             reference=reference,
@@ -742,7 +770,13 @@ def neon_stage2_training_step(
             if member_weights is not None:
                 member_weight_chunk = member_weights[:, start : start + chunk, :]
             scale = float(z_chunk.shape[0]) / float(total_m)
-            out = module(base_prediction, features, z_chunk, node_coords=node_coords)
+            out = module(
+                base_prediction,
+                features,
+                z_chunk,
+                node_coords=node_coords,
+                canonical_mean_features=canonical_mean_features,
+            )
             losses_c = compute_stage2_loss(
                 prediction=out.prediction,
                 reference=reference,
@@ -799,7 +833,10 @@ def neon_stage2_training_step(
             diagnostics=diag_agg,
         )
     if optimizer_step and grad_clip_norm is not None:
-        torch.nn.utils.clip_grad_norm_(module.trainable_branch.parameters(), float(grad_clip_norm))
+        torch.nn.utils.clip_grad_norm_(
+            [parameter for parameter in module.parameters() if parameter.requires_grad],
+            float(grad_clip_norm),
+        )
     if optimizer_step:
         optimizer.step()
     return losses
@@ -812,12 +849,19 @@ def neon_stage2_eval_forward(
     features: torch.Tensor,
     z_e: torch.Tensor,
     node_coords: torch.Tensor | None = None,
+    canonical_mean_features: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Inference helper returning nested corrected predictions only."""
 
     module.eval()
     with torch.no_grad():
-        return module(base_prediction, features, z_e, node_coords=node_coords).prediction
+        return module(
+            base_prediction,
+            features,
+            z_e,
+            node_coords=node_coords,
+            canonical_mean_features=canonical_mean_features,
+        ).prediction
 
 
 def build_neon_stage2_optimizer(
@@ -861,6 +905,7 @@ class NEONFamilySample:
     query_points: Optional[torch.Tensor] = None
     boundary_sequence: Optional[torch.Tensor] = None
     initial_histories: Optional[torch.Tensor] = None
+    structural_dry_mask: Optional[torch.Tensor] = None
 
 
 @dataclass
@@ -978,10 +1023,26 @@ def _collate_frozen_batches(batches: Sequence[FrozenFGNOFeatureBatch]) -> Frozen
         aleatory_latents = torch.stack(latents, dim=1)  # [K, B, d_a]
     else:
         aleatory_latents = latents[0]
+    canonical = [batch.canonical_mean_features for batch in batches]
+    if all(value is None for value in canonical):
+        canonical_mean_features = None
+    elif any(value is None for value in canonical):
+        raise ValueError("canonical mean features must be present for every collated family or none")
+    else:
+        canonical_mean_features = torch.cat([value for value in canonical if value is not None], dim=0)
+    canonical_hashes = [batch.canonical_latent_hash for batch in batches]
+    if all(value is None for value in canonical_hashes):
+        canonical_latent_hash = None
+    elif any(value is None for value in canonical_hashes):
+        raise ValueError("canonical latent hashes must be present for every collated family or none")
+    else:
+        canonical_latent_hash = "|".join(str(value) for value in canonical_hashes)
     return FrozenFGNOFeatureBatch(
         base_prediction=base_prediction,
         features=features,
         aleatory_latents=aleatory_latents,
+        canonical_mean_features=canonical_mean_features,
+        canonical_latent_hash=canonical_latent_hash,
     )
 
 
@@ -1092,6 +1153,11 @@ def _evaluate_neon_validation(
     generator: Optional[torch.Generator],
     objective: str = "per_epistemic_fcrps",
     epistemic_chunk_size: int | None = None,
+    physical_scale: float = 1.0,
+    paired_rmse_rows: list[dict[str, float | str]] | None = None,
+    fixed_epistemic_support: torch.Tensor | None = None,
+    target_normalizer=None,
+    reference_normalizer=None,
 ) -> tuple[float, dict[str, float]]:
     """Mean validation fit score and diagnostics (no gradients).
 
@@ -1111,11 +1177,17 @@ def _evaluate_neon_validation(
                 generator=generator,
                 latent_bank_id=0,
             )
-            z_e = sample_epistemic_indices(
-                int(m), int(d_e),
-                device=batch.features.device,
-                dtype=batch.features.dtype,
-                generator=generator,
+            z_e = (
+                fixed_epistemic_support.to(
+                    device=batch.features.device, dtype=batch.features.dtype
+                )
+                if fixed_epistemic_support is not None
+                else sample_epistemic_indices(
+                    int(m), int(d_e),
+                    device=batch.features.device,
+                    dtype=batch.features.dtype,
+                    generator=generator,
+                )
             )
             ref = _reference_with_batch_dim(family.reference)
             total_m = int(z_e.shape[0])
@@ -1125,6 +1197,7 @@ def _evaluate_neon_validation(
             diag_val: dict[str, float] = {}
             mbar_train_chunks: list[torch.Tensor] = []
             mbar_prior_chunks: list[torch.Tensor] = []
+            prediction_chunks: list[torch.Tensor] = []
             for start in range(0, total_m, chunk):
                 z_chunk = z_e[start : start + chunk]
                 scale = float(z_chunk.shape[0]) / float(total_m)
@@ -1133,6 +1206,7 @@ def _evaluate_neon_validation(
                     batch.features,
                     z_chunk,
                     node_coords=family.geometry,
+                    canonical_mean_features=batch.canonical_mean_features,
                 )
                 fit = stage2_fit_score(
                     out.prediction,
@@ -1141,6 +1215,7 @@ def _evaluate_neon_validation(
                     objective=objective,
                 )
                 fit_val += float(fit.item()) * scale
+                prediction_chunks.append(out.prediction)
                 diag_c = cancellation_diagnostics(
                     trainable_correction=out.trainable_correction,
                     prior_correction=out.prior_correction,
@@ -1154,6 +1229,66 @@ def _evaluate_neon_validation(
                 mbar_train_chunks.append(out.trainable_correction.detach().float().mean(dim=2))
             _mbar_prior = torch.cat(mbar_prior_chunks, dim=1)
             _mbar_total = torch.cat(mbar_train_chunks, dim=1) + _mbar_prior
+            nested_prediction = torch.cat(prediction_chunks, dim=1)
+            flat_prediction = nested_prediction.reshape(
+                nested_prediction.shape[0],
+                nested_prediction.shape[1] * nested_prediction.shape[2],
+                *nested_prediction.shape[3:],
+            )
+            reference_on_device = ref.to(
+                device=flat_prediction.device, dtype=flat_prediction.dtype
+            )
+            if (target_normalizer is None) != (reference_normalizer is None):
+                raise ValueError(
+                    "physical validation requires both target and reference normalizers."
+                )
+            if target_normalizer is not None:
+                target_normalizer.to(flat_prediction.device)
+                reference_normalizer.to(flat_prediction.device)
+                flat_metric = target_normalizer.inverse_transform(flat_prediction)
+                base_metric = target_normalizer.inverse_transform(batch.base_prediction)
+                reference_metric = reference_normalizer.inverse_transform(reference_on_device)
+                metric_scale = 1.0
+            else:
+                flat_metric = flat_prediction
+                base_metric = batch.base_prediction
+                reference_metric = reference_on_device
+                metric_scale = float(physical_scale)
+            mixture_crps = fair_crps_members(
+                flat_metric,
+                reference_metric,
+                weights=family.weights,
+                reduction="mean",
+            )
+            base_rmse = base_rmse_from_reference(
+                base_metric,
+                reference_metric,
+                weights=family.weights,
+            )
+            stage2_rmse = base_rmse_from_reference(
+                flat_metric,
+                reference_metric,
+                weights=family.weights,
+            )
+            diag_val["mixture_fair_crps_physical"] = float(mixture_crps.item()) * metric_scale
+            diag_val["base_rmse_physical"] = float(base_rmse) * metric_scale
+            diag_val["stage2_rmse_physical"] = float(stage2_rmse) * metric_scale
+            diag_val["stage2_minus_base_rmse_physical"] = (
+                float(stage2_rmse) - float(base_rmse)
+            ) * metric_scale
+            if paired_rmse_rows is not None:
+                paired_rmse_rows.append(
+                    {
+                        "family_id": str(family.family_id),
+                        "base_rmse_physical": float(base_rmse) * metric_scale,
+                        "stage2_rmse_physical": float(stage2_rmse)
+                        * metric_scale,
+                        "stage2_minus_base_rmse_physical": (
+                            float(stage2_rmse) - float(base_rmse)
+                        )
+                        * metric_scale,
+                    }
+                )
             diag_val.update(
                 epistemic_variance_diagnostics(
                     mbar_total=_mbar_total,
@@ -1258,6 +1393,13 @@ def train_neon_stage2_epochs(
     latent_bank_count: int = 1,
     reference_member_subsample: Optional[int] = None,
     selection_min_retention: float = 0.0,
+    selection_rmse_margin_m: float = 0.001,
+    selection_metric: str = "mixture_crps",
+    selection_enforce_rmse: bool = True,
+    validation_physical_scale: float = 1.0,
+    dirichlet_particle_control: PersistentDirichletParticleControl | None = None,
+    validation_target_normalizer=None,
+    validation_reference_normalizer=None,
     progress_reporter: Optional[NEONTrainingProgressReporter] = None,
     latest_checkpoint_path: Optional[Any] = None,
     start_epoch: int = 0,
@@ -1294,6 +1436,7 @@ def train_neon_stage2_epochs(
     best_val = float(initial_best_val_fit)
     best_epoch = int(initial_best_epoch)
     n_ineligible_epochs = 0
+    particle_training_step = 0
     first_epoch = max(0, int(start_epoch))
     total_epochs = int(n_epochs)
     if first_epoch > total_epochs:
@@ -1367,24 +1510,43 @@ def train_neon_stage2_epochs(
                     )
                 batch = _collate_frozen_batches(micro_batches)
                 if group_z_e is None:
-                    group_z_e = sample_epistemic_indices(
-                        int(m_train), int(d_e),
-                        device=batch.features.device,
-                        dtype=batch.features.dtype,
-                        generator=generator,
-                    )
-                    boot = dict(bootstrap_config or {})
-                    if bool(boot.get("enabled", False)) and objective == "per_epistemic_fcrps":
-                        group_bootstrap_weights = epistemic_bootstrap_weights(
-                            all_family_ids,
-                            group_z_e,
-                            seed=int(boot.get("seed", 0)),
-                            distribution=str(boot.get("distribution", "tempered_exponential")),
-                            temperature=float(boot.get("temperature", 0.5)),
-                            normalize=str(boot.get("normalize", "per_epistemic_batch")),
-                            min_weight=float(boot.get("min_weight", 0.05)),
-                            max_weight=float(boot.get("max_weight", 5.0)),
+                    if dirichlet_particle_control is not None:
+                        particle_indices = dirichlet_particle_control.training_indices(
+                            particle_training_step, int(m_train)
                         )
+                        particle_training_step += 1
+                        group_z_e = dirichlet_particle_control.indices_to_epistemic(
+                            particle_indices,
+                            device=batch.features.device,
+                            dtype=batch.features.dtype,
+                        )
+                        group_bootstrap_weights = (
+                            dirichlet_particle_control.family_particle_weights(
+                                all_family_ids,
+                                particle_indices,
+                                device=batch.features.device,
+                                dtype=batch.features.dtype,
+                            )
+                        )
+                    else:
+                        group_z_e = sample_epistemic_indices(
+                            int(m_train), int(d_e),
+                            device=batch.features.device,
+                            dtype=batch.features.dtype,
+                            generator=generator,
+                        )
+                        boot = dict(bootstrap_config or {})
+                        if bool(boot.get("enabled", False)) and objective == "per_epistemic_fcrps":
+                            group_bootstrap_weights = epistemic_bootstrap_weights(
+                                all_family_ids,
+                                group_z_e,
+                                seed=int(boot.get("seed", 0)),
+                                distribution=str(boot.get("distribution", "tempered_exponential")),
+                                temperature=float(boot.get("temperature", 0.5)),
+                                normalize=str(boot.get("normalize", "per_epistemic_batch")),
+                                min_weight=float(boot.get("min_weight", 0.05)),
+                                max_weight=float(boot.get("max_weight", 5.0)),
+                            )
                     if epistemic_resample == "epoch":
                         epoch_z_e = group_z_e
                         epoch_bootstrap_weights = group_bootstrap_weights
@@ -1430,6 +1592,7 @@ def train_neon_stage2_epochs(
                     epistemic_chunk_size=epistemic_chunk_size,
                     sample_weights=sample_weights,
                     member_weights=member_weights,
+                    canonical_mean_features=batch.canonical_mean_features,
                     zero_grad=False,
                     optimizer_step=False,
                     loss_scale=float(len(micro_indices)) / float(len(effective_indices)),
@@ -1443,7 +1606,7 @@ def train_neon_stage2_epochs(
                 n_train_families += len(micro_indices)
             if grad_clip_norm is not None:
                 torch.nn.utils.clip_grad_norm_(
-                    module.trainable_branch.parameters(),
+                    [parameter for parameter in module.parameters() if parameter.requires_grad],
                     float(grad_clip_norm),
                 )
             optimizer.step()
@@ -1476,6 +1639,7 @@ def train_neon_stage2_epochs(
         if val_seed is not None:
             val_generator = torch.Generator()
             val_generator.manual_seed(int(val_seed))
+        paired_rmse_rows: list[dict[str, float | str]] = []
         val_fit, val_diag = _evaluate_neon_validation(
             module=module,
             families=val_families,
@@ -1486,7 +1650,22 @@ def train_neon_stage2_epochs(
             generator=val_generator,
             objective=objective,
             epistemic_chunk_size=epistemic_chunk_size,
+            physical_scale=float(validation_physical_scale),
+            paired_rmse_rows=paired_rmse_rows,
+            fixed_epistemic_support=(
+                None
+                if dirichlet_particle_control is None
+                else dirichlet_particle_control.eval_epistemic_indices()
+            ),
+            target_normalizer=validation_target_normalizer,
+            reference_normalizer=validation_reference_normalizer,
         )
+        if progress_reporter is not None:
+            _atomic_write_json(
+                Path(progress_reporter.output_dir)
+                / f"validation_rmse_pairs_epoch_{epoch + 1:04d}.json",
+                {"epoch": int(epoch), "pairs": paired_rmse_rows},
+            )
         row = {
             "epoch": int(epoch),
             "train_fit": fit_sum / max(n_train_families, 1),
@@ -1510,19 +1689,38 @@ def train_neon_stage2_epochs(
 
         retention = float(row.get("val_prior_retention_ratio", 1.0))
         retention_floor = float(selection_min_retention)
-        eligible = retention_floor <= 0.0 or retention >= retention_floor
+        retention_warning = retention_floor > 0.0 and retention < retention_floor
+        if retention_warning:
+            row["retention_warning"] = 1.0
+            n_ineligible_epochs += 1
+        rmse_delta = float(row.get("val_stage2_minus_base_rmse_physical", 0.0))
+        rmse_margin = float(selection_rmse_margin_m)
+        eligible = (not bool(selection_enforce_rmse)) or rmse_delta <= rmse_margin
         row["selection_eligible"] = 1.0 if eligible else 0.0
         row["selection_min_retention"] = retention_floor
-        if not eligible:
-            n_ineligible_epochs += 1
-        improved = bool(eligible and val_fit < best_val)
+        row["selection_rmse_margin_m"] = rmse_margin
+        metric_name = str(selection_metric).strip().lower()
+        if metric_name == "mixture_crps":
+            selection_score = float(row.get("val_mixture_fair_crps_physical", val_fit))
+        elif metric_name == "per_epistemic_fit":
+            selection_score = float(val_fit)
+        else:
+            raise ValueError(f"unsupported selection_metric {selection_metric!r}.")
+        row["selection_metric"] = metric_name
+        row["selection_enforce_rmse"] = 1.0 if selection_enforce_rmse else 0.0
+        row["selection_score_mixture_fair_crps_physical"] = selection_score
+        improved = bool(eligible and selection_score < best_val)
         if improved:
-            best_val = float(val_fit)
+            best_val = selection_score
             best_epoch = int(epoch)
             if checkpoint_path is not None:
                 save_metadata = dict(checkpoint_metadata or {})
                 save_metadata["best_epoch"] = int(epoch)
-                save_metadata["val_metrics"] = {"val_fit": float(val_fit)}
+                save_metadata["val_metrics"] = {
+                    "val_fit": float(val_fit),
+                    "mixture_fair_crps_physical": selection_score,
+                    "stage2_minus_base_rmse_physical": rmse_delta,
+                }
                 save_metadata["selection_min_retention"] = retention_floor
                 save_metadata["selection_eligible"] = bool(eligible)
                 save_neon_stage2_checkpoint(checkpoint_path, module, metadata=save_metadata)
@@ -1560,9 +1758,9 @@ def train_neon_stage2_epochs(
             )
 
     if checkpoint_path is not None and best_epoch < 0 and history:
-        # If the retention gate rejects every epoch, still leave an auditable
-        # checkpoint rather than making the run unusable. This is a loud
-        # fallback: metadata and history show that no epoch satisfied the gate.
+        # If every epoch violates RMSE non-inferiority, retain the last state as
+        # an explicitly ineligible diagnostic checkpoint rather than silently
+        # presenting it as the selected model.
         fallback_row = history[-1]
         best_epoch = int(fallback_row.get("epoch", total_epochs - 1))
         best_val = float(fallback_row.get("val_fit", math.inf))
@@ -1616,4 +1814,14 @@ def build_epinet_from_config(
         prior_rff_dim=int(getattr(config, "prior_rff_dim", 0)),
         prior_rff_lengthscale=float(getattr(config, "prior_rff_lengthscale", 0.25)),
         prior_rff_include_lead=bool(getattr(config, "prior_rff_include_lead", True)),
+        epistemic_basis=str(getattr(config, "epistemic_basis", "identity")),
+        epistemic_linear_terms=bool(getattr(config, "epistemic_linear_terms", True)),
+        epistemic_quadratic_terms=int(
+            getattr(config, "epistemic_quadratic_terms", 16)
+        ),
+        epistemic_basis_seed=int(getattr(config, "epistemic_basis_seed", 123)),
+        deterministic_head=bool(getattr(config, "deterministic_head", False)),
+        deterministic_head_feature=str(
+            getattr(config, "deterministic_head_feature", "canonical_aleatory_mean")
+        ),
     )

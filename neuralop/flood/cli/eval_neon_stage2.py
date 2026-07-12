@@ -144,6 +144,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         write_variance_maps,
     )
     from neuralop.flood.neon import (
+        PersistentDirichletParticleControl,
         load_neon_stage2_checkpoint,
         sample_epistemic_indices,
     )
@@ -177,8 +178,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "physical-space scoring cannot be disabled."
         )
 
+    stage1 = _load_frozen_stage1(args.stage1_bundle)
+    bundle = _load_frozen_stage1.last_bundle  # type: ignore[attr-defined]
+    prepared = _load_frozen_stage1.last_prepared  # type: ignore[attr-defined]
+    dry_mask = prepared.get("structural_dry_mask")
     train_fam, val_fam = build_families_from_config(
         flood_config, normalizers, target_variables, log,
+        structural_dry_artifact=(None if dry_mask is None else {"dry_mask": dry_mask}),
         rollout_length=args.rollout_length,
         val_fraction=float(args.val_fraction),
         dataset_split="test",
@@ -206,15 +212,22 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     module, ckpt_meta = load_neon_stage2_checkpoint(args.stage2_checkpoint, map_location="cpu")
     device = "cuda:0" if torch.cuda.is_available() else "cpu"
     module = module.to(device).eval()
-    stage1 = _load_frozen_stage1(args.stage1_bundle)
-    bundle = _load_frozen_stage1.last_bundle  # type: ignore[attr-defined]
-    prepared = _load_frozen_stage1.last_prepared  # type: ignore[attr-defined]
     collector = make_feature_collector_from_frozen_model(
         stage1,
         feature_source=ckpt_meta.get("feature_source", "decoder_pre_projection"),
         n_history=int(bundle.n_history),
         latent_dim=int(bundle.fgn_noise_dim),
         generator=torch.Generator().manual_seed(int(args.seed)),
+        canonical_k=(
+            int(ckpt_meta.get("deterministic_head_canonical_k", 32))
+            if getattr(module, "deterministic_head_enabled", False)
+            else 0
+        ),
+        canonical_seed=int(ckpt_meta.get("deterministic_head_latent_seed", 123)),
+        canonical_zero_latent=(
+            str(ckpt_meta.get("deterministic_head_feature", "")) == "fixed_zero_latent"
+        ),
+        target_normalizer=target_normalizer,
     )
     if args.cache_dir:
         # Sharing the cache across checkpoint evaluations also fixes the K_eval
@@ -228,13 +241,30 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     spread_corrs: list[float] = []
     impact_rows: list[dict[str, float]] = []
     z_gen = torch.Generator().manual_seed(int(args.seed) + 1)
+    particle_metadata = ckpt_meta.get("dirichlet_particle_control")
+    particle_control = (
+        None
+        if particle_metadata is None
+        else PersistentDirichletParticleControl.from_metadata(particle_metadata)
+    )
+    if particle_control is not None and int(args.m_eval) != particle_control.num_particles:
+        raise ValueError(
+            "Dirichlet-particle evaluation must use the complete persisted support: "
+            f"m_eval={args.m_eval}, persisted={particle_control.num_particles}."
+        )
 
     for f_idx, fam in enumerate(families):
         batch = collector(fam, num_aleatory=int(args.k_eval))
         log.info("  [mem] features collected rss=%.1fG", _rss_gb())
-        z_e = sample_epistemic_indices(
-            int(args.m_eval), module.epistemic_dim,
-            device=batch.features.device, dtype=batch.features.dtype, generator=z_gen,
+        z_e = (
+            particle_control.eval_epistemic_indices(
+                device=batch.features.device, dtype=batch.features.dtype
+            )
+            if particle_control is not None
+            else sample_epistemic_indices(
+                int(args.m_eval), module.epistemic_dim,
+                device=batch.features.device, dtype=batch.features.dtype, generator=z_gen,
+            )
         )
         # Chunk both nested axes (epistemic M outer, aleatory K inner) so the
         # eval forward fits on a 40GB card at K_eval=50 and full horizon;
@@ -251,6 +281,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     features=batch.features[:, ks : ks + k_chunk],
                     z_e=z_e[m : m + 1],
                     node_coords=fam.geometry,
+                    canonical_mean_features=batch.canonical_mean_features,
                 )
                 k_parts.append(pred_mk.detach().to("cpu", torch.float32))
             chunks.append(torch.cat(k_parts, dim=2))

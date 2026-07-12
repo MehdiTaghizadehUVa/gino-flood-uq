@@ -2,7 +2,7 @@
 
 All grouped-hydrograph families, full forecast horizon (T=94), config-default
 scale (M_train=4, K_train=8, d_e=16), 30 epochs, prior-scale auto-calibration,
-uniform (unweighted) loss. Frozen-FGNO features are cached as fp16 tensors in
+wettable-area loss and the Stage-1 structural-dry policy. Frozen-FGNO features are cached as fp16 tensors in
 an on-disk cache under OUT_DIR, so full 500-family runs do not materialize the
 entire feature bank in process memory.
 
@@ -47,7 +47,6 @@ LATEST_STATE = Path(os.environ.get("NEON_STAGE2_LATEST_STATE", str(OUT_DIR / "ne
 
 def main() -> int:
     from neuralop.flood.cli.train_neon_stage2 import _load_frozen_stage1
-    from neuralop.flood.eval.datasets import _load_or_fit_normalizers
     from neuralop.flood.neon_config import NEONStage2Config
     from neuralop.flood.train.neon_families import build_families_from_config
     from neuralop.flood.train.neon_runner import run_neon_stage2_training
@@ -70,17 +69,21 @@ def main() -> int:
     target_variables = parse_target_variables(
         getattr(flood_config.data, "target_variables", ["wd"])
     )
-    normalizers, normalizer_path = _load_or_fit_normalizers(flood_config, None, None, LOG)
-    LOG.info("normalizers from %s", normalizer_path)
+    stage1 = _load_frozen_stage1(BUNDLE)
+    bundle = _load_frozen_stage1.last_bundle  # type: ignore[attr-defined]
+    prepared = _load_frozen_stage1.last_prepared  # type: ignore[attr-defined]
+    normalizers = prepared["normalizers"]
+    dry_mask = prepared.get("structural_dry_mask")
+    LOG.info("normalizers from frozen bundle %s", bundle.normalizer_path)
 
-    # --- All grouped training families, full horizon, uniform weights (no dry artifact) ---
+    # --- All grouped training families, full horizon, frozen dry-domain policy ---
     t0 = time.time()
     train_fam, val_fam = build_families_from_config(
         flood_config,
         normalizers,
         target_variables,
         LOG,
-        structural_dry_artifact=None,   # uniform (unweighted) loss
+        structural_dry_artifact=(None if dry_mask is None else {"dry_mask": dry_mask}),
         rollout_length=None,            # full available horizon (T=94)
         max_families=None,              # all hydrographs
         val_fraction=0.1,
@@ -93,8 +96,6 @@ def main() -> int:
     )
 
     # --- Frozen FGN ---
-    stage1 = _load_frozen_stage1(BUNDLE)
-    bundle = _load_frozen_stage1.last_bundle  # type: ignore[attr-defined]
     latent_dim = int(bundle.fgn_noise_dim)
     n_history = int(bundle.n_history)
     LOG.info("frozen FGN: fgn_noise_dim=%d n_history=%d", latent_dim, n_history)
@@ -127,12 +128,16 @@ def main() -> int:
 
     gen = torch.Generator().manual_seed(0)
     t1 = time.time()
+    def load_prepared_stage1(_checkpoint):
+        return stage1
+
+    load_prepared_stage1.last_prepared = prepared
     result = run_neon_stage2_training(
         config=config,
         stage1_checkpoint=BUNDLE,
         output_dir=OUT_DIR,
         data_root=EVAL_CONFIG,
-        load_stage1_fn=lambda _ckpt: stage1,
+        load_stage1_fn=load_prepared_stage1,
         build_families_fn=lambda _root, _cfg: (train_fam, val_fam),
         latent_dim=latent_dim,
         n_history=n_history,
@@ -145,6 +150,10 @@ def main() -> int:
         epistemic_chunk_size=1,   # process one z_e at a time so backward fits on a 40GB A100
         latest_checkpoint_path=LATEST_STATE,
         resume_state_path=LATEST_STATE if RESUME_ENABLED else None,
+        structural_dry_policy={
+            "policy": "frozen_stage1_bundle",
+            "feedback_clamp": dry_mask is not None,
+        },
     )
     LOG.info("training done in %.1f min", (time.time() - t1) / 60.0)
 

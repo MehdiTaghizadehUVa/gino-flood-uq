@@ -20,6 +20,7 @@ import torch
 
 from neuralop.flood.neon import (
     NEONStage2LossWeights,
+    PersistentDirichletParticleControl,
     base_rmse_from_reference,
     calibrate_prior_scale,
     freeze_stage1_model,
@@ -62,6 +63,16 @@ def _stable_latent_bank_seed(
     return int.from_bytes(digest[:8], byteorder="little", signed=False) % (2**63 - 1)
 
 
+def _stable_canonical_latent_seed(*, seed: int, canonical_k: int, latent_dim: int) -> int:
+    """Derive one canonical-bank seed shared by every family and evaluation run."""
+
+    payload = f"canonical::{int(seed)}::{int(canonical_k)}::{int(latent_dim)}".encode(
+        "utf-8"
+    )
+    digest = hashlib.sha256(payload).digest()
+    return int.from_bytes(digest[:8], byteorder="little", signed=False) % (2**63 - 1)
+
+
 def _generator_initial_seed(generator: Optional[torch.Generator]) -> int:
     if generator is None:
         return 0
@@ -70,6 +81,28 @@ def _generator_initial_seed(generator: Optional[torch.Generator]) -> int:
 
 def _tensor_nbytes(tensor: torch.Tensor) -> int:
     return int(tensor.numel()) * int(tensor.element_size())
+
+
+def _normalizer_physical_scale(normalizer: Any) -> float:
+    """Return the affine output scale used to convert normalized WD errors to meters."""
+
+    if normalizer is None:
+        return 1.0
+    std = getattr(normalizer, "std", None)
+    if std is None:
+        return 1.0
+    values = torch.as_tensor(std).detach().reshape(-1)
+    if values.numel() < 1:
+        return 1.0
+    if not torch.allclose(values, values[0].expand_as(values), rtol=1.0e-6, atol=1.0e-8):
+        raise ValueError(
+            "a scalar physical prior-spread target requires a uniform affine target "
+            "normalizer scale; found spatial/channel-varying std values."
+        )
+    scale = float(values[0].item())
+    if not math.isfinite(scale) or scale <= 0.0:
+        raise ValueError(f"target normalizer has invalid physical scale {scale!r}.")
+    return scale
 
 
 def _estimate_cached_feature_bytes(
@@ -85,8 +118,13 @@ def _estimate_cached_feature_bytes(
     base_bytes = int(probe.base_prediction.numel()) * bytes_per_value
     feature_bytes = int(probe.features.numel()) * bytes_per_value
     latent_bytes = _tensor_nbytes(probe.aleatory_latents)
+    canonical_bytes = (
+        0
+        if probe.canonical_mean_features is None
+        else int(probe.canonical_mean_features.numel()) * bytes_per_value
+    )
     return (
-        base_bytes + feature_bytes + latent_bytes
+        base_bytes + feature_bytes + latent_bytes + canonical_bytes
     ) * int(n_families) * int(latent_bank_count)
 
 
@@ -97,6 +135,11 @@ def make_feature_collector_from_frozen_model(
     n_history: int,
     latent_dim: int,
     generator: Optional[torch.Generator] = None,
+    canonical_k: int = 0,
+    canonical_seed: int = 123,
+    canonical_zero_latent: bool = False,
+    canonical_cache_dir: Optional[Any] = None,
+    target_normalizer=None,
 ):
     """Return a ``feature_collector`` that AR-rolls the frozen FGNO per family.
 
@@ -107,6 +150,13 @@ def make_feature_collector_from_frozen_model(
     ``initial_histories`` (broadcast to K if a single shared history is given),
     and rolls out to the family's reference horizon ``T``.
     """
+
+    canonical_memory_cache: dict[str, tuple[torch.Tensor, str]] = {}
+    canonical_disk_dir = (
+        None if canonical_cache_dir is None else Path(canonical_cache_dir)
+    )
+    if canonical_disk_dir is not None:
+        canonical_disk_dir.mkdir(parents=True, exist_ok=True)
 
     def collector(
         family: NEONFamilySample,
@@ -142,18 +192,89 @@ def make_feature_collector_from_frozen_model(
         init = family.initial_histories.to(model_device)
         if init.ndim == 3:  # [n_history, Nv, C] -> broadcast to K members
             init = init.unsqueeze(0).expand(int(num_aleatory), -1, -1, -1).contiguous()
-        return collect_frozen_fgno_rollout_features(
-            stage1_model=stage1_model,
-            static=family.static.to(model_device),
-            geometry=family.geometry.to(model_device),
-            query_points=family.query_points.to(model_device),
-            boundary_sequence=family.boundary_sequence.to(model_device),
-            initial_histories=init,
-            aleatory_latents=latents,
-            rollout_length=int(family.reference.shape[1]),  # T from the reference ensemble
-            n_history=int(n_history),
-            feature_source=feature_source,
-        )
+        if target_normalizer is not None:
+            target_normalizer.to(model_device)
+
+        def collect(latent_bank: torch.Tensor, histories: torch.Tensor):
+            return collect_frozen_fgno_rollout_features(
+                stage1_model=stage1_model,
+                static=family.static.to(model_device),
+                geometry=family.geometry.to(model_device),
+                query_points=family.query_points.to(model_device),
+                boundary_sequence=family.boundary_sequence.to(model_device),
+                initial_histories=histories,
+                aleatory_latents=latent_bank,
+                rollout_length=int(family.reference.shape[1]),
+                n_history=int(n_history),
+                feature_source=feature_source,
+                structural_dry_mask=(
+                    None
+                    if family.structural_dry_mask is None
+                    else family.structural_dry_mask.to(model_device)
+                ),
+                target_normalizer=target_normalizer,
+            )
+
+        batch = collect(latents, init)
+        if int(canonical_k) > 0:
+            k0 = int(canonical_k)
+            if canonical_zero_latent:
+                canonical_latents = torch.zeros(1, int(latent_dim))
+                k0 = 1
+            else:
+                canonical_generator = torch.Generator(device="cpu")
+                canonical_generator.manual_seed(
+                    _stable_canonical_latent_seed(
+                        seed=int(canonical_seed),
+                        canonical_k=k0,
+                        latent_dim=int(latent_dim),
+                    )
+                )
+                half = k0 // 2
+                positive = torch.randn(half, int(latent_dim), generator=canonical_generator)
+                canonical_latents = torch.cat([positive, -positive], dim=0)
+                if canonical_latents.shape[0] < k0:
+                    canonical_latents = torch.cat(
+                        [canonical_latents, torch.zeros(1, int(latent_dim))], dim=0
+                    )
+            canonical_latents = canonical_latents[:k0].to(model_device)
+            canonical_bytes = canonical_latents.detach().to("cpu").contiguous().numpy().tobytes()
+            canonical_hash = hashlib.sha256(canonical_bytes).hexdigest()
+            cache_token = hashlib.sha256(str(family.family_id).encode("utf-8")).hexdigest()[:20]
+            canonical_path = (
+                None
+                if canonical_disk_dir is None
+                else canonical_disk_dir / f"{cache_token}_{canonical_hash[:16]}.pt"
+            )
+            cached = canonical_memory_cache.get(str(family.family_id))
+            if cached is None and canonical_path is not None and canonical_path.exists():
+                payload = torch.load(canonical_path, map_location="cpu")
+                if payload.get("latent_hash") != canonical_hash:
+                    raise ValueError("canonical feature-cache latent hash mismatch.")
+                cached = (payload["features"], canonical_hash)
+            if cached is None:
+                canonical_init = family.initial_histories.to(model_device)
+                if canonical_init.ndim == 3:
+                    canonical_init = canonical_init.unsqueeze(0).expand(
+                        k0, -1, -1, -1
+                    ).contiguous()
+                canonical_batch = collect(canonical_latents, canonical_init)
+                canonical_features = canonical_batch.features.mean(dim=1)
+                cached_cpu = canonical_features.detach().to(device="cpu", dtype=torch.float16)
+                cached = (cached_cpu, canonical_hash)
+                if canonical_path is None:
+                    canonical_memory_cache[str(family.family_id)] = cached
+                else:
+                    tmp = canonical_path.with_suffix(f".tmp{os.getpid()}.pt")
+                    torch.save(
+                        {"features": cached_cpu, "latent_hash": canonical_hash}, tmp
+                    )
+                    os.replace(tmp, canonical_path)
+            batch.canonical_mean_features = cached[0].to(
+                device=batch.features.device, dtype=batch.features.dtype
+            )
+            batch.canonical_latent_hash = canonical_hash
+        return batch
 
     return collector
 
@@ -194,6 +315,14 @@ def make_cached_feature_collector(
             "base": batch.base_prediction.detach().to(device=cache_device, dtype=cache_dtype),
             "features": batch.features.detach().to(device=cache_device, dtype=cache_dtype),
             "latents": batch.aleatory_latents.detach().to(device=cache_device),
+            "canonical_mean_features": (
+                None
+                if batch.canonical_mean_features is None
+                else batch.canonical_mean_features.detach().to(
+                    device=cache_device, dtype=cache_dtype
+                )
+            ),
+            "canonical_latent_hash": batch.canonical_latent_hash,
             "device": str(batch.features.device),
             "dtype": batch.features.dtype,
         }
@@ -219,6 +348,12 @@ def make_cached_feature_collector(
                     base_prediction=p["base"].to(device=dev, dtype=dt),
                     features=p["features"].to(device=dev, dtype=dt),
                     aleatory_latents=p["latents"].to(device=dev),
+                    canonical_mean_features=(
+                        None
+                        if p.get("canonical_mean_features") is None
+                        else p["canonical_mean_features"].to(device=dev, dtype=dt)
+                    ),
+                    canonical_latent_hash=p.get("canonical_latent_hash"),
                 )
             batch = base_collector(
                 family,
@@ -243,15 +378,21 @@ def make_cached_feature_collector(
                 p["base"],
                 p["features"],
                 p["latents"],
+                p["canonical_mean_features"],
+                p["canonical_latent_hash"],
                 batch.features.device,
                 batch.features.dtype,
             )
             return batch
-        base_c, feat_c, lat_c, dev, dt = hit
+        base_c, feat_c, lat_c, canonical_c, canonical_hash, dev, dt = hit
         return FrozenFGNOFeatureBatch(
             base_prediction=base_c.to(device=dev, dtype=dt),
             features=feat_c.to(device=dev, dtype=dt),
             aleatory_latents=lat_c.to(device=dev),
+            canonical_mean_features=(
+                None if canonical_c is None else canonical_c.to(device=dev, dtype=dt)
+            ),
+            canonical_latent_hash=canonical_hash,
         )
 
     return collector
@@ -298,26 +439,77 @@ def run_neon_stage2_training(
     train_families, val_families = build_families_fn(data_root, config)
     if not train_families:
         raise ValueError("build_families_fn produced no training families.")
+    dirichlet_particle_control = None
+    if str(getattr(config, "epistemic_index_mode", "continuous")) == "dirichlet_particles":
+        dirichlet_particle_control = PersistentDirichletParticleControl.create(
+            [family.family_id for family in train_families],
+            num_particles=int(getattr(config, "dirichlet_num_particles", 16)),
+            seed=int(getattr(config, "dirichlet_particle_seed", 123)),
+        )
 
+    prepared = getattr(load_stage1_fn, "last_prepared", {}) or {}
+    target_normalizer = (prepared.get("normalizers") or {}).get("target")
+    reference_normalizer = (prepared.get("normalizers") or {}).get("dynamic")
+    validation_physical_scale = (
+        _normalizer_physical_scale(target_normalizer)
+        if config.uses_de_spread_prior_scale
+        else 1.0
+    )
+    canonical_enabled = bool(getattr(config, "deterministic_head", False)) and str(
+        getattr(config, "deterministic_head_feature", "")
+    ).strip().lower() in {"canonical_aleatory_mean", "fixed_zero_latent"}
+    canonical_zero_latent = str(
+        getattr(config, "deterministic_head_feature", "")
+    ).strip().lower() == "fixed_zero_latent"
+    canonical_cache_dir = None
+    if canonical_enabled and cache_features and cache_dir is not None:
+        canonical_namespace = hashlib.sha256(
+            "|".join(
+                [
+                    "neon_canonical_feature_v1",
+                    str(stage1_checkpoint),
+                    str(config.feature_source),
+                    str(latent_dim),
+                    str(n_history),
+                    str(getattr(config, "deterministic_head_canonical_k", 32)),
+                    str(getattr(config, "deterministic_head_latent_seed", 123)),
+                    str(canonical_zero_latent),
+                ]
+            ).encode("utf-8")
+        ).hexdigest()[:16]
+        canonical_cache_dir = Path(cache_dir) / f"canonical_{canonical_namespace}"
     collector = make_feature_collector_from_frozen_model(
         stage1,
         feature_source=config.feature_source,
         n_history=n_history,
         latent_dim=latent_dim,
         generator=generator,
+        canonical_k=(
+            int(getattr(config, "deterministic_head_canonical_k", 32))
+            if canonical_enabled
+            else 0
+        ),
+        canonical_seed=int(getattr(config, "deterministic_head_latent_seed", 123)),
+        canonical_zero_latent=canonical_zero_latent,
+        canonical_cache_dir=canonical_cache_dir,
+        target_normalizer=target_normalizer,
     )
     # Wrap for caching before the probe so the probe populates the cache and the
     # frozen rollout for family[0] is not recomputed in epoch 0.
     if cache_features:
         cache_payload = "|".join(
             [
-                "neon_feature_cache_v2",
+                "neon_feature_cache_v3",
                 str(stage1_checkpoint),
                 str(config.feature_source),
                 str(latent_dim),
                 str(getattr(config, "k_train", "")),
                 str(getattr(config, "latent_bank_count", "")),
                 str(n_history),
+                str(any(family.structural_dry_mask is not None for family in train_families + val_families)),
+                str(getattr(config, "deterministic_head_canonical_k", 0) if canonical_enabled else 0),
+                str(getattr(config, "deterministic_head_latent_seed", 0) if canonical_enabled else 0),
+                str(canonical_zero_latent),
             ]
         )
         cache_key = hashlib.sha256(cache_payload.encode("utf-8")).hexdigest()[:16]
@@ -374,11 +566,17 @@ def run_neon_stage2_training(
             int(resume_payload["next_epoch"]),
         )
 
-    if resume_payload is None and calibrate_prior and config.uses_auto_prior_scale:
+    if resume_payload is None and calibrate_prior and config.uses_calibrated_prior_scale:
         calibration_m = max(64, int(getattr(config, "calibration_m", 64)), int(config.m_train))
-        z_e = sample_epistemic_indices(
-            calibration_m, int(config.d_e),
-            device=probe.features.device, dtype=probe.features.dtype, generator=generator,
+        z_e = (
+            dirichlet_particle_control.eval_epistemic_indices(
+                device=probe.features.device, dtype=probe.features.dtype
+            )
+            if dirichlet_particle_control is not None
+            else sample_epistemic_indices(
+                calibration_m, int(config.d_e),
+                device=probe.features.device, dtype=probe.features.dtype, generator=generator,
+            )
         )
         n_calib = min(
             max(1, int(getattr(config, "calibration_families", 4))),
@@ -407,7 +605,17 @@ def run_neon_stage2_training(
                     z_e=z_e.to(device=cal_probe.features.device, dtype=cal_probe.features.dtype),
                     node_coords=family.geometry,
                     base_rmse=rmse,
-                    target_fraction=float(config.prior_scale_fraction),
+                    target_fraction=(
+                        0.10
+                        if config.uses_de_spread_prior_scale
+                        else float(config.prior_scale_fraction)
+                    ),
+                    target_std=(
+                        float(config.de_spread_target_std_m)
+                        / float(validation_physical_scale)
+                        if config.uses_de_spread_prior_scale
+                        else None
+                    ),
                 )
             )
         alpha = float(sum(alpha_values) / max(len(alpha_values), 1))
@@ -450,6 +658,26 @@ def run_neon_stage2_training(
             "branch_layers": int(getattr(config, "branch_layers", 2)),
             "branch_activation": str(getattr(config, "branch_activation", "gelu")),
             "concat_index": bool(getattr(config, "concat_index", True)),
+            "epistemic_basis": str(getattr(config, "epistemic_basis", "identity")),
+            "epistemic_linear_terms": bool(
+                getattr(config, "epistemic_linear_terms", True)
+            ),
+            "epistemic_quadratic_terms": int(
+                getattr(config, "epistemic_quadratic_terms", 16)
+            ),
+            "epistemic_basis_seed": int(getattr(config, "epistemic_basis_seed", 123)),
+            "epistemic_index_mode": str(
+                getattr(config, "epistemic_index_mode", "continuous")
+            ),
+            "dirichlet_particle_control": (
+                None
+                if dirichlet_particle_control is None
+                else dirichlet_particle_control.to_metadata()
+            ),
+            "deterministic_head": bool(getattr(config, "deterministic_head", False)),
+            "deterministic_head_feature": str(
+                getattr(config, "deterministic_head_feature", "canonical_aleatory_mean")
+            ),
             "bootstrap": config.to_bootstrap_config_dict()
             if hasattr(config, "to_bootstrap_config_dict")
             else {},
@@ -463,11 +691,39 @@ def run_neon_stage2_training(
             "prior_rff_lengthscale": float(getattr(config, "prior_rff_lengthscale", 0.25)),
             "prior_rff_include_lead": bool(getattr(config, "prior_rff_include_lead", True)),
             "selection_min_retention": float(getattr(config, "selection_min_retention", 0.0)),
+            "selection_rmse_margin_m": float(
+                getattr(config, "selection_rmse_margin_m", 0.001)
+            ),
+            "selection_metric": str(getattr(config, "selection_metric", "mixture_crps")),
+            "selection_enforce_rmse": bool(
+                getattr(config, "selection_enforce_rmse", True)
+            ),
+            "validation_metrics_inverse_transformed": bool(
+                target_normalizer is not None and reference_normalizer is not None
+            ),
+            "de_spread_normalizer_scale_m_per_normalized_unit": (
+                float(validation_physical_scale)
+                if config.uses_de_spread_prior_scale
+                else None
+            ),
             "calibration_families": int(getattr(config, "calibration_families", 1)),
             "calibration_m": int(getattr(config, "calibration_m", int(config.m_train))),
             "auto_prior_calibration_rmse_mean": (
                 float(sum(rmse_values) / len(rmse_values))
                 if "rmse_values" in locals() and rmse_values
+                else None
+            ),
+            "prior_scale_mode": (
+                "de_spread_target"
+                if config.uses_de_spread_prior_scale
+                else "auto_base_rmse"
+                if config.uses_auto_prior_scale
+                else "explicit"
+            ),
+            "prior_scale_target_std_m": config.de_spread_target_std_m,
+            "prior_scale_target_std_normalized": (
+                float(config.de_spread_target_std_m) / float(validation_physical_scale)
+                if config.uses_de_spread_prior_scale
                 else None
             ),
             "family_batch_size": int(getattr(config, "family_batch_size", 1)),
@@ -479,7 +735,21 @@ def run_neon_stage2_training(
             "progress_log_interval_effective_batches": int(
                 getattr(config, "progress_log_interval_effective_batches", 10)
             ),
-            "feature_cache_schema_version": "neon_feature_cache_v2",
+            "feature_cache_schema_version": "neon_feature_cache_v3",
+            "structural_dry_feedback_clamp": bool(
+                target_normalizer is not None
+                and any(
+                    family.structural_dry_mask is not None
+                    for family in train_families + val_families
+                )
+            ),
+            "deterministic_head_canonical_k": int(
+                getattr(config, "deterministic_head_canonical_k", 0)
+            ),
+            "deterministic_head_latent_seed": int(
+                getattr(config, "deterministic_head_latent_seed", 0)
+            ),
+            "canonical_latent_hash_probe": probe.canonical_latent_hash,
         },
     )
 
@@ -527,6 +797,15 @@ def run_neon_stage2_training(
         latent_bank_count=int(getattr(config, "latent_bank_count", 1)),
         reference_member_subsample=getattr(config, "reference_member_subsample", None),
         selection_min_retention=float(getattr(config, "selection_min_retention", 0.0)),
+        selection_rmse_margin_m=float(
+            getattr(config, "selection_rmse_margin_m", 0.001)
+        ),
+        selection_metric=str(getattr(config, "selection_metric", "mixture_crps")),
+        selection_enforce_rmse=bool(getattr(config, "selection_enforce_rmse", True)),
+        validation_physical_scale=float(validation_physical_scale),
+        validation_target_normalizer=target_normalizer,
+        validation_reference_normalizer=reference_normalizer,
+        dirichlet_particle_control=dirichlet_particle_control,
         progress_reporter=progress_reporter,
         latest_checkpoint_path=latest_checkpoint_path,
         start_epoch=0 if resume_payload is None else int(resume_payload["next_epoch"]),
