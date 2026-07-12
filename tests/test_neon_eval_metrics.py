@@ -32,6 +32,10 @@ eval_neon = _load_module("neuralop.flood.eval.neon", "neuralop/flood/eval/neon.p
 neon_predictive_metrics = eval_neon.neon_predictive_metrics
 neon_epistemic_error_correlation = eval_neon.neon_epistemic_error_correlation
 evaluate_neon_nested = eval_neon.evaluate_neon_nested
+evaluate_neon_nested_physical = eval_neon.evaluate_neon_nested_physical
+rmse_mean_shift_decomposition = eval_neon.rmse_mean_shift_decomposition
+NestedSamplingDesign = eval_neon.NestedSamplingDesign
+crossed_sampling_design = eval_neon.crossed_sampling_design
 
 
 def test_ensemble_mean_rmse_known_value():
@@ -40,6 +44,83 @@ def test_ensemble_mean_rmse_known_value():
     ref = torch.zeros(1, 4, 4, 5, 1)      # [B,R,T,Nv,C]
     m = neon_predictive_metrics(pred, ref, thresholds=(0.5,))
     assert m["ensemble_mean_rmse"] == pytest.approx(1.0)
+
+
+def test_physical_evaluation_inverse_transforms_before_metrics():
+    class AffineNormalizer:
+        def __init__(self, scale, offset):
+            self.scale = float(scale)
+            self.offset = float(offset)
+
+        def inverse_transform(self, value):
+            return value * self.scale + self.offset
+
+    pred = torch.ones(1, 2, 2, 1, 3, 1)
+    ref = torch.zeros(1, 3, 1, 3, 1)
+
+    metrics = evaluate_neon_nested_physical(
+        pred,
+        ref,
+        target_normalizer=AffineNormalizer(2.0, 1.0),
+        reference_normalizer=AffineNormalizer(4.0, 1.0),
+        thresholds=(2.0,),
+    )
+
+    assert metrics["ensemble_mean_rmse"] == pytest.approx(2.0)
+    assert metrics["brier_wd_exceed_2m"] == pytest.approx(1.0)
+    assert metrics["normalized_ensemble_mean_rmse"] == pytest.approx(1.0)
+
+
+def test_weighted_rmse_mean_shift_decomposition_is_exact():
+    base = torch.tensor([[[[[2.0], [10.0]]]]])
+    corrected = torch.tensor([[[[[[3.0], [0.0]]]]]])
+    reference = torch.zeros(1, 2, 1, 2, 1)
+    weights = torch.tensor([[[1.0], [0.0]]])
+
+    terms = rmse_mean_shift_decomposition(
+        base,
+        corrected,
+        reference,
+        weights=weights,
+    )
+
+    torch.testing.assert_close(terms["base_rmse"], torch.tensor([2.0]))
+    torch.testing.assert_close(terms["corrected_rmse"], torch.tensor([3.0]))
+    torch.testing.assert_close(terms["mse_delta"], torch.tensor([5.0]))
+    torch.testing.assert_close(
+        terms["mse_delta"],
+        terms["cross_term"] + terms["correction_norm_squared"],
+    )
+
+
+def test_crossed_sampling_design_rejects_mismatched_latent_banks():
+    pred = torch.zeros(1, 2, 2, 1, 1, 1)
+    ref = torch.zeros(1, 2, 1, 1, 1)
+    bad = NestedSamplingDesign(
+        kind="crossed_common_random_numbers",
+        bank_ids=("bank0", "bank1"),
+        latent_hashes=("abc", "def"),
+        aleatory_order=(0, 1),
+        k=2,
+        state_update_mode="member_feedback_persistent_latent",
+    )
+
+    with pytest.raises(ValueError, match="same aleatory latent bank"):
+        evaluate_neon_nested(pred, ref, sampling_design=bad)
+
+
+def test_crossed_sampling_design_hashes_ordered_latent_bank():
+    latents = torch.tensor([[1.0, 2.0], [3.0, 4.0]])
+    design = crossed_sampling_design(
+        latents,
+        m=3,
+        bank_id="eval-bank-0",
+        state_update_mode="member_feedback_persistent_latent",
+    )
+
+    assert design.k == 2
+    assert design.aleatory_order == (0, 1)
+    assert len(set(design.latent_hashes)) == 1
 
 
 def test_marginal_fair_crps_matches_core_fixture():
@@ -110,7 +191,34 @@ def test_epistemic_error_correlation_is_high_when_variance_tracks_error():
     pred = errors + errors * epi_offsets + 0.01 * torch.randn(B, M, K, T, Nv, C)
     ref = torch.zeros(B, 1, T, Nv, C)
     out = neon_epistemic_error_correlation(pred, ref)
-    assert out["epistemic_abs_error_spatial_corr"] > 0.7
+    assert out["epistemic_std_abs_error_spatial_corr"] > 0.7
+    assert out["epistemic_abs_error_spatial_corr"] == pytest.approx(
+        out["epistemic_std_abs_error_spatial_corr"]
+    )
+
+
+def test_epistemic_error_correlation_uses_standard_deviation_not_variance():
+    std = torch.tensor([1.0, 2.0, 3.0, 4.0])
+    offsets = torch.stack((-std / (2.0 ** 0.5), std / (2.0 ** 0.5)), dim=0)
+    pred = (std + offsets).view(1, 2, 1, 1, 4, 1).expand(1, 2, 2, 1, 4, 1)
+    ref = torch.zeros(1, 1, 1, 4, 1)
+
+    out = neon_epistemic_error_correlation(pred, ref)
+
+    assert out["epistemic_std_abs_error_spatial_corr"] == pytest.approx(1.0, abs=1e-6)
+
+
+def test_depth_residual_association_removes_reference_depth_confound():
+    depth = torch.tensor([0.02, 0.04, 0.08, 0.2]).repeat_interleave(4)
+    offsets = torch.stack((-depth / (2.0 ** 0.5), depth / (2.0 ** 0.5)), dim=0)
+    pred = (2.0 * depth + offsets).view(1, 2, 1, 1, -1, 1).expand(-1, -1, 2, -1, -1, -1)
+    ref = depth.view(1, 1, 1, -1, 1)
+
+    out = neon_epistemic_error_correlation(pred, ref)
+
+    assert out["epistemic_std_abs_error_corr_all_wettable"] > 0.99
+    assert abs(out["epistemic_std_abs_error_partial_depth_all_wettable"]) < 1e-6
+    assert "epistemic_std_abs_error_corr_lead_000" in out
 
 
 def test_evaluate_neon_nested_uses_weights_for_variance_summary():
@@ -123,6 +231,23 @@ def test_evaluate_neon_nested_uses_weights_for_variance_summary():
 
     assert bundle["variance_epistemic_mean"] == pytest.approx(0.0)
     assert bundle["variance_epistemic_anova_corrected_mean"] == pytest.approx(0.0)
+
+
+def test_domain_epistemic_fraction_reports_ratio_of_domain_means():
+    a = 2.0 ** -0.5
+    epistemic = torch.tensor([-a, a]).view(1, 2, 1, 1, 1, 1)
+    aleatory = torch.tensor(
+        [[-a, -3.0 * a], [a, 3.0 * a]]
+    ).view(1, 1, 2, 1, 2, 1)
+    pred = epistemic + aleatory
+    ref = torch.zeros(1, 2, 1, 2, 1)
+
+    bundle = evaluate_neon_nested(pred, ref, thresholds=(0.5,))
+
+    assert bundle["variance_epistemic_fraction_anova_corrected_mean"] == pytest.approx(0.3)
+    assert bundle["variance_epistemic_fraction_ratio_of_domain_means_mean"] == pytest.approx(
+        1.0 / 6.0
+    )
 
 
 def test_evaluate_neon_nested_bundles_predictive_and_epistemic():

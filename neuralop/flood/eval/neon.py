@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass
 
 import numpy as np
@@ -11,12 +12,80 @@ from neuralop.flood.neon import (
     fair_crps_members,
     _weighted_mean,
     anova_corrected_epistemic_variance,
+    anova_corrected_epistemic_variance_independent,
     base_rmse_from_reference,
     flatten_nested_predictions,
     nested_member_metadata,
     nested_variance_components,
     per_epistemic_fair_crps,
 )
+
+
+@dataclass(frozen=True)
+class NestedSamplingDesign:
+    """Auditable sampling contract for nested epistemic/aleatory evaluation."""
+
+    kind: str
+    bank_ids: tuple[str, ...]
+    latent_hashes: tuple[str, ...]
+    aleatory_order: tuple[int, ...]
+    k: int
+    state_update_mode: str
+
+    def validate(self, prediction: torch.Tensor) -> None:
+        if prediction.ndim != 6:
+            raise ValueError("prediction must have shape [B,M,K,T,Nv,C]")
+        m, k = int(prediction.shape[1]), int(prediction.shape[2])
+        if int(self.k) != k or len(self.aleatory_order) != k:
+            raise ValueError(
+                f"sampling metadata K/order mismatch: metadata K={self.k}, prediction K={k}"
+            )
+        if tuple(sorted(self.aleatory_order)) != tuple(range(k)):
+            raise ValueError("aleatory_order must contain each ordered member index exactly once")
+        if len(self.bank_ids) != m or len(self.latent_hashes) != m:
+            raise ValueError("sampling metadata must contain one bank id/hash per epistemic particle")
+        if not str(self.state_update_mode).strip():
+            raise ValueError("state_update_mode must be recorded for nested evaluation")
+        if self.kind == "crossed_common_random_numbers":
+            if len(set(self.bank_ids)) != 1 or len(set(self.latent_hashes)) != 1:
+                raise ValueError(
+                    "crossed-design ANOVA requires every epistemic particle to use "
+                    "the same aleatory latent bank and ordering"
+                )
+        elif self.kind != "independent_nested":
+            raise ValueError(f"unsupported nested sampling design {self.kind!r}")
+
+
+def _ordered_latent_bank_hash(latents: torch.Tensor) -> str:
+    tensor = latents.detach().to("cpu").contiguous()
+    digest = hashlib.sha256()
+    digest.update(str(tuple(tensor.shape)).encode("ascii"))
+    digest.update(str(tensor.dtype).encode("ascii"))
+    digest.update(tensor.numpy().tobytes(order="C"))
+    return digest.hexdigest()
+
+
+def crossed_sampling_design(
+    aleatory_latents: torch.Tensor,
+    *,
+    m: int,
+    bank_id: str,
+    state_update_mode: str,
+) -> NestedSamplingDesign:
+    """Build metadata for one ordered aleatory bank shared across ``M`` particles."""
+
+    if aleatory_latents.ndim < 2:
+        raise ValueError("aleatory_latents must have leading K and latent dimensions")
+    k = int(aleatory_latents.shape[0])
+    latent_hash = _ordered_latent_bank_hash(aleatory_latents)
+    return NestedSamplingDesign(
+        kind="crossed_common_random_numbers",
+        bank_ids=tuple(str(bank_id) for _ in range(int(m))),
+        latent_hashes=tuple(latent_hash for _ in range(int(m))),
+        aleatory_order=tuple(range(k)),
+        k=k,
+        state_update_mode=str(state_update_mode),
+    )
 
 
 @dataclass
@@ -54,11 +123,27 @@ def flatten_for_legacy_metrics(prediction: torch.Tensor) -> NEONFlattenedArtifac
     )
 
 
-def neon_variance_summary(prediction: torch.Tensor) -> dict[str, torch.Tensor]:
+def _corrected_epistemic_variance(
+    prediction: torch.Tensor,
+    sampling_design: NestedSamplingDesign | None,
+) -> torch.Tensor:
+    if sampling_design is None:
+        return anova_corrected_epistemic_variance(prediction)
+    sampling_design.validate(prediction)
+    if sampling_design.kind == "independent_nested":
+        return anova_corrected_epistemic_variance_independent(prediction)
+    return anova_corrected_epistemic_variance(prediction)
+
+
+def neon_variance_summary(
+    prediction: torch.Tensor,
+    *,
+    sampling_design: NestedSamplingDesign | None = None,
+) -> dict[str, torch.Tensor]:
     """Compute nested variance fields for NEON-FGNO diagnostics."""
 
     components = nested_variance_components(prediction)
-    corrected = anova_corrected_epistemic_variance(prediction)
+    corrected = _corrected_epistemic_variance(prediction, sampling_design)
     ratio = corrected / (components.aleatory + corrected).clamp_min(1.0e-12)
     return {
         "variance_aleatory": components.aleatory,
@@ -73,12 +158,19 @@ def domain_average_variance_summary(
     prediction: torch.Tensor,
     *,
     weights: torch.Tensor | None = None,
+    sampling_design: NestedSamplingDesign | None = None,
 ) -> dict[str, torch.Tensor]:
     """Average NEON variance fields over mesh/time/channel dimensions."""
 
-    summary = neon_variance_summary(prediction)
+    summary = neon_variance_summary(prediction, sampling_design=sampling_design)
     if weights is None:
-        return {key: value.mean(dim=(1, 2, 3)) for key, value in summary.items()}
+        out = {key: value.mean(dim=(1, 2, 3)) for key, value in summary.items()}
+        out["variance_epistemic_fraction_ratio_of_domain_means"] = out[
+            "variance_epistemic_anova_corrected"
+        ] / (
+            out["variance_aleatory"] + out["variance_epistemic_anova_corrected"]
+        ).clamp_min(1.0e-12)
+        return out
     weights = weights.to(device=prediction.device, dtype=prediction.dtype)
     if weights.ndim == 3:
         weights = weights.unsqueeze(0)
@@ -97,6 +189,11 @@ def domain_average_variance_summary(
             w = weights
             d = denom
         out[key] = (value * w).sum(dim=(1, 2, 3)) / d
+    out["variance_epistemic_fraction_ratio_of_domain_means"] = out[
+        "variance_epistemic_anova_corrected"
+    ] / (
+        out["variance_aleatory"] + out["variance_epistemic_anova_corrected"]
+    ).clamp_min(1.0e-12)
     return out
 
 
@@ -172,6 +269,69 @@ def _rowwise_pearson(x: torch.Tensor, y: torch.Tensor, *, eps: float = 1.0e-8) -
     return num / den
 
 
+def _safe_pearson_1d(x: torch.Tensor, y: torch.Tensor, *, eps: float = 1.0e-8) -> torch.Tensor:
+    """Pearson correlation for one masked event, returning zero if undefined."""
+
+    if x.numel() < 2:
+        return torch.zeros((), device=x.device, dtype=x.dtype)
+    xm = x - x.mean()
+    ym = y - y.mean()
+    den = torch.sqrt(xm.pow(2).sum() * ym.pow(2).sum())
+    if float(den.detach().cpu().item()) <= eps:
+        return torch.zeros((), device=x.device, dtype=x.dtype)
+    return (xm * ym).sum() / den
+
+
+def _event_mean_masked_correlation(
+    x: torch.Tensor,
+    y: torch.Tensor,
+    mask: torch.Tensor,
+) -> torch.Tensor:
+    """Compute one correlation per event and then average across events."""
+
+    values = []
+    for b in range(x.shape[0]):
+        selected = mask[b]
+        values.append(_safe_pearson_1d(x[b][selected], y[b][selected]))
+    return torch.stack(values).mean()
+
+
+def _depth_bin_residuals(
+    value: torch.Tensor,
+    depth: torch.Tensor,
+    mask: torch.Tensor,
+    *,
+    max_bins: int = 10,
+) -> torch.Tensor:
+    """Residualize a field against reference depth using event-local monotone bins."""
+
+    residual = torch.zeros_like(value)
+    for b in range(value.shape[0]):
+        selected = mask[b]
+        if int(selected.sum().item()) < 2:
+            continue
+        d = depth[b][selected]
+        v = value[b][selected]
+        unique = torch.unique(d)
+        if int(unique.numel()) <= max_bins:
+            labels = torch.searchsorted(unique, d)
+            n_bins = int(unique.numel())
+        else:
+            quantiles = torch.linspace(
+                0.0, 1.0, max_bins + 1, device=d.device, dtype=d.dtype
+            )
+            edges = torch.quantile(d, quantiles).unique()
+            labels = torch.bucketize(d, edges[1:-1])
+            n_bins = int(edges.numel() - 1)
+        r = torch.empty_like(v)
+        for idx in range(max(n_bins, 1)):
+            in_bin = labels == idx
+            if bool(in_bin.any()):
+                r[in_bin] = v[in_bin] - v[in_bin].mean()
+        residual[b][selected] = r
+    return residual
+
+
 def neon_predictive_metrics(
     prediction: torch.Tensor,
     reference: torch.Tensor,
@@ -243,18 +403,21 @@ def neon_epistemic_error_correlation(
     reference: torch.Tensor,
     *,
     weights: torch.Tensor | None = None,
+    sampling_design: NestedSamplingDesign | None = None,
 ) -> dict[str, float]:
-    """Spatial Pearson correlation between ANOVA epistemic variance and |mean error|.
+    """Spatial Pearson correlation between epistemic std. dev. and |mean error|.
 
     A well-behaved epistemic map should be elevated where the ensemble mean is
     wrong. Returned value is the per-batch spatial correlation averaged over the
     batch.
     """
-    epi = anova_corrected_epistemic_variance(prediction)               # [B,T,Nv,C]
+    epi = _corrected_epistemic_variance(
+        prediction, sampling_design
+    ).clamp_min(0.0).sqrt()
     flat = flatten_nested_predictions(prediction)
     abs_err = (flat.mean(dim=1) - reference.mean(dim=1)).abs()         # [B,T,Nv,C]
-    x = epi.reshape(epi.shape[0], -1)
-    y = abs_err.reshape(abs_err.shape[0], -1)
+    ref_depth = reference.mean(dim=1)
+    active = torch.ones_like(epi, dtype=torch.bool)
     if weights is not None:
         weights = weights.to(device=prediction.device, dtype=prediction.dtype)
         if weights.ndim == 3:
@@ -264,19 +427,40 @@ def neon_epistemic_error_correlation(
                 "weights must have shape [T, Nv, C] or [B, T, Nv, C], "
                 f"got {tuple(weights.shape)}."
             )
-        if weights.shape[0] == 1 and x.shape[0] > 1:
-            weights = weights.expand(x.shape[0], -1, -1, -1)
-        mask = weights.reshape(x.shape[0], -1) > 0
-        corrs = []
-        for b in range(x.shape[0]):
-            if int(mask[b].sum().item()) < 2:
-                corrs.append(torch.zeros((), device=x.device, dtype=x.dtype))
-            else:
-                corrs.append(_rowwise_pearson(x[b : b + 1, mask[b]], y[b : b + 1, mask[b]])[0])
-        corr = torch.stack(corrs)
-        return {"epistemic_abs_error_spatial_corr": float(corr.mean().item())}
-    corr = _rowwise_pearson(x, y)
-    return {"epistemic_abs_error_spatial_corr": float(corr.mean().item())}
+        if weights.shape[0] == 1 and epi.shape[0] > 1:
+            weights = weights.expand(epi.shape[0], -1, -1, -1)
+        active = torch.broadcast_to(weights, epi.shape) > 0
+
+    strata = {
+        "all_wettable": active,
+        "ref_wet": active & (ref_depth > 0.01),
+        "wet_front": active & (ref_depth > 0.01) & (ref_depth <= 0.10),
+    }
+    out: dict[str, float] = {}
+    for name, stratum_mask in strata.items():
+        corr = _event_mean_masked_correlation(epi, abs_err, stratum_mask)
+        epi_residual = _depth_bin_residuals(epi, ref_depth, stratum_mask)
+        error_residual = _depth_bin_residuals(abs_err, ref_depth, stratum_mask)
+        partial = _event_mean_masked_correlation(
+            epi_residual, error_residual, stratum_mask
+        )
+        out[f"epistemic_std_abs_error_corr_{name}"] = float(corr.item())
+        out[f"epistemic_std_abs_error_partial_depth_{name}"] = float(partial.item())
+
+    for lead_idx in range(epi.shape[1]):
+        lead_corr = _event_mean_masked_correlation(
+            epi[:, lead_idx], abs_err[:, lead_idx], active[:, lead_idx]
+        )
+        out[f"epistemic_std_abs_error_corr_lead_{lead_idx:03d}"] = float(
+            lead_corr.item()
+        )
+
+    value = out["epistemic_std_abs_error_corr_all_wettable"]
+    out.update({
+        "epistemic_std_abs_error_spatial_corr": value,
+        "epistemic_abs_error_spatial_corr": value,
+    })
+    return out
 
 
 def evaluate_neon_nested(
@@ -285,15 +469,142 @@ def evaluate_neon_nested(
     *,
     thresholds=(0.1, 0.3, 0.5),
     weights: torch.Tensor | None = None,
+    sampling_design: NestedSamplingDesign | None = None,
 ) -> dict[str, float]:
     """Full NEON nested-evaluation bundle: predictive + epistemic diagnostics."""
     out: dict[str, float] = {}
     out.update(neon_predictive_metrics(prediction, reference, thresholds=thresholds, weights=weights))
-    variance = domain_average_variance_summary(prediction, weights=weights)
+    variance = domain_average_variance_summary(
+        prediction, weights=weights, sampling_design=sampling_design
+    )
     for key, value in variance.items():
         out[f"{key}_mean"] = float(value.mean().item())
-    out.update(neon_epistemic_error_correlation(prediction, reference, weights=weights))
+    out.update(
+        neon_epistemic_error_correlation(
+            prediction,
+            reference,
+            weights=weights,
+            sampling_design=sampling_design,
+        )
+    )
     return out
+
+
+def evaluate_neon_nested_physical(
+    prediction: torch.Tensor,
+    reference: torch.Tensor,
+    *,
+    target_normalizer,
+    reference_normalizer,
+    thresholds=(0.1, 0.3, 0.5),
+    weights: torch.Tensor | None = None,
+    sampling_design: NestedSamplingDesign | None = None,
+) -> dict[str, float]:
+    """Evaluate nested forecasts in physical units and retain normalized diagnostics.
+
+    Stage-2 predictions use the target normalizer while grouped HEC-RAS
+    references use the dynamic normalizer. Both tensors are inverse-transformed
+    before any meter-valued metric, threshold comparison, or variance summary.
+    Normalized-space values are retained only under ``normalized_`` keys.
+    """
+
+    if target_normalizer is None or reference_normalizer is None:
+        raise ValueError(
+            "physical NEON evaluation requires both target_normalizer and "
+            "reference_normalizer"
+        )
+    prediction_physical = target_normalizer.inverse_transform(prediction)
+    reference_physical = reference_normalizer.inverse_transform(reference)
+    physical = evaluate_neon_nested(
+        prediction_physical,
+        reference_physical,
+        thresholds=thresholds,
+        weights=weights,
+        sampling_design=sampling_design,
+    )
+    normalized = evaluate_neon_nested(
+        prediction,
+        reference,
+        # Physical depth thresholds do not have the same numerical values in
+        # normalized space. Retain only unitless/normalized continuous and
+        # variance diagnostics here rather than emitting mislabeled Brier/CSI.
+        thresholds=(),
+        weights=weights,
+        sampling_design=sampling_design,
+    )
+    physical.update({f"normalized_{key}": value for key, value in normalized.items()})
+    return physical
+
+
+def _per_batch_weighted_mean(
+    value: torch.Tensor,
+    weights: torch.Tensor | None,
+) -> torch.Tensor:
+    """Reduce ``[B,T,Nv,C]`` values with the evaluation weight contract."""
+
+    if value.ndim != 4:
+        raise ValueError(f"value must be [B,T,Nv,C], got {tuple(value.shape)}")
+    if weights is None:
+        return value.mean(dim=(1, 2, 3))
+    w = weights.to(device=value.device, dtype=value.dtype)
+    if w.ndim == 3:
+        w = w.unsqueeze(0)
+    if w.ndim != 4:
+        raise ValueError(
+            "weights must have shape [T,Nv,C] or [B,T,Nv,C], "
+            f"got {tuple(w.shape)}"
+        )
+    if w.shape[0] == 1 and value.shape[0] > 1:
+        w = w.expand(value.shape[0], -1, -1, -1)
+    w = torch.broadcast_to(w, value.shape)
+    return (value * w).sum(dim=(1, 2, 3)) / w.sum(dim=(1, 2, 3)).clamp_min(1.0e-12)
+
+
+def rmse_mean_shift_decomposition(
+    base_prediction: torch.Tensor,
+    corrected_prediction: torch.Tensor,
+    reference: torch.Tensor,
+    *,
+    weights: torch.Tensor | None = None,
+) -> dict[str, torch.Tensor]:
+    """Decompose the Stage-2 ensemble-mean MSE change family by family.
+
+    Inputs are physical-space tensors with shapes ``[B,K,T,Nv,C]``,
+    ``[B,M,K,T,Nv,C]``, and ``[B,R,T,Nv,C]``. The identity is evaluated under
+    exactly the same spatial/temporal weights as RMSE:
+
+    ``MSE_corrected - MSE_base = 2<e_base, delta>_W + ||delta||_W^2``.
+    """
+
+    if base_prediction.ndim != 5:
+        raise ValueError("base_prediction must have shape [B,K,T,Nv,C]")
+    if corrected_prediction.ndim != 6:
+        raise ValueError("corrected_prediction must have shape [B,M,K,T,Nv,C]")
+    if reference.ndim != 5:
+        raise ValueError("reference must have shape [B,R,T,Nv,C]")
+    base_mean = base_prediction.mean(dim=1)
+    corrected_mean = corrected_prediction.mean(dim=(1, 2))
+    reference_mean = reference.mean(dim=1)
+    if base_mean.shape != corrected_mean.shape or base_mean.shape != reference_mean.shape:
+        raise ValueError(
+            "base, corrected, and reference ensemble means must share [B,T,Nv,C] shape"
+        )
+    base_error = base_mean - reference_mean
+    mean_correction = corrected_mean - base_mean
+    base_mse = _per_batch_weighted_mean(base_error.pow(2), weights)
+    corrected_mse = _per_batch_weighted_mean(
+        (corrected_mean - reference_mean).pow(2), weights
+    )
+    cross_term = 2.0 * _per_batch_weighted_mean(base_error * mean_correction, weights)
+    correction_norm_squared = _per_batch_weighted_mean(mean_correction.pow(2), weights)
+    return {
+        "base_rmse": base_mse.clamp_min(0.0).sqrt(),
+        "corrected_rmse": corrected_mse.clamp_min(0.0).sqrt(),
+        "mse_delta": corrected_mse - base_mse,
+        "cross_term": cross_term,
+        "correction_norm_squared": correction_norm_squared,
+        "mean_correction": mean_correction,
+    }
 
 
 # ---------------------------------------------------------------------------

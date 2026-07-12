@@ -68,6 +68,14 @@ def _parse_args(argv: Optional[Sequence[str]]) -> argparse.Namespace:
                         help="Aleatory members per EpiNet eval forward (bounds GPU "
                              "activation memory; K=50 at full horizon OOMs a 40GB "
                              "card unchunked).")
+    parser.add_argument(
+        "--compare-base",
+        action="store_true",
+        help=(
+            "Save paired physical-space RMSE and mean-shift decomposition "
+            "against frozen Stage-1 model 0 under the same aleatory draws."
+        ),
+    )
     parser.add_argument("--dry-run", action="store_true",
                         help="Print the resolved evaluation plan without loading torch/data.")
     return parser.parse_args(argv)
@@ -95,6 +103,7 @@ def resolve_eval_plan(args: argparse.Namespace) -> dict[str, Any]:
         "cache_dir": None if args.cache_dir is None else str(args.cache_dir),
         "k_chunk": int(args.k_chunk),
         "impact_members": int(args.impact_members),
+        "compare_base": bool(args.compare_base),
     }
 
 
@@ -125,9 +134,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     from neuralop.flood.cli.train_neon_stage2 import _load_frozen_stage1
     from neuralop.flood.eval.datasets import _load_or_fit_normalizers
     from neuralop.flood.eval.neon import (
-        evaluate_neon_nested,
+        crossed_sampling_design,
+        evaluate_neon_nested_physical,
         exceedance_reliability,
         nested_pit_rank_histograms,
+        rmse_mean_shift_decomposition,
         save_nested_forecast_artifact,
         spread_error_diagnostics,
         write_variance_maps,
@@ -158,6 +169,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         sys.argv = saved_argv
     target_variables = parse_target_variables(getattr(flood_config.data, "target_variables", ["wd"]))
     normalizers, _norm_path = _load_or_fit_normalizers(flood_config, None, None, log)
+    target_normalizer = normalizers.get("target")
+    reference_normalizer = normalizers.get("dynamic")
+    if target_normalizer is None or reference_normalizer is None:
+        raise RuntimeError(
+            "NEON evaluation requires saved target and dynamic normalizers; "
+            "physical-space scoring cannot be disabled."
+        )
 
     train_fam, val_fam = build_families_from_config(
         flood_config, normalizers, target_variables, log,
@@ -178,6 +196,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     families = sorted(families, key=lambda f: f.family_id)
     if args.max_families is not None:
         families = families[: int(args.max_families)]
+    # Grouped-family tensors are held on CPU and Stage-2 predictions are
+    # assembled there. Keep normalizer statistics colocated for mandatory
+    # inverse transformation before every physical metric and artifact.
+    target_normalizer.to("cpu")
+    reference_normalizer.to("cpu")
     log.info("evaluating %d families (%s split) | rss=%.1fG", len(families), args.families, _rss_gb())
 
     module, ckpt_meta = load_neon_stage2_checkpoint(args.stage2_checkpoint, map_location="cpu")
@@ -235,15 +258,65 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         log.info("  [mem] forwards assembled rss=%.1fG", _rss_gb())                       # [1, M, K, T, Nv, C]
         reference = fam.reference.unsqueeze(0).to(prediction.dtype) # [1, R, T, Nv, C]
         weights = fam.weights
+        prediction_physical = target_normalizer.inverse_transform(prediction)
+        reference_physical = reference_normalizer.inverse_transform(reference)
+        sampling_design = crossed_sampling_design(
+            batch.aleatory_latents,
+            m=int(args.m_eval),
+            bank_id=f"{fam.family_id}:eval-bank-0:k{int(args.k_eval)}",
+            state_update_mode="member_feedback_persistent_latent",
+        )
 
         row: dict[str, Any] = {"family_id": fam.family_id}
-        row.update(evaluate_neon_nested(prediction, reference,
-                                        thresholds=tuple(args.thresholds), weights=weights))
+        row.update(
+            evaluate_neon_nested_physical(
+                prediction,
+                reference,
+                target_normalizer=target_normalizer,
+                reference_normalizer=reference_normalizer,
+                thresholds=tuple(args.thresholds),
+                weights=weights,
+                sampling_design=sampling_design,
+            )
+        )
+        if args.compare_base:
+            base_normalized = batch.base_prediction.detach().to("cpu", torch.float32)
+            base_physical = target_normalizer.inverse_transform(base_normalized)
+            decomposition = rmse_mean_shift_decomposition(
+                base_physical,
+                prediction_physical,
+                reference_physical,
+                weights=weights,
+            )
+            row.update(
+                {
+                    "base_model0_rmse": float(decomposition["base_rmse"][0].item()),
+                    "stage2_rmse": float(decomposition["corrected_rmse"][0].item()),
+                    "stage2_minus_base_mse": float(decomposition["mse_delta"][0].item()),
+                    "stage2_mean_shift_cross_term": float(decomposition["cross_term"][0].item()),
+                    "stage2_mean_shift_norm_squared": float(
+                        decomposition["correction_norm_squared"][0].item()
+                    ),
+                    "stage2_minus_base_rmse": float(
+                        decomposition["corrected_rmse"][0].item()
+                        - decomposition["base_rmse"][0].item()
+                    ),
+                }
+            )
+            if f_idx < int(args.variance_maps):
+                decomposition_dir = out_dir / "rmse_decomposition"
+                decomposition_dir.mkdir(exist_ok=True)
+                np.savez_compressed(
+                    decomposition_dir / f"{fam.family_id}_mean_shift.npz",
+                    mean_correction_m=decomposition["mean_correction"][0].numpy(),
+                    base_mean_m=base_physical[0].mean(dim=0).numpy(),
+                    reference_mean_m=reference_physical[0].mean(dim=0).numpy(),
+                )
         log.info("  [mem] nested metrics rss=%.1fG", _rss_gb())
         per_family.append(row)
 
         pit = nested_pit_rank_histograms(
-            prediction, reference, seed=int(args.seed),
+            prediction_physical, reference_physical, seed=int(args.seed),
             min_ref_depth=float(args.pit_min_ref_depth),
         )
         if pit_total is None:
@@ -253,7 +326,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             pit_total["rank_counts"] = (np.array(pit_total["rank_counts"]) + np.array(pit["rank_counts"])).tolist()
 
         log.info("  [mem] pit done rss=%.1fG", _rss_gb())
-        rel = exceedance_reliability(prediction, reference, thresholds=tuple(args.thresholds))
+        rel = exceedance_reliability(
+            prediction_physical, reference_physical, thresholds=tuple(args.thresholds)
+        )
         for key, bins in rel.items():
             if key not in reliability_sums:
                 reliability_sums[key] = [
@@ -267,14 +342,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 acc["sum_observed_freq"] += b["sum_observed_freq"]
 
         log.info("  [mem] reliability done rss=%.1fG", _rss_gb())
-        spread = spread_error_diagnostics(prediction, reference)
+        spread = spread_error_diagnostics(prediction_physical, reference_physical)
         spread_corrs.append(spread["spread_error_corr"])
         row["spread_error_corr"] = spread["spread_error_corr"]
 
         if args.impact_metrics:
             from neuralop.flood.eval.impact_metrics import compute_flood_impact_crps_metrics
 
-            flat = prediction.reshape(1, -1, *prediction.shape[3:])[0, :, :, :, 0]  # [MK, T, Nv]
+            flat = prediction_physical.reshape(
+                1, -1, *prediction_physical.shape[3:]
+            )[0, :, :, :, 0]  # [MK, T, Nv]
             mk = int(flat.shape[0])
             n_sub = max(2, min(int(args.impact_members), mk))
             if n_sub < mk:
@@ -287,7 +364,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             )
             impact = compute_flood_impact_crps_metrics(
                 flat.permute(1, 0, 2).numpy(),                     # (T, ens, cells)
-                reference[0, :, :, :, 0].permute(1, 0, 2).numpy(), # (T, ref, cells)
+                reference_physical[0, :, :, :, 0].permute(1, 0, 2).numpy(),
                 prepared["geometry_raw_np"],
                 static_raw=static_raw,
             )
@@ -304,17 +381,25 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             save_nested_forecast_artifact(
                 artifact_dir / f"{fam.family_id}.h5",
                 hydrograph_id=fam.family_id,
-                prediction=prediction,
-                ref_members_wd=reference[0, :, :, :, 0].numpy(),
+                prediction=prediction_physical,
+                ref_members_wd=reference_physical[0, :, :, :, 0].numpy(),
                 geometry_raw=prepared["geometry_raw_np"],
                 elevation_raw=prepared["elevation_raw_np"],
-                metadata={"m_eval": int(args.m_eval), "k_eval": int(args.k_eval),
-                          "stage2_checkpoint": str(args.stage2_checkpoint)},
+                metadata={
+                    "m_eval": int(args.m_eval),
+                    "k_eval": int(args.k_eval),
+                    "stage2_checkpoint": str(args.stage2_checkpoint),
+                    "nested_sampling_design": sampling_design.kind,
+                    "aleatory_bank_id": sampling_design.bank_ids[0],
+                    "aleatory_latent_hash": sampling_design.latent_hashes[0],
+                    "aleatory_order": list(sampling_design.aleatory_order),
+                    "state_update_mode": sampling_design.state_update_mode,
+                },
             )
 
         if f_idx < int(args.variance_maps):
             write_variance_maps(
-                prediction, geometry_xy=prepared["geometry_raw_np"],
+                prediction_physical, geometry_xy=prepared["geometry_raw_np"],
                 output_dir=out_dir / "variance_maps", label=fam.family_id,
             )
         log.info("family %s done (%d/%d) rss=%.1fG", fam.family_id, f_idx + 1, len(families), _rss_gb())
