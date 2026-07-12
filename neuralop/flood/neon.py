@@ -364,6 +364,7 @@ class _ProjectedPriorBranch(nn.Module):
         n_hidden_layers: int = 2,
         activation: str = "gelu",
         lead_time_dim: int = 0,
+        extra_feature_channels: int = 0,
     ) -> None:
         super().__init__()
         if hidden_channels < 1:
@@ -372,7 +373,10 @@ class _ProjectedPriorBranch(nn.Module):
         self.out_channels = int(out_channels)
         self.epistemic_dim = int(epistemic_dim)
         self.lead_time_dim = int(lead_time_dim)
-        input_dim = self.feature_channels + self.lead_time_dim
+        self.extra_feature_channels = int(extra_feature_channels)
+        if self.extra_feature_channels < 0:
+            raise ValueError("extra_feature_channels must be >= 0.")
+        input_dim = self.feature_channels + self.lead_time_dim + self.extra_feature_channels
         self.basis = nn.ModuleList(
             [
                 _pointwise_mlp(
@@ -386,7 +390,13 @@ class _ProjectedPriorBranch(nn.Module):
             ]
         )
 
-    def forward(self, features: torch.Tensor, z_e: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        features: torch.Tensor,
+        z_e: torch.Tensor,
+        *,
+        extra_features: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         if features.ndim != 5:
             raise ValueError(
                 "features must have shape [B, K, T, Nv, C_phi], "
@@ -398,6 +408,26 @@ class _ProjectedPriorBranch(nn.Module):
             )
         B, K, T, Nv, _ = (int(v) for v in features.shape)
         branch_features = _append_projected_lead_features(features, self.lead_time_dim)
+        if self.extra_feature_channels:
+            if extra_features is None:
+                raise ValueError(
+                    "extra_features are required because extra_feature_channels="
+                    f"{self.extra_feature_channels}."
+                )
+            if extra_features.shape != (B, K, T, Nv, self.extra_feature_channels):
+                raise ValueError(
+                    "extra_features must have shape "
+                    f"{(B, K, T, Nv, self.extra_feature_channels)}, got "
+                    f"{tuple(extra_features.shape)}."
+                )
+            branch_features = torch.cat(
+                [branch_features, extra_features.to(device=features.device, dtype=features.dtype)],
+                dim=-1,
+            )
+        elif extra_features is not None:
+            raise ValueError(
+                "extra_features were supplied but this prior branch was built without them."
+            )
         flat = branch_features.reshape(-1, branch_features.shape[-1])
         basis = torch.stack(
             [mlp(flat).reshape(B, K, T, Nv, self.out_channels) for mlp in self.basis],
@@ -430,6 +460,9 @@ class NEONEpistemicCorrection(nn.Module):
         detach_features: bool = True,
         lead_time_dim: int = 0,
         za_dependent: bool = True,
+        prior_rff_dim: int = 0,
+        prior_rff_lengthscale: float = 0.25,
+        prior_rff_include_lead: bool = True,
     ) -> None:
         super().__init__()
         self.feature_channels = int(feature_channels)
@@ -439,9 +472,9 @@ class NEONEpistemicCorrection(nn.Module):
         # is supplied, it defines the train branch only; projected priors stay
         # small unless explicitly overridden.
         if train_hidden_channels is None:
-            train_hidden_channels = 32 if hidden_channels is None else int(hidden_channels)
+            train_hidden_channels = 16 if hidden_channels is None else int(hidden_channels)
         if prior_hidden_channels is None:
-            prior_hidden_channels = 5 if hidden_channels is None else int(hidden_channels)
+            prior_hidden_channels = 16 if hidden_channels is None else int(hidden_channels)
         if branch_layers is not None:
             n_hidden_layers = int(branch_layers)
         self.train_hidden_channels = int(train_hidden_channels)
@@ -457,6 +490,23 @@ class NEONEpistemicCorrection(nn.Module):
         self.detach_features = bool(detach_features)
         self.lead_time_dim = int(lead_time_dim)
         self.za_dependent = bool(za_dependent)
+        self.prior_rff_dim = int(prior_rff_dim)
+        self.prior_rff_lengthscale = float(prior_rff_lengthscale)
+        self.prior_rff_include_lead = bool(prior_rff_include_lead)
+        if self.prior_rff_dim < 0:
+            raise ValueError("prior_rff_dim must be >= 0.")
+        if self.prior_rff_dim % 2 != 0:
+            raise ValueError("prior_rff_dim must be even.")
+        if self.prior_rff_lengthscale <= 0.0:
+            raise ValueError("prior_rff_lengthscale must be > 0.")
+        if self.prior_rff_dim > 0 and self.branch_type != "projected":
+            raise ValueError("prior_rff_dim > 0 is only supported for branch_type='projected'.")
+        if self.prior_rff_dim > 0:
+            rff_input_dim = 3 if self.prior_rff_include_lead else 2
+            freqs = torch.randn(rff_input_dim, self.prior_rff_dim // 2) / self.prior_rff_lengthscale
+            self.register_buffer("prior_rff_freqs", freqs)
+        else:
+            self.register_buffer("prior_rff_freqs", torch.empty(0))
         if self.branch_type == "film":
             self.trainable_branch = _CorrectionBranch(
                 feature_channels=self.feature_channels,
@@ -493,19 +543,101 @@ class NEONEpistemicCorrection(nn.Module):
                 n_hidden_layers=n_hidden_layers,
                 activation=self.branch_activation,
                 lead_time_dim=self.lead_time_dim,
+                extra_feature_channels=self.prior_rff_dim,
             )
         for param in self.prior_branch.parameters():
             param.requires_grad_(False)
+        self.prior_rff_freqs.requires_grad_(False)
 
     def set_prior_scale(self, alpha: float) -> None:
         """Set the randomized-prior scale ``alpha`` (e.g. from auto-calibration)."""
         self.alpha = float(alpha)
+
+    def _prepare_branch_features(self, features: torch.Tensor) -> torch.Tensor:
+        branch_features = features.detach() if self.detach_features else features
+        if not self.za_dependent:
+            # za-independent ablation: average the frozen features over the
+            # aleatory (K) axis so the correction depends only on the conditional
+            # mean feature and is shared across aleatory members.
+            branch_features = branch_features.mean(dim=1, keepdim=True).expand_as(branch_features)
+        return branch_features
+
+    def _prior_extra_features(
+        self,
+        features: torch.Tensor,
+        node_coords: torch.Tensor | None,
+    ) -> torch.Tensor | None:
+        if self.prior_rff_dim == 0:
+            return None
+        if node_coords is None:
+            raise ValueError("node_coords are required when prior_rff_dim > 0.")
+        if features.ndim != 5:
+            raise ValueError(f"features must be [B, K, T, Nv, C], got {tuple(features.shape)}.")
+        B, K, T, Nv, _ = (int(v) for v in features.shape)
+        coords = node_coords.to(device=features.device, dtype=features.dtype)
+        if coords.ndim == 2:
+            if coords.shape != (Nv, 2):
+                raise ValueError(f"node_coords must be [Nv, 2] = {(Nv, 2)}, got {tuple(coords.shape)}.")
+            coords = coords.unsqueeze(0).expand(B, -1, -1)
+        elif coords.ndim == 3:
+            if coords.shape[1:] != (Nv, 2):
+                raise ValueError(
+                    f"node_coords must have trailing shape [Nv, 2] = {(Nv, 2)}, "
+                    f"got {tuple(coords.shape)}."
+                )
+            if coords.shape[0] == 1 and B != 1:
+                coords = coords.expand(B, -1, -1)
+            elif coords.shape[0] != B:
+                raise ValueError(f"node_coords batch must be 1 or {B}, got {coords.shape[0]}.")
+        else:
+            raise ValueError(f"node_coords must be [Nv, 2] or [B, Nv, 2], got {tuple(coords.shape)}.")
+
+        # The RFF lengthscale is in normalized-coordinate units; normalize per
+        # family so projected meshes with large absolute coordinates remain
+        # numerically comparable.
+        c_min = coords.amin(dim=1, keepdim=True)
+        c_span = (coords.amax(dim=1, keepdim=True) - c_min).clamp_min(1.0e-6)
+        coords = (coords - c_min) / c_span
+        coords_bt = coords[:, None, :, :].expand(B, T, Nv, 2)
+        if self.prior_rff_include_lead:
+            if T > 1:
+                lead = torch.linspace(0.0, 1.0, T, device=features.device, dtype=features.dtype)
+            else:
+                lead = torch.zeros(1, device=features.device, dtype=features.dtype)
+            lead = lead.view(1, T, 1, 1).expand(B, T, Nv, 1)
+            rff_input = torch.cat([coords_bt, lead], dim=-1)
+        else:
+            rff_input = coords_bt
+        freqs = self.prior_rff_freqs.to(device=features.device, dtype=features.dtype)
+        phase = 2.0 * math.pi * torch.einsum("btnd,df->btnf", rff_input, freqs)
+        scale = math.sqrt(2.0 / float(self.prior_rff_dim))
+        psi = scale * torch.cat([torch.cos(phase), torch.sin(phase)], dim=-1)
+        return psi[:, None].expand(B, K, T, Nv, self.prior_rff_dim)
+
+    def compute_prior(
+        self,
+        features: torch.Tensor,
+        z_e: torch.Tensor,
+        *,
+        node_coords: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Compute the unit-scale fixed prior correction for frozen features."""
+
+        branch_features = self._prepare_branch_features(features)
+        extra = self._prior_extra_features(branch_features, node_coords)
+        if self.branch_type == "projected":
+            return self.prior_branch(branch_features, z_e, extra_features=extra)
+        if extra is not None:
+            raise ValueError("prior RFF extra features are only supported for projected branches.")
+        return self.prior_branch(branch_features, z_e)
 
     def forward(
         self,
         base_prediction: torch.Tensor,
         features: torch.Tensor,
         z_e: torch.Tensor,
+        *,
+        node_coords: torch.Tensor | None = None,
     ) -> NEONCorrectionOutput:
         if base_prediction.ndim != 5:
             raise ValueError(
@@ -532,16 +664,15 @@ class NEONEpistemicCorrection(nn.Module):
                 f"z_e last dimension must be {self.epistemic_dim}, got {z_e.shape[-1]}."
             )
 
-        branch_features = features.detach() if self.detach_features else features
+        branch_features = self._prepare_branch_features(features)
         base = base_prediction.detach() if self.detach_features else base_prediction
-        if not self.za_dependent:
-            # za-independent ablation: average the frozen features over the
-            # aleatory (K) axis so the correction depends only on the conditional
-            # mean feature and is shared across aleatory members.
-            branch_features = branch_features.mean(dim=1, keepdim=True).expand_as(branch_features)
         trainable = self.trainable_branch(branch_features, z_e)
         with torch.no_grad():
-            prior = self.prior_branch(branch_features, z_e)
+            extra = self._prior_extra_features(branch_features, node_coords)
+            if self.branch_type == "projected":
+                prior = self.prior_branch(branch_features, z_e, extra_features=extra)
+            else:
+                prior = self.prior_branch(branch_features, z_e)
         correction = trainable + self.alpha * prior
         prediction = base.unsqueeze(1) + correction
         return NEONCorrectionOutput(
@@ -957,6 +1088,7 @@ def calibrate_prior_scale(
     features: torch.Tensor,
     z_e: torch.Tensor,
     base_rmse: float,
+    node_coords: torch.Tensor | None = None,
     target_fraction: float = 0.10,
     eps: float = 1.0e-8,
 ) -> float:
@@ -969,7 +1101,7 @@ def calibrate_prior_scale(
     degenerate (near-zero) prior spread via ``eps``.
     """
     with torch.no_grad():
-        prior = module.prior_branch(features, z_e)  # [B, M, K, T, Nv, C]
+        prior = module.compute_prior(features, z_e, node_coords=node_coords)  # [B, M, K, T, Nv, C]
         if int(prior.shape[1]) > 1:
             spread = float(prior.std(dim=1, unbiased=True).mean().item())
         else:
@@ -1117,6 +1249,36 @@ def epistemic_variance_diagnostics(
     }
 
 
+def prior_psi_floor_diagnostic(
+    *,
+    module: NEONEpistemicCorrection,
+    features: torch.Tensor,
+    z_e: torch.Tensor,
+    node_coords: torch.Tensor | None = None,
+) -> dict[str, float]:
+    """Estimate the RFF-prior variance floor retained by asymmetric inputs.
+
+    This is an observational diagnostic, not a training term. It measures
+    ``Var_ze[alpha E^P(phi, z_e)]`` after averaging over aleatory samples; with
+    ``prior_rff_dim=0`` it reports zero for legacy runs.
+    """
+
+    if int(getattr(module, "prior_rff_dim", 0)) <= 0:
+        return {"prior_floor_var": 0.0}
+    with torch.no_grad():
+        prior = float(module.alpha) * module.compute_prior(
+            features.detach(),
+            z_e,
+            node_coords=node_coords,
+        ).detach().float()
+        mbar_prior = prior.mean(dim=2)
+        if int(mbar_prior.shape[1]) > 1:
+            floor = mbar_prior.var(dim=1, unbiased=True).mean()
+        else:
+            floor = mbar_prior.new_zeros(())
+    return {"prior_floor_var": float(floor.item())}
+
+
 def compute_stage2_loss(
     *,
     prediction: torch.Tensor,
@@ -1235,6 +1397,9 @@ def save_neon_stage2_checkpoint(
             "detach_features": module.detach_features,
             "lead_time_dim": module.lead_time_dim,
             "za_dependent": module.za_dependent,
+            "prior_rff_dim": module.prior_rff_dim,
+            "prior_rff_lengthscale": module.prior_rff_lengthscale,
+            "prior_rff_include_lead": module.prior_rff_include_lead,
         },
     }
     torch.save(payload, path)
@@ -1257,6 +1422,9 @@ def load_neon_stage2_checkpoint(
             arch["train_hidden_channels"] = arch.get("hidden_channels", 64)
         if "prior_hidden_channels" not in arch:
             arch["prior_hidden_channels"] = arch.get("hidden_channels", 64)
+    arch.setdefault("prior_rff_dim", 0)
+    arch.setdefault("prior_rff_lengthscale", 0.25)
+    arch.setdefault("prior_rff_include_lead", True)
     module = NEONEpistemicCorrection(**arch)
     module.load_state_dict(payload["state_dict"])
     for param in module.prior_branch.parameters():

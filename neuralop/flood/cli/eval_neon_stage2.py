@@ -227,6 +227,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     base_prediction=batch.base_prediction[:, ks : ks + k_chunk],
                     features=batch.features[:, ks : ks + k_chunk],
                     z_e=z_e[m : m + 1],
+                    node_coords=fam.geometry,
                 )
                 k_parts.append(pred_mk.detach().to("cpu", torch.float32))
             chunks.append(torch.cat(k_parts, dim=2))

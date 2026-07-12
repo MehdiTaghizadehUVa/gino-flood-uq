@@ -24,6 +24,7 @@ from neuralop.flood.neon import (
     epistemic_bootstrap_weights,
     freeze_stage1_model,
     per_epistemic_fair_crps,
+    prior_psi_floor_diagnostic,
     sample_epistemic_indices,
     save_neon_stage2_checkpoint,
     stage2_fit_score,
@@ -654,6 +655,7 @@ def neon_stage2_training_step(
     reference: torch.Tensor,
     z_e: torch.Tensor | None = None,
     weights: torch.Tensor | None = None,
+    node_coords: torch.Tensor | None = None,
     edge_index: torch.Tensor | None = None,
     edge_weights: torch.Tensor | None = None,
     zero_threshold: float | torch.Tensor = 0.0,
@@ -682,7 +684,7 @@ def neon_stage2_training_step(
     chunk = int(epistemic_chunk_size) if epistemic_chunk_size else total_m
     chunk = max(1, min(chunk, total_m))
     if chunk >= total_m:
-        out = module(base_prediction, features, z_e)
+        out = module(base_prediction, features, z_e, node_coords=node_coords)
         losses = compute_stage2_loss(
             prediction=out.prediction,
             reference=reference,
@@ -710,6 +712,14 @@ def neon_stage2_training_step(
                 mbar_prior_scaled=_mbar_prior,
             )
         )
+        losses.diagnostics.update(
+            prior_psi_floor_diagnostic(
+                module=module,
+                features=features,
+                z_e=z_e,
+                node_coords=node_coords,
+            )
+        )
         (losses.total * float(loss_scale)).backward()
     else:
         # Chunk the epistemic (M) axis with gradient accumulation to cap
@@ -726,7 +736,7 @@ def neon_stage2_training_step(
             if sample_weights is not None:
                 weight_chunk = sample_weights[:, start : start + chunk]
             scale = float(z_chunk.shape[0]) / float(total_m)
-            out = module(base_prediction, features, z_chunk)
+            out = module(base_prediction, features, z_chunk, node_coords=node_coords)
             losses_c = compute_stage2_loss(
                 prediction=out.prediction,
                 reference=reference,
@@ -763,6 +773,14 @@ def neon_stage2_training_step(
                 mbar_prior_scaled=_mbar_prior,
             )
         )
+        diag_agg.update(
+            prior_psi_floor_diagnostic(
+                module=module,
+                features=features,
+                z_e=z_e,
+                node_coords=node_coords,
+            )
+        )
         losses = NEONStage2LossOutput(
             total=torch.tensor(agg["total"]),
             fit=torch.tensor(agg["fit"]),
@@ -786,12 +804,13 @@ def neon_stage2_eval_forward(
     base_prediction: torch.Tensor,
     features: torch.Tensor,
     z_e: torch.Tensor,
+    node_coords: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Inference helper returning nested corrected predictions only."""
 
     module.eval()
     with torch.no_grad():
-        return module(base_prediction, features, z_e).prediction
+        return module(base_prediction, features, z_e, node_coords=node_coords).prediction
 
 
 def build_neon_stage2_optimizer(
@@ -983,6 +1002,27 @@ def _collate_optional_score_weights(families: Sequence[NEONFamilySample]) -> Opt
     return torch.cat(stacked, dim=0)
 
 
+def _collate_optional_geometry(families: Sequence[NEONFamilySample]) -> Optional[torch.Tensor]:
+    geometries = [family.geometry for family in families]
+    if all(geometry is None for geometry in geometries):
+        return None
+    if any(geometry is None for geometry in geometries):
+        raise ValueError("either all families in a mini-batch must provide geometry or none.")
+    stacked = []
+    for geometry in geometries:
+        assert geometry is not None
+        if geometry.ndim == 2:
+            stacked.append(geometry.unsqueeze(0))
+        elif geometry.ndim == 3:
+            stacked.append(geometry)
+        else:
+            raise ValueError(
+                "family geometry must have shape [Nv, 2] or [B, Nv, 2], "
+                f"got {tuple(geometry.shape)}."
+            )
+    return torch.cat(stacked, dim=0)
+
+
 def _maybe_subsample_reference_members(
     reference: torch.Tensor,
     *,
@@ -1077,7 +1117,12 @@ def _evaluate_neon_validation(
             for start in range(0, total_m, chunk):
                 z_chunk = z_e[start : start + chunk]
                 scale = float(z_chunk.shape[0]) / float(total_m)
-                out = module(batch.base_prediction, batch.features, z_chunk)
+                out = module(
+                    batch.base_prediction,
+                    batch.features,
+                    z_chunk,
+                    node_coords=family.geometry,
+                )
                 fit = stage2_fit_score(
                     out.prediction,
                     ref.to(device=out.prediction.device, dtype=out.prediction.dtype),
@@ -1102,6 +1147,14 @@ def _evaluate_neon_validation(
                 epistemic_variance_diagnostics(
                     mbar_total=_mbar_total,
                     mbar_prior_scaled=_mbar_prior,
+                )
+            )
+            diag_val.update(
+                prior_psi_floor_diagnostic(
+                    module=module,
+                    features=batch.features,
+                    z_e=z_e,
+                    node_coords=family.geometry,
                 )
             )
             total += fit_val
@@ -1506,4 +1559,7 @@ def build_epinet_from_config(
         lead_time_dim=int(getattr(config, "lead_time_dim", 0)),
         za_dependent=str(getattr(config, "dependency", "za_dependent")).strip().lower()
         == "za_dependent",
+        prior_rff_dim=int(getattr(config, "prior_rff_dim", 0)),
+        prior_rff_lengthscale=float(getattr(config, "prior_rff_lengthscale", 0.25)),
+        prior_rff_include_lead=bool(getattr(config, "prior_rff_include_lead", True)),
     )
