@@ -69,11 +69,14 @@ class NEONStage2Config:
     alpha: Optional[float] = None
     lead_time_dim: int = 0
     branch_type: str = "projected"
-    train_hidden_channels: int = 32
-    prior_hidden_channels: int = 5
+    train_hidden_channels: int = 16
+    prior_hidden_channels: int = 16
     branch_layers: int = 2
     branch_activation: str = "gelu"
     concat_index: bool = True
+    prior_rff_dim: int = 32
+    prior_rff_lengthscale: float = 0.25
+    prior_rff_include_lead: bool = True
     family_batch_size: int = 1
     effective_batch_size: int = 8
     shuffle_families: bool = True
@@ -106,6 +109,9 @@ class NEONStage2Config:
     learning_rate: float = 1.0e-4
     weight_decay: float = 1.0e-4
     n_epochs: int = 30
+    selection_min_retention: float = 0.3
+    calibration_families: int = 4
+    calibration_m: int = 64
 
     # ------------------------------------------------------------------
     # Derived accessors
@@ -238,10 +244,35 @@ class NEONStage2Config:
             raise NEONConfigError(f"n_epochs must be >= 1, got {self.n_epochs}.")
         if int(self.lead_time_dim) < 0:
             raise NEONConfigError(f"lead_time_dim must be >= 0, got {self.lead_time_dim}.")
+        if int(self.prior_rff_dim) < 0:
+            raise NEONConfigError(f"prior_rff_dim must be >= 0, got {self.prior_rff_dim}.")
+        if int(self.prior_rff_dim) % 2 != 0:
+            raise NEONConfigError(f"prior_rff_dim must be even, got {self.prior_rff_dim}.")
+        if int(self.prior_rff_dim) > 0 and self.branch_type != "projected":
+            raise NEONConfigError("prior_rff_dim > 0 is only supported for branch_type='projected'.")
+        if float(self.prior_rff_lengthscale) <= 0.0:
+            raise NEONConfigError(
+                f"prior_rff_lengthscale must be > 0, got {self.prior_rff_lengthscale}."
+            )
         if not (0.0 <= float(self.bootstrap_temperature) <= 1.0):
             raise NEONConfigError(
                 f"bootstrap_temperature must be in [0, 1], got {self.bootstrap_temperature}."
             )
+        if not (0.0 <= float(self.member_bootstrap_temperature) <= 1.0):
+            raise NEONConfigError(
+                "member_bootstrap_temperature must be in [0, 1], got "
+                f"{self.member_bootstrap_temperature}."
+            )
+        if not (0.0 <= float(self.selection_min_retention) <= 1.0):
+            raise NEONConfigError(
+                f"selection_min_retention must be in [0, 1], got {self.selection_min_retention}."
+            )
+        if int(self.calibration_families) < 1:
+            raise NEONConfigError(
+                f"calibration_families must be >= 1, got {self.calibration_families}."
+            )
+        if int(self.calibration_m) < 2:
+            raise NEONConfigError(f"calibration_m must be >= 2, got {self.calibration_m}.")
         if float(self.bootstrap_min_weight) <= 0.0:
             raise NEONConfigError(
                 f"bootstrap_min_weight must be > 0, got {self.bootstrap_min_weight}."
@@ -354,4 +385,6 @@ def load_neon_config(mapping: Mapping[str, Any]) -> NEONStage2Config:
         if key in field_names:
             kwargs[key] = value
         # Unknown keys are silently ignored (forward-compat).
+    if str(kwargs.get("branch_type", "")).strip().lower() == "film" and "prior_rff_dim" not in kwargs:
+        kwargs["prior_rff_dim"] = 0
     return NEONStage2Config(**kwargs).validate()

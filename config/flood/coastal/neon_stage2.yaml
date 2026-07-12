@@ -31,6 +31,53 @@ neon:
   prior_scale: auto_0p10_base_rmse
   alpha: null
 
+  # EpiNet branch architecture. `projected` is the NEON-aligned default;
+  # `film` keeps the older FiLM/AdaIN branch available as an ablation.
+  branch_type: projected
+  train_hidden_channels: 16
+  prior_hidden_channels: 16
+  branch_layers: 2
+  branch_activation: gelu
+  concat_index: true
+
+  # Index-dependent data views. The family bootstrap perturbs the finite
+  # training-family objective; the member bootstrap perturbs each family's
+  # HEC-RAS empirical reference law for each epistemic particle.
+  bootstrap:
+    enabled: true
+    distribution: tempered_exponential
+    temperature: 0.5
+    normalize: per_epistemic_batch
+    min_weight: 0.05
+    max_weight: 5.0
+    seed: 0
+
+  member_bootstrap:
+    enabled: true
+    temperature: 1.0
+    seed: 1
+
+  # Prior-only random Fourier features make the fixed prior branch see mesh
+  # coordinate/lead-time structure that the trainable branch cannot cancel
+  # exactly. Set prior_rff_dim: 0 for legacy projected-branch behavior.
+  prior_rff_dim: 32
+  prior_rff_lengthscale: 0.25
+  prior_rff_include_lead: true
+
+  # Checkpoint selection uses validation fit only among epochs with retained
+  # randomized-prior variance above this floor. Set 0.0 for legacy selection.
+  selection_min_retention: 0.3
+
+  # Auto alpha calibration probes several families with at least 64 epistemic
+  # indices to reduce the noisy one-family / M_train estimate.
+  calibration_families: 4
+  calibration_m: 64
+
+  cancellation_diagnostics:
+    enabled: true
+    warn_cosine_below: -0.90
+    warn_cancellation_above: 0.80
+
   # Objective. per_epistemic_fcrps is the main method; pooled_fcrps is the
   # negative-control ablation; l2_mean is the conditional-mean baseline.
   objective: per_epistemic_fcrps

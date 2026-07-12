@@ -416,6 +416,52 @@ def test_training_subsamples_reference_members_for_fit(monkeypatch):
     assert seen_reference_members == [2, 2]
 
 
+def test_training_threads_member_bootstrap_weights_and_keeps_validation_unweighted(monkeypatch):
+    module = _module()
+    opt = build_neon_stage2_optimizer(module, learning_rate=1e-2)
+    seen_member_weights: list[torch.Tensor | None] = []
+    original_step = train_neon.neon_stage2_training_step
+    original_eval = train_neon.stage2_fit_score
+
+    def wrapped_step(*args, **kwargs):
+        mw = kwargs.get("member_weights")
+        seen_member_weights.append(None if mw is None else mw.detach().cpu().clone())
+        return original_step(*args, **kwargs)
+
+    validation_member_weights: list[object] = []
+
+    def wrapped_fit(*args, **kwargs):
+        validation_member_weights.append(kwargs.get("member_weights"))
+        return original_eval(*args, **kwargs)
+
+    monkeypatch.setattr(train_neon, "neon_stage2_training_step", wrapped_step)
+    monkeypatch.setattr(train_neon, "stage2_fit_score", wrapped_fit)
+    train_neon_stage2_epochs(
+        module=module,
+        optimizer=opt,
+        train_families=[_family("a", 0.0, n_ref=5), _family("b", 0.5, n_ref=5)],
+        val_families=[_family("v", 0.2, n_ref=5)],
+        feature_collector=_make_feature_collector(),
+        n_epochs=1,
+        m_train=3,
+        k_train=4,
+        d_e=4,
+        member_bootstrap_config={"enabled": True, "temperature": 1.0, "seed": 44},
+        reference_member_subsample=3,
+        shuffle_families=False,
+        generator=torch.Generator().manual_seed(11),
+    )
+
+    assert seen_member_weights and all(w is not None for w in seen_member_weights)
+    weights = seen_member_weights[0]
+    assert weights is not None
+    assert weights.shape == (1, 3, 3)
+    torch.testing.assert_close(weights.sum(dim=-1), torch.ones(1, 3), rtol=1e-6, atol=1e-6)
+    assert not torch.allclose(weights[:, 0], weights[:, 1])
+    assert validation_member_weights
+    assert all(value is None for value in validation_member_weights)
+
+
 def test_best_epoch_tracking_picks_lowest_val():
     module = _module()
     opt = build_neon_stage2_optimizer(module, learning_rate=1e-2)
@@ -433,6 +479,65 @@ def test_best_epoch_tracking_picks_lowest_val():
     val_series = [h["val_fit"] for h in result.history]
     assert result.best_epoch == int(min(range(len(val_series)), key=lambda i: val_series[i]))
     assert result.best_val_fit == pytest.approx(min(val_series))
+
+
+def test_retention_gate_blocks_lower_val_fit_when_prior_retention_is_too_low(monkeypatch):
+    module = _module()
+    opt = build_neon_stage2_optimizer(module, learning_rate=1e-2)
+    calls = {"n": 0}
+
+    def fake_eval(**kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return 10.0, {"prior_retention_ratio": 0.5}
+        return 1.0, {"prior_retention_ratio": 0.1}
+
+    monkeypatch.setattr(train_neon, "_evaluate_neon_validation", fake_eval)
+    result = train_neon_stage2_epochs(
+        module=module,
+        optimizer=opt,
+        train_families=[_family("a", 0.0)],
+        val_families=[_family("v", 0.2)],
+        feature_collector=_make_feature_collector(),
+        n_epochs=2,
+        m_train=2,
+        k_train=4,
+        d_e=4,
+        selection_min_retention=0.3,
+    )
+
+    assert result.best_epoch == 0
+    assert result.best_val_fit == pytest.approx(10.0)
+    assert result.history[1]["selection_eligible"] == 0.0
+
+
+def test_retention_gate_disabled_recovers_lowest_val_fit(monkeypatch):
+    module = _module()
+    opt = build_neon_stage2_optimizer(module, learning_rate=1e-2)
+    calls = {"n": 0}
+
+    def fake_eval(**kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return 10.0, {"prior_retention_ratio": 0.0}
+        return 1.0, {"prior_retention_ratio": 0.0}
+
+    monkeypatch.setattr(train_neon, "_evaluate_neon_validation", fake_eval)
+    result = train_neon_stage2_epochs(
+        module=module,
+        optimizer=opt,
+        train_families=[_family("a", 0.0)],
+        val_families=[_family("v", 0.2)],
+        feature_collector=_make_feature_collector(),
+        n_epochs=2,
+        m_train=2,
+        k_train=4,
+        d_e=4,
+        selection_min_retention=0.0,
+    )
+
+    assert result.best_epoch == 1
+    assert result.best_val_fit == pytest.approx(1.0)
 
 
 def test_validation_runs_without_grad_and_leaves_module_in_train_mode_between_epochs():

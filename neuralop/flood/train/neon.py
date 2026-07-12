@@ -1257,6 +1257,7 @@ def train_neon_stage2_epochs(
     epistemic_resample: str = "epoch",
     latent_bank_count: int = 1,
     reference_member_subsample: Optional[int] = None,
+    selection_min_retention: float = 0.0,
     progress_reporter: Optional[NEONTrainingProgressReporter] = None,
     latest_checkpoint_path: Optional[Any] = None,
     start_epoch: int = 0,
@@ -1292,6 +1293,7 @@ def train_neon_stage2_epochs(
     history: list[dict[str, float]] = [dict(row) for row in (initial_history or [])]
     best_val = float(initial_best_val_fit)
     best_epoch = int(initial_best_epoch)
+    n_ineligible_epochs = 0
     first_epoch = max(0, int(start_epoch))
     total_epochs = int(n_epochs)
     if first_epoch > total_epochs:
@@ -1506,7 +1508,14 @@ def train_neon_stage2_epochs(
             if cosine < warn_cos and cancel > warn_cancel:
                 row["cancellation_warning"] = 1.0
 
-        improved = bool(val_fit < best_val)
+        retention = float(row.get("val_prior_retention_ratio", 1.0))
+        retention_floor = float(selection_min_retention)
+        eligible = retention_floor <= 0.0 or retention >= retention_floor
+        row["selection_eligible"] = 1.0 if eligible else 0.0
+        row["selection_min_retention"] = retention_floor
+        if not eligible:
+            n_ineligible_epochs += 1
+        improved = bool(eligible and val_fit < best_val)
         if improved:
             best_val = float(val_fit)
             best_epoch = int(epoch)
@@ -1514,6 +1523,8 @@ def train_neon_stage2_epochs(
                 save_metadata = dict(checkpoint_metadata or {})
                 save_metadata["best_epoch"] = int(epoch)
                 save_metadata["val_metrics"] = {"val_fit": float(val_fit)}
+                save_metadata["selection_min_retention"] = retention_floor
+                save_metadata["selection_eligible"] = bool(eligible)
                 save_neon_stage2_checkpoint(checkpoint_path, module, metadata=save_metadata)
                 if progress_reporter is not None:
                     progress_reporter.checkpoint_saved(
@@ -1535,6 +1546,8 @@ def train_neon_stage2_epochs(
             latest_metadata["next_epoch"] = int(epoch) + 1
             latest_metadata["best_epoch"] = int(best_epoch)
             latest_metadata["best_val_fit"] = float(best_val)
+            latest_metadata["selection_min_retention"] = retention_floor
+            latest_metadata["n_ineligible_epochs"] = int(n_ineligible_epochs)
             save_neon_stage2_training_state(
                 latest_checkpoint_path,
                 module=module,
@@ -1545,6 +1558,21 @@ def train_neon_stage2_epochs(
                 best_val_fit=best_val,
                 next_epoch=int(epoch) + 1,
             )
+
+    if checkpoint_path is not None and best_epoch < 0 and history:
+        # If the retention gate rejects every epoch, still leave an auditable
+        # checkpoint rather than making the run unusable. This is a loud
+        # fallback: metadata and history show that no epoch satisfied the gate.
+        fallback_row = history[-1]
+        best_epoch = int(fallback_row.get("epoch", total_epochs - 1))
+        best_val = float(fallback_row.get("val_fit", math.inf))
+        save_metadata = dict(checkpoint_metadata or {})
+        save_metadata["best_epoch"] = int(best_epoch)
+        save_metadata["val_metrics"] = {"val_fit": float(best_val)}
+        save_metadata["selection_min_retention"] = float(selection_min_retention)
+        save_metadata["selection_fallback_all_ineligible"] = True
+        save_metadata["n_ineligible_epochs"] = int(n_ineligible_epochs)
+        save_neon_stage2_checkpoint(checkpoint_path, module, metadata=save_metadata)
 
     if progress_reporter is not None:
         progress_reporter.training_end(

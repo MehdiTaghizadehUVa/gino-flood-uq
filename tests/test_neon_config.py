@@ -57,11 +57,14 @@ def test_default_config_matches_plan_defaults():
     assert cfg.prior_scale == "auto_0p10_base_rmse"
     assert cfg.alpha is None
     assert cfg.branch_type == "projected"
-    assert cfg.train_hidden_channels == 32
-    assert cfg.prior_hidden_channels == 5
+    assert cfg.train_hidden_channels == 16
+    assert cfg.prior_hidden_channels == 16
     assert cfg.branch_layers == 2
     assert cfg.branch_activation == "gelu"
     assert cfg.concat_index is True
+    assert cfg.prior_rff_dim == 32
+    assert cfg.prior_rff_lengthscale == pytest.approx(0.25)
+    assert cfg.prior_rff_include_lead is True
     assert cfg.family_batch_size == 1
     assert cfg.effective_batch_size == 8
     assert cfg.shuffle_families is True
@@ -79,6 +82,9 @@ def test_default_config_matches_plan_defaults():
     assert cfg.bootstrap_min_weight == pytest.approx(0.05)
     assert cfg.bootstrap_max_weight == pytest.approx(5.0)
     assert cfg.bootstrap_seed == 0
+    assert cfg.member_bootstrap_enabled is True
+    assert cfg.member_bootstrap_temperature == pytest.approx(1.0)
+    assert cfg.member_bootstrap_seed == 1
     assert cfg.cancellation_diagnostics_enabled is True
     assert cfg.cancellation_warn_cosine_below == pytest.approx(-0.90)
     assert cfg.cancellation_warn_cancellation_above == pytest.approx(0.80)
@@ -90,6 +96,9 @@ def test_default_config_matches_plan_defaults():
     assert cfg.learning_rate == pytest.approx(1.0e-4)
     assert cfg.weight_decay == pytest.approx(1.0e-4)
     assert cfg.n_epochs == 30
+    assert cfg.selection_min_retention == pytest.approx(0.3)
+    assert cfg.calibration_families == 4
+    assert cfg.calibration_m == 64
 
 
 # ---------------------------------------------------------------------------
@@ -117,6 +126,9 @@ def _plan_block():
         "branch_layers": 2,
         "branch_activation": "gelu",
         "concat_index": True,
+        "prior_rff_dim": 32,
+        "prior_rff_lengthscale": 0.25,
+        "prior_rff_include_lead": True,
         "family_batch_size": 1,
         "effective_batch_size": 8,
         "shuffle_families": True,
@@ -136,6 +148,11 @@ def _plan_block():
             "max_weight": 5.0,
             "seed": 0,
         },
+        "member_bootstrap": {
+            "enabled": True,
+            "temperature": 1.0,
+            "seed": 1,
+        },
         "cancellation_diagnostics": {
             "enabled": True,
             "warn_cosine_below": -0.90,
@@ -149,6 +166,9 @@ def _plan_block():
         "learning_rate": 1.0e-4,
         "weight_decay": 1.0e-4,
         "n_epochs": 30,
+        "selection_min_retention": 0.3,
+        "calibration_families": 4,
+        "calibration_m": 64,
     }
 
 
@@ -202,6 +222,25 @@ def test_load_parses_nested_bootstrap_and_cancellation_blocks():
     assert cfg.bootstrap_temperature == pytest.approx(0.25)
     assert cfg.bootstrap_seed == 99
     assert cfg.cancellation_warn_cancellation_above == pytest.approx(0.7)
+
+
+def test_load_parses_nested_member_bootstrap_block():
+    block = _plan_block()
+    block["member_bootstrap"]["temperature"] = 0.25
+    block["member_bootstrap"]["seed"] = 17
+    cfg = load_neon_config(block)
+    assert cfg.member_bootstrap_enabled is True
+    assert cfg.member_bootstrap_temperature == pytest.approx(0.25)
+    assert cfg.member_bootstrap_seed == 17
+
+
+def test_load_film_branch_defaults_rff_off_for_backward_compatibility():
+    block = _plan_block()
+    block["branch_type"] = "film"
+    block.pop("prior_rff_dim")
+    cfg = load_neon_config(block)
+    assert cfg.branch_type == "film"
+    assert cfg.prior_rff_dim == 0
 
 
 def test_load_parses_minibatch_and_sampling_controls():
@@ -298,6 +337,17 @@ def test_validate_rejects_negative_lambdas():
         NEONStage2Config(lambda_rpf=-1.0).validate()
 
 
+def test_validate_rejects_invalid_prior_rff_and_selection_settings():
+    with pytest.raises(NEONConfigError, match="prior_rff_dim"):
+        NEONStage2Config(prior_rff_dim=31).validate()
+    with pytest.raises(NEONConfigError, match="prior_rff_lengthscale"):
+        NEONStage2Config(prior_rff_lengthscale=0.0).validate()
+    with pytest.raises(NEONConfigError, match="selection_min_retention"):
+        NEONStage2Config(selection_min_retention=1.5).validate()
+    with pytest.raises(NEONConfigError, match="calibration_m"):
+        NEONStage2Config(calibration_m=1).validate()
+
+
 def test_validate_rejects_nonpositive_learning_rate_and_epochs():
     with pytest.raises(NEONConfigError, match="learning_rate"):
         NEONStage2Config(learning_rate=0.0).validate()
@@ -351,6 +401,19 @@ def test_to_loss_weights_dict_maps_lambdas():
     assert lw == {"rpf": 1.0, "smooth": 2.0, "time": 3.0, "pos": 4.0, "mag": 5.0}
 
 
+def test_to_member_bootstrap_config_dict_maps_nested_block():
+    cfg = NEONStage2Config(
+        member_bootstrap_enabled=False,
+        member_bootstrap_temperature=0.3,
+        member_bootstrap_seed=22,
+    )
+    assert cfg.to_member_bootstrap_config_dict() == {
+        "enabled": False,
+        "temperature": 0.3,
+        "seed": 22,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Shipped default YAML parses and validates
 # ---------------------------------------------------------------------------
@@ -371,3 +434,25 @@ def test_shipped_default_yaml_parses_and_validates():
     assert cfg.alpha is None
     assert cfg.uses_auto_prior_scale is True
     assert cfg.prior_scale_fraction == pytest.approx(0.10)
+    assert cfg.branch_type == "projected"
+    assert cfg.train_hidden_channels == 16
+    assert cfg.prior_hidden_channels == 16
+    assert cfg.bootstrap_enabled is True
+    assert cfg.bootstrap_distribution == "tempered_exponential"
+    assert cfg.bootstrap_temperature == pytest.approx(0.5)
+    assert cfg.bootstrap_normalize == "per_epistemic_batch"
+    assert cfg.bootstrap_min_weight == pytest.approx(0.05)
+    assert cfg.bootstrap_max_weight == pytest.approx(5.0)
+    assert cfg.bootstrap_seed == 0
+    assert cfg.member_bootstrap_enabled is True
+    assert cfg.member_bootstrap_temperature == pytest.approx(1.0)
+    assert cfg.member_bootstrap_seed == 1
+    assert cfg.prior_rff_dim == 32
+    assert cfg.prior_rff_lengthscale == pytest.approx(0.25)
+    assert cfg.prior_rff_include_lead is True
+    assert cfg.selection_min_retention == pytest.approx(0.3)
+    assert cfg.calibration_families == 4
+    assert cfg.calibration_m == 64
+    assert cfg.cancellation_diagnostics_enabled is True
+    assert cfg.cancellation_warn_cosine_below == pytest.approx(-0.90)
+    assert cfg.cancellation_warn_cancellation_above == pytest.approx(0.80)

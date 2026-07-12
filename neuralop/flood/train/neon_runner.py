@@ -375,20 +375,42 @@ def run_neon_stage2_training(
         )
 
     if resume_payload is None and calibrate_prior and config.uses_auto_prior_scale:
+        calibration_m = max(64, int(getattr(config, "calibration_m", 64)), int(config.m_train))
         z_e = sample_epistemic_indices(
-            int(config.m_train), int(config.d_e),
+            calibration_m, int(config.d_e),
             device=probe.features.device, dtype=probe.features.dtype, generator=generator,
         )
-        rmse = base_rmse_from_reference(
-            probe.base_prediction,
-            train_families[0].reference.unsqueeze(0).to(
-                device=probe.features.device, dtype=probe.features.dtype
-            ),
+        n_calib = min(
+            max(1, int(getattr(config, "calibration_families", 4))),
+            len(train_families),
         )
-        alpha = calibrate_prior_scale(
-            module=module, features=probe.features, z_e=z_e,
-            base_rmse=rmse, target_fraction=float(config.prior_scale_fraction),
-        )
+        rmse_values: list[float] = []
+        alpha_values: list[float] = []
+        for cal_idx, family in enumerate(train_families[:n_calib]):
+            cal_probe = probe if cal_idx == 0 else collector(
+                family,
+                num_aleatory=max(2, int(config.k_train)),
+                generator=generator,
+                latent_bank_id=0,
+            )
+            rmse = base_rmse_from_reference(
+                cal_probe.base_prediction,
+                family.reference.unsqueeze(0).to(
+                    device=cal_probe.features.device, dtype=cal_probe.features.dtype
+                ),
+            )
+            rmse_values.append(float(rmse))
+            alpha_values.append(
+                calibrate_prior_scale(
+                    module=module,
+                    features=cal_probe.features,
+                    z_e=z_e.to(device=cal_probe.features.device, dtype=cal_probe.features.dtype),
+                    node_coords=family.geometry,
+                    base_rmse=rmse,
+                    target_fraction=float(config.prior_scale_fraction),
+                )
+            )
+        alpha = float(sum(alpha_values) / max(len(alpha_values), 1))
         module.set_prior_scale(alpha)
 
     optimizer = build_neon_stage2_optimizer(
@@ -437,6 +459,17 @@ def run_neon_stage2_training(
             "cancellation_diagnostics": config.to_cancellation_diagnostics_config_dict()
             if hasattr(config, "to_cancellation_diagnostics_config_dict")
             else {},
+            "prior_rff_dim": int(getattr(config, "prior_rff_dim", 0)),
+            "prior_rff_lengthscale": float(getattr(config, "prior_rff_lengthscale", 0.25)),
+            "prior_rff_include_lead": bool(getattr(config, "prior_rff_include_lead", True)),
+            "selection_min_retention": float(getattr(config, "selection_min_retention", 0.0)),
+            "calibration_families": int(getattr(config, "calibration_families", 1)),
+            "calibration_m": int(getattr(config, "calibration_m", int(config.m_train))),
+            "auto_prior_calibration_rmse_mean": (
+                float(sum(rmse_values) / len(rmse_values))
+                if "rmse_values" in locals() and rmse_values
+                else None
+            ),
             "family_batch_size": int(getattr(config, "family_batch_size", 1)),
             "effective_batch_size": int(getattr(config, "effective_batch_size", 1)),
             "shuffle_families": bool(getattr(config, "shuffle_families", True)),
@@ -493,6 +526,7 @@ def run_neon_stage2_training(
         epistemic_resample=str(getattr(config, "epistemic_resample", "epoch")),
         latent_bank_count=int(getattr(config, "latent_bank_count", 1)),
         reference_member_subsample=getattr(config, "reference_member_subsample", None),
+        selection_min_retention=float(getattr(config, "selection_min_retention", 0.0)),
         progress_reporter=progress_reporter,
         latest_checkpoint_path=latest_checkpoint_path,
         start_epoch=0 if resume_payload is None else int(resume_payload["next_epoch"]),

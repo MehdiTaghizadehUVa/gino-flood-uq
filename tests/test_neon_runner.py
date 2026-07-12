@@ -104,8 +104,12 @@ def test_runner_trains_saves_and_records_metadata(tmp_path):
     assert meta["d_a"] == 8
     assert meta["d_e"] == 4
     assert meta["branch_type"] == "projected"
-    assert meta["prior_hidden_channels"] == 5
+    assert meta["prior_hidden_channels"] == 16
     assert meta["bootstrap"]["enabled"] is True
+    assert meta["member_bootstrap"]["enabled"] is True
+    assert meta["prior_rff_dim"] == 32
+    assert meta["selection_min_retention"] == 0.3
+    assert meta["calibration_m"] == 64
     assert meta["feature_cache_schema_version"] == "neon_feature_cache_v2"
     assert meta["progress_log_interval_effective_batches"] == 10
     assert "best_epoch" in meta and "val_metrics" in meta

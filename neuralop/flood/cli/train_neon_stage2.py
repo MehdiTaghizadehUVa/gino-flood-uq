@@ -52,6 +52,11 @@ def resolve_training_plan(config: NEONStage2Config) -> dict[str, Any]:
         "prior_scale_fraction": float(config.prior_scale_fraction),
         "alpha": None if config.alpha is None else float(config.alpha),
         "loss_weights": config.to_loss_weights_dict(),
+        "bootstrap": config.to_bootstrap_config_dict(),
+        "member_bootstrap": config.to_member_bootstrap_config_dict(),
+        "selection_min_retention": float(config.selection_min_retention),
+        "calibration_families": int(config.calibration_families),
+        "calibration_m": int(config.calibration_m),
         "optimizer": {
             "learning_rate": float(config.learning_rate),
             "weight_decay": float(config.weight_decay),
