@@ -22,6 +22,7 @@ from neuralop.flood.neon import (
     epistemic_variance_diagnostics,
     compute_stage2_loss,
     epistemic_bootstrap_weights,
+    epistemic_member_bootstrap_weights,
     freeze_stage1_model,
     per_epistemic_fair_crps,
     prior_psi_floor_diagnostic,
@@ -664,6 +665,7 @@ def neon_stage2_training_step(
     objective: str = "per_epistemic_fcrps",
     epistemic_chunk_size: int | None = None,
     sample_weights: torch.Tensor | None = None,
+    member_weights: torch.Tensor | None = None,
     zero_grad: bool = True,
     optimizer_step: bool = True,
     loss_scale: float = 1.0,
@@ -693,6 +695,7 @@ def neon_stage2_training_step(
             module=module,
             weights=weights,
             sample_weights=sample_weights,
+            member_weights=member_weights,
             edge_index=edge_index,
             edge_weights=edge_weights,
             zero_threshold=zero_threshold,
@@ -735,6 +738,9 @@ def neon_stage2_training_step(
             weight_chunk = None
             if sample_weights is not None:
                 weight_chunk = sample_weights[:, start : start + chunk]
+            member_weight_chunk = None
+            if member_weights is not None:
+                member_weight_chunk = member_weights[:, start : start + chunk, :]
             scale = float(z_chunk.shape[0]) / float(total_m)
             out = module(base_prediction, features, z_chunk, node_coords=node_coords)
             losses_c = compute_stage2_loss(
@@ -745,6 +751,7 @@ def neon_stage2_training_step(
                 module=module,
                 weights=weights,
                 sample_weights=weight_chunk,
+                member_weights=member_weight_chunk,
                 edge_index=edge_index,
                 edge_weights=edge_weights,
                 zero_threshold=zero_threshold,
@@ -1028,20 +1035,20 @@ def _maybe_subsample_reference_members(
     *,
     max_members: Optional[int],
     generator: Optional[torch.Generator],
-) -> torch.Tensor:
+) -> tuple[torch.Tensor, torch.Tensor | None]:
     """Randomly subsample HEC-RAS reference members along R for stochastic training."""
 
     if max_members is None:
-        return reference
+        return reference, None
     n_keep = int(max_members)
     if n_keep < 1:
         raise ValueError(f"reference_member_subsample must be >= 1, got {max_members}.")
     R = int(reference.shape[1])
     if n_keep >= R:
-        return reference
+        return reference, None
     perm = torch.randperm(R, generator=generator)
     idx = perm[:n_keep].to(device=reference.device)
-    return reference.index_select(1, idx)
+    return reference.index_select(1, idx), idx
 
 
 def _shuffled_family_indices(
@@ -1086,7 +1093,11 @@ def _evaluate_neon_validation(
     objective: str = "per_epistemic_fcrps",
     epistemic_chunk_size: int | None = None,
 ) -> tuple[float, dict[str, float]]:
-    """Mean configured Stage-2 fit score and cancellation diagnostics (no gradients)."""
+    """Mean validation fit score and diagnostics (no gradients).
+
+    Validation is intentionally unweighted by family/member bootstrap weights:
+    it measures fit to the actual empirical reference law used for selection.
+    """
     module.eval()
     total = 0.0
     count = 0
@@ -1238,6 +1249,7 @@ def train_neon_stage2_epochs(
     epistemic_chunk_size: Optional[int] = None,
     val_seed: Optional[int] = None,
     bootstrap_config: Optional[Mapping[str, Any]] = None,
+    member_bootstrap_config: Optional[Mapping[str, Any]] = None,
     cancellation_config: Optional[Mapping[str, Any]] = None,
     family_batch_size: int = 1,
     effective_batch_size: int = 1,
@@ -1381,11 +1393,23 @@ def train_neon_stage2_epochs(
                 reference = _collate_references(micro_families).to(
                     device=batch.features.device, dtype=batch.features.dtype
                 )
-                reference = _maybe_subsample_reference_members(
+                reference, reference_member_indices = _maybe_subsample_reference_members(
                     reference,
                     max_members=reference_member_subsample,
                     generator=generator,
                 )
+                node_coords = _collate_optional_geometry(micro_families)
+                member_weights = None
+                member_boot = dict(member_bootstrap_config or {})
+                if bool(member_boot.get("enabled", False)) and objective == "per_epistemic_fcrps":
+                    member_weights = epistemic_member_bootstrap_weights(
+                        [family.family_id for family in micro_families],
+                        z_e,
+                        int(reference.shape[1]),
+                        member_indices=reference_member_indices,
+                        seed=int(member_boot.get("seed", 1)),
+                        temperature=float(member_boot.get("temperature", 1.0)),
+                    )
                 losses = neon_stage2_training_step(
                     module=module,
                     optimizer=optimizer,
@@ -1394,6 +1418,7 @@ def train_neon_stage2_epochs(
                     reference=reference,
                     z_e=z_e,
                     weights=_collate_optional_score_weights(micro_families),
+                    node_coords=node_coords,
                     edge_index=micro_families[0].edge_index,
                     edge_weights=micro_families[0].edge_weights,
                     zero_threshold=zero_threshold,
@@ -1402,6 +1427,7 @@ def train_neon_stage2_epochs(
                     objective=objective,
                     epistemic_chunk_size=epistemic_chunk_size,
                     sample_weights=sample_weights,
+                    member_weights=member_weights,
                     zero_grad=False,
                     optimizer_step=False,
                     loss_scale=float(len(micro_indices)) / float(len(effective_indices)),

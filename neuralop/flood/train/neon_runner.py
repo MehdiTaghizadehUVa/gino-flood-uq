@@ -431,6 +431,9 @@ def run_neon_stage2_training(
             "bootstrap": config.to_bootstrap_config_dict()
             if hasattr(config, "to_bootstrap_config_dict")
             else {},
+            "member_bootstrap": config.to_member_bootstrap_config_dict()
+            if hasattr(config, "to_member_bootstrap_config_dict")
+            else {},
             "cancellation_diagnostics": config.to_cancellation_diagnostics_config_dict()
             if hasattr(config, "to_cancellation_diagnostics_config_dict")
             else {},
@@ -477,6 +480,9 @@ def run_neon_stage2_training(
         val_seed=val_seed,
         bootstrap_config=config.to_bootstrap_config_dict()
         if hasattr(config, "to_bootstrap_config_dict")
+        else None,
+        member_bootstrap_config=config.to_member_bootstrap_config_dict()
+        if hasattr(config, "to_member_bootstrap_config_dict")
         else None,
         cancellation_config=config.to_cancellation_diagnostics_config_dict()
         if hasattr(config, "to_cancellation_diagnostics_config_dict")

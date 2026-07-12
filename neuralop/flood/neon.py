@@ -756,6 +756,7 @@ def per_epistemic_fair_crps(
     *,
     weights: torch.Tensor | None = None,
     sample_weights: torch.Tensor | None = None,
+    member_weights: torch.Tensor | None = None,
     include_reference_term: bool = False,
     reduction: str = "mean",
     chunk_size: int | None = 65536,
@@ -776,6 +777,13 @@ def per_epistemic_fair_crps(
         applied after per-location CRPS aggregation; mesh/time weights keep
         their separate meaning. The mean reduction uses ``mean(score * weight)``
         so pre-normalized bootstrap weights keep their intended SGD weighting.
+    member_weights
+        Optional Bayesian-bootstrap weights over reference members with shape
+        ``[B, M, R]``. These replace the uniform reference average in
+        ``E|X-Y|`` separately for each epistemic particle. The forecast
+        self-distance and optional reference self-distance term are unchanged;
+        the latter is logging-only and constant with respect to Stage-2
+        parameters for a fixed batch.
     include_reference_term
         If ``True``, subtract the HEC-RAS reference self-distance term for a
         full distribution-to-distribution diagnostic.  This term is constant
@@ -800,6 +808,14 @@ def per_epistemic_fair_crps(
         raise ValueError("per_epistemic_fair_crps requires K >= 2 aleatory samples.")
     if R < 1:
         raise ValueError("reference ensemble must have at least one member.")
+    if member_weights is not None:
+        member_weights = member_weights.to(device=prediction.device, dtype=prediction.dtype)
+        if member_weights.shape != (B, M, R):
+            raise ValueError(
+                f"member_weights must have shape [B, M, R] = {(B, M, R)}, "
+                f"got {tuple(member_weights.shape)}."
+            )
+        member_weights = member_weights / member_weights.sum(dim=-1, keepdim=True).clamp_min(1.0e-12)
 
     flat_pred = prediction.reshape(B, M, K, T * Nv * C)
     flat_ref = reference.reshape(B, R, T * Nv * C)
@@ -837,7 +853,10 @@ def per_epistemic_fair_crps(
         term1 = prediction.new_zeros((B, M, q))
         for k_idx in range(K):
             diff = (pred_chunk[:, :, k_idx, :].unsqueeze(2) - ref_chunk.unsqueeze(1)).abs()
-            term1 = term1 + diff.mean(dim=2)
+            if member_weights is None:
+                term1 = term1 + diff.mean(dim=2)
+            else:
+                term1 = term1 + (diff * member_weights.unsqueeze(-1)).sum(dim=2)
         term1 = term1 / float(K)
 
         # Fair forecast self-distance: 1/(2K(K-1)) sum_{k != k'} |x_k-x_k'|.
@@ -914,6 +933,7 @@ def stage2_fit_score(
     *,
     weights: torch.Tensor | None = None,
     sample_weights: torch.Tensor | None = None,
+    member_weights: torch.Tensor | None = None,
     objective: str = "per_epistemic_fcrps",
     chunk_size: int | None = 65536,
 ) -> torch.Tensor:
@@ -932,12 +952,15 @@ def stage2_fit_score(
             reference,
             weights=weights,
             sample_weights=sample_weights,
+            member_weights=member_weights,
             reduction="mean",
             chunk_size=chunk_size,
         )
     if objective == "pooled_fcrps":
         if sample_weights is not None:
             raise ValueError("sample_weights are only supported for per_epistemic_fcrps.")
+        if member_weights is not None:
+            raise ValueError("member_weights are only supported for per_epistemic_fcrps.")
         return pooled_fair_crps(
             prediction,
             reference,
@@ -946,6 +969,8 @@ def stage2_fit_score(
             chunk_size=chunk_size,
         )
     if objective in {"l2_mean", "mean_l2"}:
+        if member_weights is not None:
+            raise ValueError("member_weights are only supported for per_epistemic_fcrps.")
         flat = flatten_nested_predictions(prediction)
         pred_mean = flat.mean(dim=1)
         ref_mean = reference.mean(dim=1)
@@ -1109,10 +1134,83 @@ def calibrate_prior_scale(
     return float(target_fraction) * float(base_rmse) / max(spread, eps)
 
 
-def _stable_family_seed(seed: int, family_id: str) -> int:
-    payload = f"{int(seed)}::{family_id}".encode("utf-8")
+def _stable_payload_seed(*parts: object) -> int:
+    payload = "::".join(str(part) for part in parts).encode("utf-8")
     digest = hashlib.sha256(payload).digest()
     return int.from_bytes(digest[:8], byteorder="little", signed=False) % (2**63 - 1)
+
+
+def _stable_family_seed(seed: int, family_id: str) -> int:
+    return _stable_payload_seed(int(seed), family_id)
+
+
+def epistemic_member_bootstrap_weights(
+    family_ids: Sequence[str],
+    z_e: torch.Tensor,
+    num_members: int,
+    *,
+    member_indices: torch.Tensor | Sequence[int] | None = None,
+    seed: int = 0,
+    temperature: float = 1.0,
+    eps: float = 1.0e-12,
+) -> torch.Tensor:
+    """Return index-dependent Bayesian-bootstrap reference weights ``[B, M, R]``.
+
+    For each ``(family, reference-member)`` pair, fixed Gaussian projections are
+    generated from a stable hash. Their squared dot products with ``z_e`` yield
+    exponential weights; normalizing over the ``R`` reference members gives a
+    deterministic Dirichlet(1,...,1)-style Bayesian bootstrap draw for each
+    epistemic particle. ``temperature=0`` recovers the uniform empirical law.
+    """
+
+    if z_e.ndim != 2:
+        raise ValueError(f"z_e must have shape [M, d_e], got {tuple(z_e.shape)}.")
+    family_ids = [str(fid) for fid in family_ids]
+    if len(family_ids) < 1:
+        raise ValueError("family_ids must be non-empty.")
+    R = int(num_members)
+    if R < 1:
+        raise ValueError(f"num_members must be >= 1, got {num_members}.")
+    tau = float(temperature)
+    if not (0.0 <= tau <= 1.0):
+        raise ValueError(f"temperature must be in [0, 1], got {temperature}.")
+    M, d_e = (int(v) for v in z_e.shape)
+    if d_e < 1:
+        raise ValueError("z_e must have nonzero epistemic dimension.")
+    if member_indices is None:
+        member_ids = list(range(R))
+    elif torch.is_tensor(member_indices):
+        member_ids = [int(v) for v in member_indices.detach().cpu().reshape(-1).tolist()]
+    else:
+        member_ids = [int(v) for v in member_indices]
+    if len(member_ids) != R:
+        raise ValueError(
+            f"member_indices length must equal num_members ({R}), got {len(member_ids)}."
+        )
+    if tau == 0.0:
+        return torch.full(
+            (len(family_ids), M, R),
+            1.0 / float(R),
+            device=z_e.device,
+            dtype=z_e.dtype,
+        )
+    scale = 1.0 / math.sqrt(float(d_e))
+    z_cpu = z_e.detach().to(device="cpu", dtype=torch.float32)
+    rows: list[torch.Tensor] = []
+    for family_id in family_ids:
+        member_rows: list[torch.Tensor] = []
+        for member_id in member_ids:
+            generator = torch.Generator(device="cpu")
+            generator.manual_seed(_stable_payload_seed(int(seed), "member", family_id, int(member_id)))
+            b = torch.randn(d_e, generator=generator, dtype=torch.float32) * scale
+            c = torch.randn(d_e, generator=generator, dtype=torch.float32) * scale
+            raw = 0.5 * ((z_cpu @ b).pow(2) + (z_cpu @ c).pow(2))
+            if tau != 1.0:
+                raw = (1.0 - tau) + tau * raw
+            member_rows.append(raw)
+        rows.append(torch.stack(member_rows, dim=-1))
+    weights = torch.stack(rows, dim=0).to(device=z_e.device, dtype=z_e.dtype)
+    return weights / weights.sum(dim=-1, keepdim=True).clamp_min(float(eps))
 
 
 def epistemic_bootstrap_weights(
@@ -1288,6 +1386,7 @@ def compute_stage2_loss(
     trainable_correction: torch.Tensor | None = None,
     weights: torch.Tensor | None = None,
     sample_weights: torch.Tensor | None = None,
+    member_weights: torch.Tensor | None = None,
     edge_index: torch.Tensor | None = None,
     edge_weights: torch.Tensor | None = None,
     zero_threshold: float | torch.Tensor = 0.0,
@@ -1302,6 +1401,7 @@ def compute_stage2_loss(
         reference,
         weights=weights,
         sample_weights=sample_weights,
+        member_weights=member_weights,
         objective=objective,
     )
     zero = torch.tensor(0.0, device=prediction.device, dtype=prediction.dtype)

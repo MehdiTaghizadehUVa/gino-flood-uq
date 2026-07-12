@@ -92,6 +92,9 @@ class NEONStage2Config:
     bootstrap_min_weight: float = 0.05
     bootstrap_max_weight: float = 5.0
     bootstrap_seed: int = 0
+    member_bootstrap_enabled: bool = True
+    member_bootstrap_temperature: float = 1.0
+    member_bootstrap_seed: int = 1
     cancellation_diagnostics_enabled: bool = True
     cancellation_warn_cosine_below: float = -0.90
     cancellation_warn_cancellation_above: float = 0.80
@@ -277,6 +280,13 @@ class NEONStage2Config:
             "seed": int(self.bootstrap_seed),
         }
 
+    def to_member_bootstrap_config_dict(self) -> dict[str, Any]:
+        return {
+            "enabled": bool(self.member_bootstrap_enabled),
+            "temperature": float(self.member_bootstrap_temperature),
+            "seed": int(self.member_bootstrap_seed),
+        }
+
     def to_cancellation_diagnostics_config_dict(self) -> dict[str, Any]:
         return {
             "enabled": bool(self.cancellation_diagnostics_enabled),
@@ -321,6 +331,12 @@ def load_neon_config(mapping: Mapping[str, Any]) -> NEONStage2Config:
         if raw_key == "bootstrap" and hasattr(value, "items"):
             for nested_key, nested_value in value.items():
                 mapped = f"bootstrap_{nested_key}"
+                if mapped in field_names:
+                    kwargs[mapped] = nested_value
+            continue
+        if raw_key == "member_bootstrap" and hasattr(value, "items"):
+            for nested_key, nested_value in value.items():
+                mapped = f"member_bootstrap_{nested_key}"
                 if mapped in field_names:
                     kwargs[mapped] = nested_value
             continue
