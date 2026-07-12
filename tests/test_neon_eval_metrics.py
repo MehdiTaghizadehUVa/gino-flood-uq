@@ -99,18 +99,23 @@ def test_inverse_transform_aligns_a_copy_without_mutating_normalizer():
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA device mismatch")
 def test_physical_evaluation_accepts_cpu_predictions_with_cuda_normalizers():
-    from neuralop.data.transforms.normalizers import UnitGaussianNormalizer
+    class CudaAffineNormalizer:
+        def __init__(self, mean, std):
+            self.mean = torch.tensor(float(mean), device="cuda")
+            self.std = torch.tensor(float(std), device="cuda")
+
+        def to(self, device):
+            self.mean = self.mean.to(device)
+            self.std = self.std.to(device)
+            return self
+
+        def inverse_transform(self, value):
+            return value * self.std + self.mean
 
     pred = torch.ones(1, 2, 2, 1, 3, 1)
     ref = torch.zeros(1, 3, 1, 3, 1)
-    target = UnitGaussianNormalizer(
-        mean=torch.tensor(1.0, device="cuda"),
-        std=torch.tensor(2.0, device="cuda"),
-    )
-    reference = UnitGaussianNormalizer(
-        mean=torch.tensor(1.0, device="cuda"),
-        std=torch.tensor(4.0, device="cuda"),
-    )
+    target = CudaAffineNormalizer(mean=1.0, std=2.0)
+    reference = CudaAffineNormalizer(mean=1.0, std=4.0)
 
     metrics = evaluate_neon_nested_physical(
         pred,
