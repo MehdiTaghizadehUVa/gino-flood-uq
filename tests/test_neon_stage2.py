@@ -38,6 +38,7 @@ scientific_calibration = _load_module(
 NEONEpistemicCorrection = neon.NEONEpistemicCorrection
 NEONStage2LossWeights = neon.NEONStage2LossWeights
 anova_corrected_epistemic_variance = neon.anova_corrected_epistemic_variance
+anova_corrected_epistemic_variance_independent = neon.anova_corrected_epistemic_variance_independent
 cancellation_diagnostics = neon.cancellation_diagnostics
 epistemic_variance_diagnostics = neon.epistemic_variance_diagnostics
 compute_stage2_loss = neon.compute_stage2_loss
@@ -392,7 +393,36 @@ def test_nested_variance_components_and_anova_correction():
     assert torch.allclose(components.aleatory, torch.tensor([[[[2.0]]]]))
     assert torch.allclose(components.epistemic, torch.tensor([[[[50.0]]]]))
     assert torch.allclose(components.total, torch.tensor([[[[52.0]]]]))
+    assert torch.allclose(corrected, torch.tensor([[[[50.0]]]]))
+
+
+def test_crossed_anova_recovers_epistemic_variance_with_shared_aleatory_effect():
+    epistemic = torch.tensor([0.0, 1.0, 4.0, 7.0])
+    shared_aleatory = torch.tensor([-3.0, -1.0, 2.0, 5.0, 8.0])
+    pred = (epistemic[:, None] + shared_aleatory[None, :]).view(1, 4, 5, 1, 1, 1)
+
+    expected = epistemic.var(unbiased=True)
+    corrected = anova_corrected_epistemic_variance(pred)
+
+    torch.testing.assert_close(corrected.squeeze(), expected)
+
+
+def test_independent_nested_estimator_retains_legacy_within_member_correction():
+    pred = torch.tensor(
+        [[[[[[0.0]]], [[[2.0]]]], [[[[10.0]]], [[[12.0]]]]]]
+    )
+
+    corrected = anova_corrected_epistemic_variance_independent(pred)
+
     assert torch.allclose(corrected, torch.tensor([[[[49.0]]]]))
+
+
+def test_tempered_exponential_bootstrap_is_even_in_epistemic_index():
+    z_e = torch.tensor([[0.2, -0.4, 0.7], [-1.0, 0.5, 0.3]])
+    positive = epistemic_bootstrap_weights(["a", "b", "c"], z_e, seed=17)
+    negative = epistemic_bootstrap_weights(["a", "b", "c"], -z_e, seed=17)
+
+    torch.testing.assert_close(positive, negative)
 
 
 def test_nested_variance_handles_single_epistemic_particle():

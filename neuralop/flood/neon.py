@@ -1071,8 +1071,15 @@ def nested_variance_components(prediction: torch.Tensor) -> NestedVarianceCompon
     return NestedVarianceComponents(aleatory=aleatory, epistemic=epistemic, total=total)
 
 
-def anova_corrected_epistemic_variance(prediction: torch.Tensor) -> torch.Tensor:
-    """ANOVA-style correction for finite-``K`` contamination of epistemic variance."""
+def anova_corrected_epistemic_variance_independent(
+    prediction: torch.Tensor,
+) -> torch.Tensor:
+    """Correct epistemic variance for independently sampled aleatory banks.
+
+    This estimator assumes each epistemic particle uses an independent nested
+    aleatory sample. It is not valid when all particles share the same ordered
+    aleatory latent bank (common random numbers).
+    """
 
     _, M, K, _, _, _ = _validate_nested_prediction(prediction)
     if M < 2 or K < 2:
@@ -1081,6 +1088,31 @@ def anova_corrected_epistemic_variance(prediction: torch.Tensor) -> torch.Tensor
     between = mean_k.var(dim=1, unbiased=True)
     within_ms = prediction.var(dim=2, unbiased=True).mean(dim=1)
     return torch.clamp(between - within_ms / float(K), min=0.0)
+
+
+def anova_corrected_epistemic_variance(prediction: torch.Tensor) -> torch.Tensor:
+    """Estimate epistemic variance under a crossed common-random-number design.
+
+    ``prediction`` must have shape ``[B, M, K, T, Nv, C]`` and use the same
+    ordered aleatory latent bank for every epistemic particle. The crossed
+    residual removes particle and shared-aleatory main effects, leaving the
+    interaction mean square as the finite-``K`` contamination correction.
+    Call :func:`anova_corrected_epistemic_variance_independent` instead when
+    aleatory banks are sampled independently across epistemic particles.
+    """
+
+    _, M, K, _, _, _ = _validate_nested_prediction(prediction)
+    if M < 2 or K < 2:
+        return torch.zeros_like(prediction[:, 0, 0])
+
+    mean_k = prediction.mean(dim=2)
+    between = mean_k.var(dim=1, unbiased=True)
+    particle_mean = prediction.mean(dim=2, keepdim=True)
+    aleatory_mean = prediction.mean(dim=1, keepdim=True)
+    grand_mean = prediction.mean(dim=(1, 2), keepdim=True)
+    interaction = prediction - particle_mean - aleatory_mean + grand_mean
+    interaction_ms = interaction.pow(2).sum(dim=(1, 2)) / float((M - 1) * (K - 1))
+    return torch.clamp(between - interaction_ms / float(K), min=0.0)
 
 
 def base_rmse_from_reference(
