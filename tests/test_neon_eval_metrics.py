@@ -33,6 +33,7 @@ neon_predictive_metrics = eval_neon.neon_predictive_metrics
 neon_epistemic_error_correlation = eval_neon.neon_epistemic_error_correlation
 evaluate_neon_nested = eval_neon.evaluate_neon_nested
 evaluate_neon_nested_physical = eval_neon.evaluate_neon_nested_physical
+inverse_transform_on_tensor_device = eval_neon.inverse_transform_on_tensor_device
 rmse_mean_shift_decomposition = eval_neon.rmse_mean_shift_decomposition
 NestedSamplingDesign = eval_neon.NestedSamplingDesign
 crossed_sampling_design = eval_neon.crossed_sampling_design
@@ -69,6 +70,59 @@ def test_physical_evaluation_inverse_transforms_before_metrics():
     assert metrics["ensemble_mean_rmse"] == pytest.approx(2.0)
     assert metrics["brier_wd_exceed_2m"] == pytest.approx(1.0)
     assert metrics["normalized_ensemble_mean_rmse"] == pytest.approx(1.0)
+
+
+def test_inverse_transform_aligns_a_copy_without_mutating_normalizer():
+    class DeviceBoundNormalizer:
+        def __init__(self):
+            self.aligned = False
+
+        def to(self, device):
+            self.aligned = True
+            self.device = torch.device(device)
+            return self
+
+        def inverse_transform(self, value):
+            if not self.aligned or value.device != self.device:
+                raise RuntimeError("normalizer and value devices are not aligned")
+            return value * 2.0 + 1.0
+
+    normalizer = DeviceBoundNormalizer()
+    value = torch.tensor([2.0])
+
+    physical = inverse_transform_on_tensor_device(normalizer, value)
+
+    torch.testing.assert_close(physical, torch.tensor([5.0]))
+    assert physical.device == value.device
+    assert normalizer.aligned is False
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA device mismatch")
+def test_physical_evaluation_accepts_cpu_predictions_with_cuda_normalizers():
+    from neuralop.data.transforms.normalizers import UnitGaussianNormalizer
+
+    pred = torch.ones(1, 2, 2, 1, 3, 1)
+    ref = torch.zeros(1, 3, 1, 3, 1)
+    target = UnitGaussianNormalizer(
+        mean=torch.tensor(1.0, device="cuda"),
+        std=torch.tensor(2.0, device="cuda"),
+    )
+    reference = UnitGaussianNormalizer(
+        mean=torch.tensor(1.0, device="cuda"),
+        std=torch.tensor(4.0, device="cuda"),
+    )
+
+    metrics = evaluate_neon_nested_physical(
+        pred,
+        ref,
+        target_normalizer=target,
+        reference_normalizer=reference,
+        thresholds=(2.0,),
+    )
+
+    assert metrics["ensemble_mean_rmse"] == pytest.approx(2.0, abs=1.0e-5)
+    assert target.mean.device.type == "cuda"
+    assert reference.mean.device.type == "cuda"
 
 
 def test_weighted_rmse_mean_shift_decomposition_is_exact():

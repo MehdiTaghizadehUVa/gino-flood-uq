@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import hashlib
 from dataclasses import dataclass
 
@@ -490,6 +491,26 @@ def evaluate_neon_nested(
     return out
 
 
+def inverse_transform_on_tensor_device(normalizer, value: torch.Tensor) -> torch.Tensor:
+    """Inverse-transform a tensor without mutating a shared normalizer.
+
+    Frozen rollout collection may keep normalizer statistics on the model GPU,
+    while nested predictions are assembled on CPU to bound evaluation memory.
+    A shallow copy lets project normalizers align their small state tensors with
+    the value without moving the shared instance needed by the next rollout.
+    """
+
+    if normalizer is None:
+        raise ValueError("inverse transformation requires a normalizer")
+    aligned = copy.copy(normalizer)
+    move = getattr(aligned, "to", None)
+    if callable(move):
+        moved = move(value.device)
+        if moved is not None:
+            aligned = moved
+    return aligned.inverse_transform(value)
+
+
 def evaluate_neon_nested_physical(
     prediction: torch.Tensor,
     reference: torch.Tensor,
@@ -513,8 +534,8 @@ def evaluate_neon_nested_physical(
             "physical NEON evaluation requires both target_normalizer and "
             "reference_normalizer"
         )
-    prediction_physical = target_normalizer.inverse_transform(prediction)
-    reference_physical = reference_normalizer.inverse_transform(reference)
+    prediction_physical = inverse_transform_on_tensor_device(target_normalizer, prediction)
+    reference_physical = inverse_transform_on_tensor_device(reference_normalizer, reference)
     physical = evaluate_neon_nested(
         prediction_physical,
         reference_physical,

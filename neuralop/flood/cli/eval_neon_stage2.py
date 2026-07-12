@@ -137,6 +137,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         crossed_sampling_design,
         evaluate_neon_nested_physical,
         exceedance_reliability,
+        inverse_transform_on_tensor_device,
         nested_pit_rank_histograms,
         rmse_mean_shift_decomposition,
         save_nested_forecast_artifact,
@@ -289,8 +290,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         log.info("  [mem] forwards assembled rss=%.1fG", _rss_gb())                       # [1, M, K, T, Nv, C]
         reference = fam.reference.unsqueeze(0).to(prediction.dtype) # [1, R, T, Nv, C]
         weights = fam.weights
-        prediction_physical = target_normalizer.inverse_transform(prediction)
-        reference_physical = reference_normalizer.inverse_transform(reference)
+        prediction_physical = inverse_transform_on_tensor_device(target_normalizer, prediction)
+        reference_physical = inverse_transform_on_tensor_device(reference_normalizer, reference)
         sampling_design = crossed_sampling_design(
             batch.aleatory_latents,
             m=int(args.m_eval),
@@ -312,7 +313,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         )
         if args.compare_base:
             base_normalized = batch.base_prediction.detach().to("cpu", torch.float32)
-            base_physical = target_normalizer.inverse_transform(base_normalized)
+            base_physical = inverse_transform_on_tensor_device(target_normalizer, base_normalized)
             decomposition = rmse_mean_shift_decomposition(
                 base_physical,
                 prediction_physical,
