@@ -7,20 +7,34 @@
 #SBATCH --mem=256G
 #SBATCH --time=12:00:00
 #SBATCH --output=/scratch/jrj6wm/GINO_Model/neon_stage2_full_train/repair_slurm_%j.out
+#SBATCH --error=/scratch/jrj6wm/GINO_Model/neon_stage2_full_train/repair_slurm_%j.err
 set -euo pipefail
 
 : "${NEON_LADDER_RUNG:?Set NEON_LADDER_RUNG to B0, B1a, B1b, B2, B3, B4, or B5}"
-REPO=/home/jrj6wm/GINO_Model/neuraloperator_clean_mcdropout
-CONTAINER=/share/resources/containers/apptainer/archive/pytorch-2.0.1.sif
+: "${NEON_EXPECTED_HEAD:?Set NEON_EXPECTED_HEAD to the preflight-validated commit}"
+REPO=${NEON_REPO:-/home/jrj6wm/GINO_Model/neuraloperator_neon_v4_integrated}
+CONTAINER=${NEON_CONTAINER:-/share/resources/containers/apptainer/archive/pytorch-2.0.1.sif}
 RUN_ROOT=/scratch/jrj6wm/GINO_Model/neon_stage2_full_train/repair_v4
 export NEON_N_TRAIN=${NEON_N_TRAIN:-450}
 export NEON_OUT_DIR=${NEON_OUT_DIR:-${RUN_ROOT}/${NEON_LADDER_RUNG,,}_n${NEON_N_TRAIN}}
 export NEON_CACHE_DIR=${NEON_CACHE_DIR:-${RUN_ROOT}/feature_cache_v3}
+export NEON_PREFLIGHT_PATH=${NEON_PREFLIGHT_PATH:-${NEON_OUT_DIR}/preflight.json}
 
 cd "${REPO}"
-test -z "$(git status --porcelain)" || { echo "Refusing to launch from a dirty tree" >&2; exit 2; }
+test "$(git rev-parse HEAD)" = "${NEON_EXPECTED_HEAD}" || {
+  echo "Repository HEAD changed after preflight" >&2
+  exit 2
+}
+test -z "$(git status --porcelain)" || {
+  echo "Refusing to launch from a dirty tree" >&2
+  exit 2
+}
+test -s "${NEON_PREFLIGHT_PATH}" || {
+  echo "Missing validated preflight manifest: ${NEON_PREFLIGHT_PATH}" >&2
+  exit 2
+}
 mkdir -p "${NEON_OUT_DIR}"
-git rev-parse HEAD > "${NEON_OUT_DIR}/git_head.txt"
+printf '%s\n' "${NEON_EXPECTED_HEAD}" > "${NEON_OUT_DIR}/git_head.txt"
 git status --porcelain > "${NEON_OUT_DIR}/git_status.txt"
 printf '%s\n' "${NEON_LADDER_RUNG}" > "${NEON_OUT_DIR}/ladder_rung.txt"
 

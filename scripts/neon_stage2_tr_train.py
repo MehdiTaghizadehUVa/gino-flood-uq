@@ -29,6 +29,7 @@ import logging
 import os
 import sys
 import time
+from dataclasses import asdict
 from pathlib import Path
 
 import torch
@@ -68,7 +69,9 @@ N_EPOCHS = int(os.environ.get("NEON_EPOCHS") or "30")
 VAL_SEED = 1234
 
 
-def _ladder_overrides(rung: str) -> dict:
+def _ladder_overrides(
+    rung: str, *, de_spread_multiplier: float | None = None
+) -> dict:
     rung = str(rung).strip().upper()
     if rung not in {"B0", "B1A", "B1B", "B2", "B3", "B4", "B5"}:
         raise ValueError(f"unsupported NEON ladder rung {rung!r}.")
@@ -98,7 +101,11 @@ def _ladder_overrides(rung: str) -> dict:
     if rung in {"B3", "B4", "B5"}:
         values.update(selection_metric="mixture_crps", selection_enforce_rmse=True)
     if rung == "B4":
-        multiplier = float(os.environ.get("NEON_DE_SPREAD_MULTIPLIER") or "1.0")
+        multiplier = float(
+            de_spread_multiplier
+            if de_spread_multiplier is not None
+            else (os.environ.get("NEON_DE_SPREAD_MULTIPLIER") or "1.0")
+        )
         if multiplier not in {0.5, 1.0, 2.0}:
             raise ValueError("B4 requires NEON_DE_SPREAD_MULTIPLIER in {0.5,1.0,2.0}.")
         values["prior_scale"] = {
@@ -118,6 +125,65 @@ def _ladder_overrides(rung: str) -> dict:
     return values
 
 
+def _resolved_ladder_config(
+    rung: str,
+    *,
+    prior_scale: str,
+    d_e: int,
+    n_epochs: int,
+    de_spread_multiplier: float | None = None,
+):
+    """Resolve and validate one attribution-ladder configuration."""
+    from neuralop.flood.neon_config import NEONStage2Config
+
+    config_kwargs = dict(
+        enabled=True,
+        feature_source="decoder_pre_projection",
+        dependency="za_dependent",
+        d_e=int(d_e),
+        m_train=4,
+        k_train=8,
+        m_eval=16,
+        k_eval=50,
+        prior_scale=prior_scale,
+        n_epochs=int(n_epochs),
+        lead_time_dim=0,
+    )
+    config_kwargs.update(
+        _ladder_overrides(
+            rung, de_spread_multiplier=de_spread_multiplier
+        )
+    )
+    return NEONStage2Config(**config_kwargs).validate()
+
+
+def _write_preflight_manifest(
+    path: Path,
+    *,
+    config,
+    rung: str,
+    n_train: int,
+    output_dir: Path,
+    cache_dir: Path,
+    subset_replicate: int,
+) -> None:
+    """Atomically persist the exact validated configuration before sbatch."""
+    payload = {
+        "schema_version": "neon_repair_preflight_v1",
+        "ladder_rung": str(rung).upper(),
+        "n_train": int(n_train),
+        "subset_replicate": int(subset_replicate),
+        "output_dir": str(output_dir),
+        "cache_dir": str(cache_dir),
+        "config": asdict(config),
+    }
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+    os.replace(tmp, path)
+
+
 def _sha256(path: str) -> str:
     h = hashlib.sha256()
     with open(path, "rb") as fh:
@@ -127,8 +193,29 @@ def _sha256(path: str) -> str:
 
 
 def main() -> int:
+    config = _resolved_ladder_config(
+        LADDER_RUNG,
+        prior_scale=PRIOR_SCALE,
+        d_e=D_E,
+        n_epochs=N_EPOCHS,
+    )
+    if os.environ.get("NEON_PLAN_ONLY") == "1":
+        preflight_path = Path(
+            os.environ.get("NEON_PREFLIGHT_PATH") or OUT_DIR / "preflight.json"
+        )
+        _write_preflight_manifest(
+            preflight_path,
+            config=config,
+            rung=LADDER_RUNG,
+            n_train=N_TRAIN,
+            output_dir=OUT_DIR,
+            cache_dir=CACHE_DIR,
+            subset_replicate=SUBSET_REPLICATE,
+        )
+        print(preflight_path)
+        return 0
+
     from neuralop.flood.cli.train_neon_stage2 import _load_frozen_stage1
-    from neuralop.flood.neon_config import NEONStage2Config
     from neuralop.flood.train.neon_families import build_families_from_config
     from neuralop.flood.train.neon_runner import run_neon_stage2_training
     from neuralop.flood.utils.runtime_core import (
@@ -184,24 +271,6 @@ def main() -> int:
 
     latent_dim = int(bundle.fgn_noise_dim)
     n_history = int(bundle.n_history)
-
-    config_kwargs = dict(
-        enabled=True,
-        feature_source="decoder_pre_projection",
-        dependency="za_dependent",
-        d_e=D_E,
-        m_train=4,
-        k_train=8,
-        m_eval=16,
-        k_eval=50,
-        prior_scale=PRIOR_SCALE,
-        n_epochs=N_EPOCHS,
-        lead_time_dim=0,
-    )
-    config_kwargs.update(_ladder_overrides(LADDER_RUNG))
-    if "prior_scale" not in config_kwargs:
-        config_kwargs["prior_scale"] = PRIOR_SCALE
-    config = NEONStage2Config(**config_kwargs).validate()
 
     normalizer_fingerprint = {
         "path": str(normalizer_path),
