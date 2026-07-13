@@ -11,7 +11,12 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 def _ensure_pkg(name: str):
-    sys.modules.setdefault(name, types.ModuleType(name))
+    package = sys.modules.setdefault(name, types.ModuleType(name))
+    package_path = str(REPO_ROOT / name.replace(".", "/"))
+    existing_paths = list(getattr(package, "__path__", []))
+    if package_path not in existing_paths:
+        existing_paths.append(package_path)
+    package.__path__ = existing_paths
 
 
 def _load_module(name: str, rel_path: str, pkgs):
