@@ -724,6 +724,15 @@ def test_validation_selection_metrics_are_inverse_transformed_to_physical_space(
     assert physical["base_rmse_physical"] == pytest.approx(
         2.0 * normalized["base_rmse_physical"], rel=1e-5
     )
+    assert physical["base_fair_crps_physical"] == pytest.approx(
+        2.0 * normalized["base_fair_crps_physical"], rel=1e-5
+    )
+    assert physical["deterministic_head_fair_crps_physical"] == pytest.approx(
+        2.0 * normalized["deterministic_head_fair_crps_physical"], rel=1e-5
+    )
+    assert physical["deterministic_head_rmse_physical"] == pytest.approx(
+        2.0 * normalized["deterministic_head_rmse_physical"], rel=1e-5
+    )
 
 
 def test_validation_runs_without_grad_and_leaves_module_in_train_mode_between_epochs():

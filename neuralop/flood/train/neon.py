@@ -1250,6 +1250,7 @@ def _evaluate_neon_validation(
             mbar_train_chunks: list[torch.Tensor] = []
             mbar_prior_chunks: list[torch.Tensor] = []
             prediction_chunks: list[torch.Tensor] = []
+            deterministic_prediction: torch.Tensor | None = None
             for start in range(0, total_m, chunk):
                 z_chunk = z_e[start : start + chunk]
                 scale = float(z_chunk.shape[0]) / float(total_m)
@@ -1268,6 +1269,11 @@ def _evaluate_neon_validation(
                 )
                 fit_val += float(fit.item()) * scale
                 prediction_chunks.append(out.prediction)
+                if deterministic_prediction is None:
+                    deterministic_prediction = (
+                        batch.base_prediction.unsqueeze(1)
+                        + out.deterministic_correction
+                    )[:, 0]
                 diag_c = cancellation_diagnostics(
                     trainable_correction=out.trainable_correction,
                     prior_correction=out.prior_correction,
@@ -1287,6 +1293,8 @@ def _evaluate_neon_validation(
                 nested_prediction.shape[1] * nested_prediction.shape[2],
                 *nested_prediction.shape[3:],
             )
+            if deterministic_prediction is None:
+                raise RuntimeError("validation produced no epistemic chunks.")
             reference_on_device = ref.to(
                 device=flat_prediction.device, dtype=flat_prediction.dtype
             )
@@ -1299,15 +1307,31 @@ def _evaluate_neon_validation(
                 reference_normalizer.to(flat_prediction.device)
                 flat_metric = target_normalizer.inverse_transform(flat_prediction)
                 base_metric = target_normalizer.inverse_transform(batch.base_prediction)
+                deterministic_metric = target_normalizer.inverse_transform(
+                    deterministic_prediction
+                )
                 reference_metric = reference_normalizer.inverse_transform(reference_on_device)
                 metric_scale = 1.0
             else:
                 flat_metric = flat_prediction
                 base_metric = batch.base_prediction
+                deterministic_metric = deterministic_prediction
                 reference_metric = reference_on_device
                 metric_scale = float(physical_scale)
             mixture_crps = fair_crps_members(
                 flat_metric,
+                reference_metric,
+                weights=family.weights,
+                reduction="mean",
+            )
+            base_crps = fair_crps_members(
+                base_metric,
+                reference_metric,
+                weights=family.weights,
+                reduction="mean",
+            )
+            deterministic_crps = fair_crps_members(
+                deterministic_metric,
                 reference_metric,
                 weights=family.weights,
                 reduction="mean",
@@ -1317,13 +1341,25 @@ def _evaluate_neon_validation(
                 reference_metric,
                 weights=family.weights,
             )
+            deterministic_rmse = base_rmse_from_reference(
+                deterministic_metric,
+                reference_metric,
+                weights=family.weights,
+            )
             stage2_rmse = base_rmse_from_reference(
                 flat_metric,
                 reference_metric,
                 weights=family.weights,
             )
             diag_val["mixture_fair_crps_physical"] = float(mixture_crps.item()) * metric_scale
+            diag_val["base_fair_crps_physical"] = float(base_crps.item()) * metric_scale
+            diag_val["deterministic_head_fair_crps_physical"] = (
+                float(deterministic_crps.item()) * metric_scale
+            )
             diag_val["base_rmse_physical"] = float(base_rmse) * metric_scale
+            diag_val["deterministic_head_rmse_physical"] = (
+                float(deterministic_rmse) * metric_scale
+            )
             diag_val["stage2_rmse_physical"] = float(stage2_rmse) * metric_scale
             diag_val["stage2_minus_base_rmse_physical"] = (
                 float(stage2_rmse) - float(base_rmse)
@@ -1332,7 +1368,19 @@ def _evaluate_neon_validation(
                 paired_rmse_rows.append(
                     {
                         "family_id": str(family.family_id),
+                        "base_fair_crps_physical": float(base_crps.item())
+                        * metric_scale,
+                        "deterministic_head_fair_crps_physical": float(
+                            deterministic_crps.item()
+                        )
+                        * metric_scale,
+                        "mixture_fair_crps_physical": float(mixture_crps.item())
+                        * metric_scale,
                         "base_rmse_physical": float(base_rmse) * metric_scale,
+                        "deterministic_head_rmse_physical": float(
+                            deterministic_rmse
+                        )
+                        * metric_scale,
                         "stage2_rmse_physical": float(stage2_rmse)
                         * metric_scale,
                         "stage2_minus_base_rmse_physical": (
@@ -1824,6 +1872,24 @@ def train_neon_stage2_epochs(
                 save_metadata["val_metrics"] = {
                     "val_fit": float(val_fit),
                     "mixture_fair_crps_physical": selection_score,
+                    "base_fair_crps_physical": float(
+                        row.get("val_base_fair_crps_physical", float("nan"))
+                    ),
+                    "deterministic_head_fair_crps_physical": float(
+                        row.get(
+                            "val_deterministic_head_fair_crps_physical",
+                            float("nan"),
+                        )
+                    ),
+                    "base_rmse_physical": float(
+                        row.get("val_base_rmse_physical", float("nan"))
+                    ),
+                    "deterministic_head_rmse_physical": float(
+                        row.get(
+                            "val_deterministic_head_rmse_physical",
+                            float("nan"),
+                        )
+                    ),
                     "stage2_minus_base_rmse_physical": rmse_delta,
                 }
                 save_metadata["selection_min_retention"] = retention_floor
