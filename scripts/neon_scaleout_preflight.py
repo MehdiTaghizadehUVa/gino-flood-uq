@@ -24,6 +24,10 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _absolute_no_resolve(path: Path) -> Path:
+    return Path(os.path.abspath(os.fspath(path)))
+
+
 def _atomic_json(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.name + ".tmp")
@@ -52,14 +56,14 @@ def prepare_scaleout_plan(
     n_epochs: int = 30,
 ) -> dict[str, Any]:
     """Validate G1 and materialize all 25 resolved B3 task manifests."""
-    g1_report = Path(g1_report).resolve()
+    g1_report = _absolute_no_resolve(g1_report)
     gate = json.loads(g1_report.read_text())
     if gate.get("schema_version") != "neon_g1_gate_v1" or gate.get("gate_passed") is not True:
         raise ValueError("scale-out requires a passing G1 (neon_g1_gate_v1) report.")
     if not expected_head:
         raise ValueError("expected_head must be non-empty.")
-    run_root = Path(run_root).resolve()
-    cache_dir = Path(cache_dir).resolve()
+    run_root = _absolute_no_resolve(run_root)
+    cache_dir = _absolute_no_resolve(cache_dir)
     train_script = _training_script_module()
     config = train_script._resolved_ladder_config(
         "B3", prior_scale=prior_scale, d_e=d_e, n_epochs=n_epochs

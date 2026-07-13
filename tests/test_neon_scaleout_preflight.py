@@ -45,3 +45,22 @@ def test_scaleout_plan_rejects_failed_g1(tmp_path):
             cache_dir=tmp_path / "cache",
             expected_head="abc123",
         )
+
+
+def test_scaleout_plan_preserves_container_visible_symlink_paths(tmp_path):
+    script = _load_script()
+    actual = tmp_path / "actual"
+    actual.mkdir()
+    logical = tmp_path / "logical"
+    logical.symlink_to(actual, target_is_directory=True)
+    g1 = logical / "g1.json"
+    g1.write_text(json.dumps({"schema_version": "neon_g1_gate_v1", "gate_passed": True}))
+    plan = script.prepare_scaleout_plan(
+        g1_report=g1,
+        run_root=logical / "runs",
+        cache_dir=logical / "cache",
+        expected_head="abc123",
+    )
+    assert "/logical/" in plan["g1_report"]
+    assert "/logical/" in plan["cache_dir"]
+    assert all("/logical/" in row["output_dir"] for row in plan["tasks"])

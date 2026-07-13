@@ -5,7 +5,7 @@ if [[ $# -ne 1 ]]; then
   echo "Usage: $0 /path/to/passing/g1_gate.json" >&2
   exit 2
 fi
-G1_REPORT=$(readlink -f "$1")
+G1_REPORT=$(realpath -s "$1")
 REPO=${NEON_REPO:-/home/jrj6wm/GINO_Model/neuraloperator_neon_v4_integrated}
 CONTAINER=${NEON_CONTAINER:-/share/resources/containers/apptainer/archive/pytorch-2.0.1.sif}
 RUN_ROOT=${NEON_SCALEOUT_ROOT:-/scratch/jrj6wm/GINO_Model/neon_stage2_full_train/repair_v4/scaleout_b3}
