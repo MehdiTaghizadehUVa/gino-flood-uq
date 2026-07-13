@@ -31,6 +31,15 @@ import sys
 from pathlib import Path
 from typing import Any, Optional, Sequence
 
+from neuralop.flood.eval.neon_shards import (
+    completed_evaluation_shard,
+    evaluation_shard_path,
+    merge_evaluation_shards,
+    scientific_eval_signature,
+    sha256_file,
+    write_evaluation_shard,
+)
+
 
 def _parse_args(argv: Optional[Sequence[str]]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -76,6 +85,18 @@ def _parse_args(argv: Optional[Sequence[str]]) -> argparse.Namespace:
             "against frozen Stage-1 model 0 under the same aleatory draws."
         ),
     )
+    parser.add_argument("--family-index", type=int, default=None,
+                        help="Evaluate one zero-based family index after deterministic sorting.")
+    parser.add_argument("--shard-dir", default=None,
+                        help="Directory for atomic per-family metric shards (default: OUTPUT/shards).")
+    parser.add_argument("--shard-only", action="store_true",
+                        help="Write per-family shards but do not publish the aggregate JSON.")
+    parser.add_argument("--resume", action="store_true",
+                        help="Skip a family only when its existing shard passes provenance validation.")
+    parser.add_argument("--merge-only", action="store_true",
+                        help="Merge completed shards without loading models or datasets.")
+    parser.add_argument("--expected-families", type=int, default=None,
+                        help="Required contiguous shard count; mandatory for --merge-only.")
     parser.add_argument("--dry-run", action="store_true",
                         help="Print the resolved evaluation plan without loading torch/data.")
     return parser.parse_args(argv)
@@ -104,6 +125,14 @@ def resolve_eval_plan(args: argparse.Namespace) -> dict[str, Any]:
         "k_chunk": int(args.k_chunk),
         "impact_members": int(args.impact_members),
         "compare_base": bool(args.compare_base),
+        "family_index": None if args.family_index is None else int(args.family_index),
+        "shard_dir": None if args.shard_dir is None else str(args.shard_dir),
+        "shard_only": bool(args.shard_only),
+        "resume": bool(args.resume),
+        "merge_only": bool(args.merge_only),
+        "expected_families": (
+            None if args.expected_families is None else int(args.expected_families)
+        ),
     }
 
 
@@ -121,9 +150,24 @@ def _rss_gb() -> float:
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = _parse_args(argv)
     plan = resolve_eval_plan(args)
+    out_dir = Path(args.output_dir)
+    shard_dir = Path(args.shard_dir) if args.shard_dir else out_dir / "shards"
     if args.dry_run:
         print(json.dumps(plan, indent=2, sort_keys=True))
         return 0
+    if args.merge_only:
+        if args.expected_families is None:
+            raise ValueError("--merge-only requires --expected-families")
+        out_dir.mkdir(parents=True, exist_ok=True)
+        merge_evaluation_shards(
+            shard_dir,
+            output_path=out_dir / "neon_eval_metrics.json",
+            expected_families=int(args.expected_families),
+        )
+        print("NEON EVAL MERGE OK")
+        return 0
+    if args.family_index is not None and int(args.family_index) < 0:
+        raise ValueError("--family-index must be nonnegative")
 
     # ---- Heavy path: lazy imports keep --dry-run torch-free ----
     import logging
@@ -159,8 +203,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     log = logging.getLogger("eval_neon_stage2")
-    out_dir = Path(args.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
+    plan["stage2_checkpoint_sha256"] = sha256_file(Path(args.stage2_checkpoint))
+    plan["stage1_bundle_sha256"] = sha256_file(Path(args.stage1_bundle))
     log.info("plan: %s", json.dumps(plan, sort_keys=True))
 
     saved_argv = list(sys.argv)
@@ -203,12 +248,24 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     families = sorted(families, key=lambda f: f.family_id)
     if args.max_families is not None:
         families = families[: int(args.max_families)]
+    total_family_count = len(families)
+    indexed_families = list(enumerate(families))
+    if args.family_index is not None:
+        requested = int(args.family_index)
+        if requested >= total_family_count:
+            raise IndexError(
+                f"family index {requested} is outside 0..{total_family_count - 1}"
+            )
+        indexed_families = [indexed_families[requested]]
     # Grouped-family tensors are held on CPU and Stage-2 predictions are
     # assembled there. Keep normalizer statistics colocated for mandatory
     # inverse transformation before every physical metric and artifact.
     target_normalizer.to("cpu")
     reference_normalizer.to("cpu")
-    log.info("evaluating %d families (%s split) | rss=%.1fG", len(families), args.families, _rss_gb())
+    log.info(
+        "evaluating %d/%d families (%s split) | rss=%.1fG",
+        len(indexed_families), total_family_count, args.families, _rss_gb(),
+    )
 
     module, ckpt_meta = load_neon_stage2_checkpoint(args.stage2_checkpoint, map_location="cpu")
     device = "cuda:0" if torch.cuda.is_available() else "cpu"
@@ -236,12 +293,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         # frozen ensembles rather than through resampling noise.
         collector = make_cached_feature_collector(collector, cache_dir=args.cache_dir)
 
-    per_family: list[dict[str, Any]] = []
-    pit_total: dict[str, Any] | None = None
-    reliability_sums: dict[str, list[dict[str, float]]] = {}
-    spread_corrs: list[float] = []
-    impact_rows: list[dict[str, float]] = []
-    z_gen = torch.Generator().manual_seed(int(args.seed) + 1)
     particle_metadata = ckpt_meta.get("dirichlet_particle_control")
     particle_control = (
         None
@@ -254,19 +305,35 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             f"m_eval={args.m_eval}, persisted={particle_control.num_particles}."
         )
 
-    for f_idx, fam in enumerate(families):
+    for family_index, fam in indexed_families:
+        shard_path = evaluation_shard_path(shard_dir, family_index)
+        if args.resume and completed_evaluation_shard(
+            shard_path,
+            plan=plan,
+            family_index=family_index,
+            family_id=fam.family_id,
+        ):
+            log.info("family %s already has a valid shard; skipping", fam.family_id)
+            continue
         batch = collector(fam, num_aleatory=int(args.k_eval))
         log.info("  [mem] features collected rss=%.1fG", _rss_gb())
+        # Recreate the original sorted-family RNG sequence so serial, resumed,
+        # and array execution use bit-identical epistemic indices.
+        z_gen = torch.Generator().manual_seed(int(args.seed) + 1)
+        sampled_z_e = None
+        for _ in range(family_index + 1):
+            sampled_z_e = sample_epistemic_indices(
+                int(args.m_eval), module.epistemic_dim,
+                device=batch.features.device, dtype=batch.features.dtype, generator=z_gen,
+            )
         z_e = (
             particle_control.eval_epistemic_indices(
                 device=batch.features.device, dtype=batch.features.dtype
             )
             if particle_control is not None
-            else sample_epistemic_indices(
-                int(args.m_eval), module.epistemic_dim,
-                device=batch.features.device, dtype=batch.features.dtype, generator=z_gen,
-            )
+            else sampled_z_e
         )
+        assert z_e is not None
         # Chunk both nested axes (epistemic M outer, aleatory K inner) so the
         # eval forward fits on a 40GB card at K_eval=50 and full horizon;
         # assemble the nested prediction on CPU.
@@ -335,7 +402,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     ),
                 }
             )
-            if f_idx < int(args.variance_maps):
+            if family_index < int(args.variance_maps):
                 decomposition_dir = out_dir / "rmse_decomposition"
                 decomposition_dir.mkdir(exist_ok=True)
                 np.savez_compressed(
@@ -345,39 +412,22 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     reference_mean_m=reference_physical[0].mean(dim=0).numpy(),
                 )
         log.info("  [mem] nested metrics rss=%.1fG", _rss_gb())
-        per_family.append(row)
 
         pit = nested_pit_rank_histograms(
             prediction_physical, reference_physical, seed=int(args.seed),
             min_ref_depth=float(args.pit_min_ref_depth),
         )
-        if pit_total is None:
-            pit_total = pit
-        else:
-            pit_total["pit_counts"] = (np.array(pit_total["pit_counts"]) + np.array(pit["pit_counts"])).tolist()
-            pit_total["rank_counts"] = (np.array(pit_total["rank_counts"]) + np.array(pit["rank_counts"])).tolist()
 
         log.info("  [mem] pit done rss=%.1fG", _rss_gb())
         rel = exceedance_reliability(
             prediction_physical, reference_physical, thresholds=tuple(args.thresholds)
         )
-        for key, bins in rel.items():
-            if key not in reliability_sums:
-                reliability_sums[key] = [
-                    {"bin_lo": b["bin_lo"], "bin_hi": b["bin_hi"], "n": 0.0,
-                     "sum_forecast_prob": 0.0, "sum_observed_freq": 0.0}
-                    for b in bins
-                ]
-            for acc, b in zip(reliability_sums[key], bins):
-                acc["n"] += b["n"]
-                acc["sum_forecast_prob"] += b["sum_forecast_prob"]
-                acc["sum_observed_freq"] += b["sum_observed_freq"]
 
         log.info("  [mem] reliability done rss=%.1fG", _rss_gb())
         spread = spread_error_diagnostics(prediction_physical, reference_physical)
-        spread_corrs.append(spread["spread_error_corr"])
         row["spread_error_corr"] = spread["spread_error_corr"]
 
+        impact_scalars = None
         if args.impact_metrics:
             from neuralop.flood.eval.impact_metrics import compute_flood_impact_crps_metrics
 
@@ -404,7 +454,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 k: float(np.nanmean(v)) for k, v in impact.items()
             }
             impact_scalars["family_id"] = fam.family_id
-            impact_rows.append(impact_scalars)
             log.info("  [mem] impact done rss=%.1fG", _rss_gb())
 
         if args.write_artifacts:
@@ -429,40 +478,40 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 },
             )
 
-        if f_idx < int(args.variance_maps):
+        if family_index < int(args.variance_maps):
             write_variance_maps(
                 prediction_physical, geometry_xy=prepared["geometry_raw_np"],
                 output_dir=out_dir / "variance_maps", label=fam.family_id,
             )
-        log.info("family %s done (%d/%d) rss=%.1fG", fam.family_id, f_idx + 1, len(families), _rss_gb())
+        write_evaluation_shard(
+            shard_dir,
+            plan=plan,
+            checkpoint_metadata=ckpt_meta,
+            family_index=family_index,
+            family_id=fam.family_id,
+            row=row,
+            pit_rank=pit,
+            reliability=rel,
+            impact_metrics=impact_scalars,
+        )
+        log.info(
+            "family %s done (index %d of %d) rss=%.1fG",
+            fam.family_id, family_index, total_family_count, _rss_gb(),
+        )
 
-    # ---- Aggregate ----
-    scalar_keys = [k for k, v in per_family[0].items() if isinstance(v, float)]
-    aggregate = {k: float(np.mean([row[k] for row in per_family])) for k in scalar_keys}
-    aggregate["spread_error_corr_mean"] = float(np.mean(spread_corrs))
-    reliability_curves = {}
-    for key, bins in reliability_sums.items():
-        reliability_curves[key] = [
-            {
-                "bin_lo": b["bin_lo"], "bin_hi": b["bin_hi"], "n": int(b["n"]),
-                "forecast_prob": (b["sum_forecast_prob"] / b["n"]) if b["n"] else None,
-                "observed_freq": (b["sum_observed_freq"] / b["n"]) if b["n"] else None,
-            }
-            for b in bins
-        ]
+    if args.shard_only:
+        print("NEON EVAL SHARD OK")
+        return 0
 
-    payload = {
-        "plan": plan,
-        "checkpoint_metadata": {k: v for k, v in ckpt_meta.items() if isinstance(v, (str, int, float, bool))},
-        "aggregate": aggregate,
-        "per_family": per_family,
-        "pit_rank": pit_total,
-        "reliability": reliability_curves,
-        "impact_metrics": impact_rows,
-    }
+    expected = (
+        total_family_count if args.expected_families is None else int(args.expected_families)
+    )
     metrics_path = out_dir / "neon_eval_metrics.json"
-    with metrics_path.open("w") as fh:
-        json.dump(payload, fh, indent=2)
+    merge_evaluation_shards(
+        shard_dir,
+        output_path=metrics_path,
+        expected_families=expected,
+    )
     log.info("wrote %s", metrics_path)
     print("NEON EVAL OK")
     return 0
