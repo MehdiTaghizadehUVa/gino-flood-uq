@@ -149,7 +149,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         load_neon_stage2_checkpoint,
         sample_epistemic_indices,
     )
-    from neuralop.flood.train.neon import neon_stage2_eval_forward
+    from neuralop.flood.train.neon import neon_stage2_eval_forward_chunked
     from neuralop.flood.train.neon_families import build_families_from_config
     from neuralop.flood.train.neon_runner import (
         make_cached_feature_collector,
@@ -267,26 +267,25 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 device=batch.features.device, dtype=batch.features.dtype, generator=z_gen,
             )
         )
-        # Chunk both nested axes (epistemic M outer, aleatory K inner) so the
-        # eval forward fits on a 40GB card at K_eval=50 and full horizon;
-        # assemble the nested prediction on CPU.
-        k_total = int(batch.features.shape[1])
-        k_chunk = max(1, min(int(args.k_chunk), k_total))
-        chunks = []
-        for m in range(int(args.m_eval)):
-            k_parts = []
-            for ks in range(0, k_total, k_chunk):
-                pred_mk = neon_stage2_eval_forward(
-                    module=module,
-                    base_prediction=batch.base_prediction[:, ks : ks + k_chunk],
-                    features=batch.features[:, ks : ks + k_chunk],
-                    z_e=z_e[m : m + 1],
-                    node_coords=fam.geometry,
-                    canonical_mean_features=batch.canonical_mean_features,
-                )
-                k_parts.append(pred_mk.detach().to("cpu", torch.float32))
-            chunks.append(torch.cat(k_parts, dim=2))
-        prediction = torch.cat(chunks, dim=1)
+        # The centered no-concat branch computes one coefficient field for all
+        # epistemic particles. Batch M there; retain the conservative M=1 path
+        # for legacy index-concatenated checkpoints whose MLP depends on z_e.
+        concat_index = bool(
+            getattr(getattr(module, "trainable_branch", None), "concat_index", True)
+        )
+        m_chunk = 1 if concat_index else int(z_e.shape[0])
+        prediction = neon_stage2_eval_forward_chunked(
+            module=module,
+            base_prediction=batch.base_prediction,
+            features=batch.features,
+            z_e=z_e,
+            k_chunk=int(args.k_chunk),
+            epistemic_chunk_size=m_chunk,
+            node_coords=fam.geometry,
+            canonical_mean_features=batch.canonical_mean_features,
+            output_device="cpu",
+            output_dtype=torch.float32,
+        )
         log.info("  [mem] forwards assembled rss=%.1fG", _rss_gb())                       # [1, M, K, T, Nv, C]
         reference = fam.reference.unsqueeze(0).to(prediction.dtype) # [1, R, T, Nv, C]
         weights = fam.weights

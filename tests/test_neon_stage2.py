@@ -52,6 +52,7 @@ scientific_calibration = _load_module(
 
 NEONEpistemicCorrection = neon.NEONEpistemicCorrection
 CenteredHermiteBasis = neon.CenteredHermiteBasis
+_ProjectedTrainableBranch = neon._ProjectedTrainableBranch
 PersistentDirichletParticleControl = neon.PersistentDirichletParticleControl
 NEONStage2LossWeights = neon.NEONStage2LossWeights
 anova_corrected_epistemic_variance = neon.anova_corrected_epistemic_variance
@@ -135,6 +136,79 @@ def test_film_branch_remains_available_as_ablation():
 
     assert head.branch_type == "film"
     assert out.prediction.shape == (1, 2, 2, 3, 4, 1)
+
+
+def test_projected_no_concat_mlp_runs_once_per_feature_row():
+    class RowCountingMLP(nn.Module):
+        def __init__(self, inner):
+            super().__init__()
+            self.inner = inner
+            self.rows = []
+
+        def forward(self, value):
+            self.rows.append(int(value.shape[0]))
+            return self.inner(value)
+
+    branch = _ProjectedTrainableBranch(
+        feature_channels=3,
+        out_channels=2,
+        epistemic_dim=4,
+        hidden_channels=5,
+        n_hidden_layers=2,
+        concat_index=False,
+        lead_time_dim=2,
+    )
+    counter = RowCountingMLP(branch.mlp)
+    branch.mlp = counter
+    features = torch.randn(2, 3, 4, 5, 3)
+    z_e = torch.randn(7, 4)
+
+    output = branch(features, z_e)
+
+    assert output.shape == (2, 7, 3, 4, 5, 2)
+    assert counter.rows == [2 * 3 * 4 * 5]
+
+
+def test_projected_no_concat_fast_path_matches_expanded_reference_and_gradients():
+    torch.manual_seed(12)
+    branch = _ProjectedTrainableBranch(
+        feature_channels=3,
+        out_channels=2,
+        epistemic_dim=4,
+        hidden_channels=5,
+        n_hidden_layers=2,
+        concat_index=False,
+        lead_time_dim=2,
+    )
+    features = torch.randn(2, 3, 4, 5, 3, requires_grad=True)
+    z_e = torch.randn(7, 4)
+
+    actual = branch(features, z_e)
+    actual.square().mean().backward()
+    actual_feature_grad = features.grad.detach().clone()
+    actual_parameter_grads = [
+        parameter.grad.detach().clone() for parameter in branch.parameters()
+    ]
+
+    branch.zero_grad(set_to_none=True)
+    reference_features = features.detach().clone().requires_grad_(True)
+    B, K, T, Nv, _ = reference_features.shape
+    M = int(z_e.shape[0])
+    with_lead = neon._append_projected_lead_features(
+        reference_features, branch.lead_time_dim
+    )
+    expanded = with_lead.unsqueeze(1).expand(B, M, K, T, Nv, -1)
+    coefficients = branch.mlp(expanded.reshape(-1, expanded.shape[-1])).reshape(
+        B, M, K, T, Nv, branch.out_channels, branch.epistemic_dim
+    )
+    z_dot = z_e.view(1, M, 1, 1, 1, 1, branch.epistemic_dim)
+    expected = (coefficients * z_dot).sum(dim=-1)
+    expected.square().mean().backward()
+
+    torch.testing.assert_close(actual, expected)
+    torch.testing.assert_close(actual_feature_grad, reference_features.grad)
+    for actual_grad, parameter in zip(actual_parameter_grads, branch.parameters()):
+        torch.testing.assert_close(actual_grad, parameter.grad)
 
 
 def test_projected_branch_dot_product_matches_constant_coefficients():
@@ -487,6 +561,52 @@ def test_tempered_exponential_bootstrap_is_even_in_epistemic_index():
     negative = epistemic_bootstrap_weights(["a", "b", "c"], -z_e, seed=17)
 
     torch.testing.assert_close(positive, negative)
+
+
+def test_vectorized_family_bootstrap_preserves_legacy_values():
+    z_e = torch.tensor([[0.2, -0.4, 0.7], [-1.0, 0.5, 0.3]])
+    family_ids = ["a", "b", "c"]
+
+    expected_raw = torch.tensor(
+        [
+            [1.188268423, 0.625235677],
+            [0.497331113, 2.032101393],
+            [0.576712489, 2.089077473],
+        ]
+    )
+    torch.testing.assert_close(
+        probit_exponential_raw_weights(family_ids, z_e, seed=17),
+        expected_raw,
+    )
+
+    expected = {
+        "tempered_exponential": torch.tensor(
+            [
+                [0.585560620, 0.657976329],
+                [0.522259653, 0.936270833],
+                [0.550073743, 0.671801090],
+            ]
+        ),
+        "exponential": torch.tensor(
+            [
+                [0.171121225, 0.315952659],
+                [0.044519272, 0.872541606],
+                [0.100147456, 0.343602240],
+            ]
+        ),
+        "bernoulli": torch.tensor([[2.0, 0.0], [0.0, 2.0], [0.0, 2.0]]),
+    }
+    for distribution, values in expected.items():
+        actual = epistemic_bootstrap_weights(
+            family_ids,
+            z_e,
+            seed=17,
+            distribution=distribution,
+            normalize="none",
+            min_weight=0.0,
+            max_weight=100.0,
+        )
+        torch.testing.assert_close(actual, values)
 
 
 def test_probit_exponential_bootstrap_is_not_even_in_epistemic_index():

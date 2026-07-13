@@ -101,6 +101,7 @@ def test_default_config_matches_plan_defaults():
     assert cfg.learning_rate == pytest.approx(1.0e-4)
     assert cfg.weight_decay == pytest.approx(1.0e-4)
     assert cfg.n_epochs == 30
+    assert cfg.validation_interval == 1
     assert cfg.selection_min_retention == pytest.approx(0.0)
     assert cfg.selection_rmse_margin_m == pytest.approx(0.001)
     assert cfg.selection_metric == "mixture_crps"
@@ -363,6 +364,8 @@ def test_validate_rejects_nonpositive_learning_rate_and_epochs():
         NEONStage2Config(learning_rate=0.0).validate()
     with pytest.raises(NEONConfigError, match="n_epochs"):
         NEONStage2Config(n_epochs=0).validate()
+    with pytest.raises(NEONConfigError, match="validation_interval"):
+        NEONStage2Config(validation_interval=0).validate()
 
 
 # ---------------------------------------------------------------------------
