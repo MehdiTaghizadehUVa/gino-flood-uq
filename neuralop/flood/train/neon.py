@@ -1395,6 +1395,18 @@ def _evaluate_neon_validation(
                     mbar_prior_scaled=_mbar_prior,
                 )
             )
+            # Corrections are represented in normalized target units even when
+            # forecast skill is evaluated after inverse transformation.  The
+            # standard-deviation diagnostics therefore need the affine target
+            # scale explicitly to remain comparable across normalizers.
+            diag_val["total_epistemic_std_physical"] = (
+                math.sqrt(max(diag_val["total_epistemic_variance"], 0.0))
+                * float(physical_scale)
+            )
+            diag_val["prior_epistemic_std_physical"] = (
+                math.sqrt(max(diag_val["prior_epistemic_variance"], 0.0))
+                * float(physical_scale)
+            )
             diag_val.update(
                 prior_psi_floor_diagnostic(
                     module=module,

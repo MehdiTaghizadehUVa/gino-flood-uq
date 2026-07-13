@@ -716,6 +716,7 @@ def test_validation_selection_metrics_are_inverse_transformed_to_physical_space(
         generator=torch.Generator().manual_seed(7),
         target_normalizer=AffineNormalizer(),
         reference_normalizer=AffineNormalizer(),
+        physical_scale=2.0,
     )
 
     assert physical["mixture_fair_crps_physical"] == pytest.approx(
@@ -732,6 +733,9 @@ def test_validation_selection_metrics_are_inverse_transformed_to_physical_space(
     )
     assert physical["deterministic_head_rmse_physical"] == pytest.approx(
         2.0 * normalized["deterministic_head_rmse_physical"], rel=1e-5
+    )
+    assert physical["total_epistemic_std_physical"] == pytest.approx(
+        2.0 * normalized["total_epistemic_std_physical"], rel=1e-5
     )
 
 

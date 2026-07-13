@@ -348,6 +348,53 @@ def test_target_normalizer_scale_converts_normalized_spread_to_meters():
     assert runner._normalizer_physical_scale(Normalizer()) == 2.5
 
 
+def test_runner_scales_epistemic_validation_std_for_non_de_prior_modes(tmp_path):
+    class Normalizer:
+        std = torch.tensor([2.5])
+
+        def to(self, device):
+            return self
+
+        def inverse_transform(self, value):
+            return 2.5 * value
+
+    config = NEONStage2Config(
+        enabled=True,
+        d_e=4,
+        m_train=2,
+        k_train=2,
+        m_eval=2,
+        k_eval=2,
+        n_epochs=1,
+        alpha=0.05,
+        prior_scale=0.05,
+    )
+    stage1 = _DummyStage1()
+
+    def load_stage1(_checkpoint):
+        return stage1
+
+    normalizer = Normalizer()
+    load_stage1.last_prepared = {
+        "normalizers": {"target": normalizer, "dynamic": normalizer}
+    }
+    result = run_neon_stage2_training(
+        config=config,
+        stage1_checkpoint="dummy_fgno.pt",
+        output_dir=tmp_path,
+        data_root="ignored",
+        load_stage1_fn=load_stage1,
+        build_families_fn=lambda root, cfg: ([_family("a", 0.0)], [_family("v", 0.2)]),
+        latent_dim=8,
+        calibrate_prior=False,
+    )
+    row = result.history[0]
+    assert abs(
+        row["val_total_epistemic_std_physical"]
+        - 2.5 * row["val_total_epistemic_variance"] ** 0.5
+    ) < 1.0e-7
+
+
 def test_disk_cache_collects_once_and_round_trips(tmp_path):
     # cache_dir mode: first call rolls the base collector and writes one file;
     # second call must load from disk (no recollection) and reproduce the

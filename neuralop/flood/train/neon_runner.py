@@ -450,11 +450,7 @@ def run_neon_stage2_training(
     prepared = getattr(load_stage1_fn, "last_prepared", {}) or {}
     target_normalizer = (prepared.get("normalizers") or {}).get("target")
     reference_normalizer = (prepared.get("normalizers") or {}).get("dynamic")
-    validation_physical_scale = (
-        _normalizer_physical_scale(target_normalizer)
-        if config.uses_de_spread_prior_scale
-        else 1.0
-    )
+    validation_physical_scale = _normalizer_physical_scale(target_normalizer)
     canonical_enabled = bool(getattr(config, "deterministic_head", False)) and str(
         getattr(config, "deterministic_head_feature", "")
     ).strip().lower() in {"canonical_aleatory_mean", "fixed_zero_latent"}
