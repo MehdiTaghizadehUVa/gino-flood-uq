@@ -227,11 +227,18 @@ def merge_evaluation_shards(
         dict(s["impact_metrics"]) for s in shards if s.get("impact_metrics") is not None
     ]
     merged_plan = dict(shards[0]["plan"])
-    for key in EXECUTION_ONLY_PLAN_KEYS:
-        if key in merged_plan:
-            merged_plan[key] = (
-                None if key in {"family_index", "shard_dir", "expected_families"} else False
-            )
+    # Preserve the recorded output/shard locations. Only clear controls that
+    # describe an individual array task; replacing every execution-only value
+    # with ``False`` previously corrupted ``output_dir`` provenance.
+    merged_plan.update(
+        {
+            "family_index": None,
+            "shard_only": False,
+            "resume": False,
+            "merge_only": False,
+            "expected_families": expected,
+        }
+    )
     payload = {
         "plan": merged_plan,
         "checkpoint_metadata": shards[0]["checkpoint_metadata"],

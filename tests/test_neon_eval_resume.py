@@ -135,6 +135,9 @@ def test_atomic_shards_merge_to_the_same_global_sufficient_statistics(tmp_path):
     assert payload["aggregate"]["rmse"] == pytest.approx(2.0)
     assert payload["aggregate"]["spread_error_corr"] == pytest.approx(0.3)
     assert payload["aggregate"]["spread_error_corr_mean"] == pytest.approx(0.3)
+    assert payload["plan"]["output_dir"] == str(tmp_path)
+    assert payload["plan"]["family_index"] is None
+    assert payload["plan"]["shard_only"] is False
     assert payload["pit_rank"]["pit_edges"] == [0.0, 0.5, 1.0]
     assert payload["pit_rank"]["pit_counts"] == [7, 10]
     assert payload["pit_rank"]["rank_counts"] == [5, 7, 9]
