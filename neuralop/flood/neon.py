@@ -9,6 +9,7 @@ from __future__ import annotations
 import math
 import hashlib
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
@@ -530,18 +531,26 @@ class _ProjectedTrainableBranch(nn.Module):
         B, K, T, Nv, _ = (int(v) for v in features.shape)
         M = int(z_e.shape[0])
         branch_features = _append_projected_lead_features(features, self.lead_time_dim)
-        expanded = branch_features.unsqueeze(1).expand(B, M, K, T, Nv, -1)
-        if self.concat_index:
-            z_features = z_e.to(device=features.device, dtype=features.dtype).view(
-                1, M, 1, 1, 1, self.epistemic_dim
+        z_value = z_e.to(device=features.device, dtype=features.dtype)
+        if not self.concat_index:
+            # Coefficients depend only on the frozen feature field. Evaluate the
+            # dominant MLP once per feature row, then contract all epistemic
+            # particles through the small projected dimension.
+            flat = branch_features.reshape(-1, branch_features.shape[-1])
+            coeff = self.mlp(flat).reshape(
+                B, K, T, Nv, self.out_channels, self.epistemic_dim
             )
-            z_features = z_features.expand(B, M, K, T, Nv, -1)
-            expanded = torch.cat([expanded, z_features], dim=-1)
+            return torch.einsum("bktnod,md->bmktno", coeff, z_value)
+
+        expanded = branch_features.unsqueeze(1).expand(B, M, K, T, Nv, -1)
+        z_features = z_value.view(1, M, 1, 1, 1, self.epistemic_dim)
+        z_features = z_features.expand(B, M, K, T, Nv, -1)
+        expanded = torch.cat([expanded, z_features], dim=-1)
         flat = expanded.reshape(-1, expanded.shape[-1])
-        coeff = self.mlp(flat).reshape(B, M, K, T, Nv, self.out_channels, self.epistemic_dim)
-        z_dot = z_e.to(device=features.device, dtype=features.dtype).view(
-            1, M, 1, 1, 1, 1, self.epistemic_dim
+        coeff = self.mlp(flat).reshape(
+            B, M, K, T, Nv, self.out_channels, self.epistemic_dim
         )
+        z_dot = z_value.view(1, M, 1, 1, 1, 1, self.epistemic_dim)
         return (coeff * z_dot).sum(dim=-1)
 
 
@@ -1499,6 +1508,34 @@ def _stable_family_seed(seed: int, family_id: str) -> int:
     return _stable_payload_seed(int(seed), family_id)
 
 
+@lru_cache(maxsize=128)
+def _cached_family_gaussian_directions(
+    family_ids: tuple[str, ...],
+    seed: int,
+    epistemic_dim: int,
+    num_directions: int,
+    dtype: torch.dtype,
+    unit_normalize: bool,
+) -> torch.Tensor:
+    """Build deterministic family directions once for repeated epoch use."""
+
+    rows = []
+    for family_id in family_ids:
+        generator = torch.Generator(device="cpu")
+        generator.manual_seed(_stable_family_seed(int(seed), family_id))
+        directions = torch.stack(
+            [
+                torch.randn(int(epistemic_dim), generator=generator, dtype=dtype)
+                for _ in range(int(num_directions))
+            ],
+            dim=0,
+        )
+        if unit_normalize:
+            directions = directions / directions.norm(dim=1, keepdim=True).clamp_min(1.0e-12)
+        rows.append(directions)
+    return torch.stack(rows, dim=0)
+
+
 def probit_exponential_raw_weights(
     family_ids: Sequence[str],
     z_e: torch.Tensor,
@@ -1524,17 +1561,18 @@ def probit_exponential_raw_weights(
     if d_e < 1:
         raise ValueError("z_e must have nonzero epistemic dimension.")
     z_cpu = z_e.detach().to(device="cpu", dtype=torch.float64)
-    rows = []
-    for family_id in family_ids:
-        generator = torch.Generator(device="cpu")
-        generator.manual_seed(_stable_family_seed(seed, family_id))
-        direction = torch.randn(d_e, generator=generator, dtype=torch.float64)
-        direction = direction / direction.norm().clamp_min(1.0e-12)
-        projection = z_cpu @ direction
-        uniform = 0.5 * (1.0 + torch.erf(projection / math.sqrt(2.0)))
-        uniform = uniform.clamp(min=float(eps), max=1.0 - float(eps))
-        rows.append(-torch.log1p(-uniform))
-    return torch.stack(rows, dim=0).to(device=z_e.device, dtype=z_e.dtype)
+    directions = _cached_family_gaussian_directions(
+        tuple(family_ids),
+        int(seed),
+        d_e,
+        1,
+        torch.float64,
+        True,
+    )[:, 0]
+    projection = directions @ z_cpu.transpose(0, 1)
+    uniform = 0.5 * (1.0 + torch.erf(projection / math.sqrt(2.0)))
+    uniform = uniform.clamp(min=float(eps), max=1.0 - float(eps))
+    return (-torch.log1p(-uniform)).to(device=z_e.device, dtype=z_e.dtype)
 
 
 def epistemic_member_bootstrap_weights(
@@ -1654,23 +1692,26 @@ def epistemic_bootstrap_weights(
         if tau != 1.0:
             weights = (1.0 - tau) + tau * weights
     else:
-        rows = []
+        num_directions = 1 if distribution == "bernoulli" else 2
         scale = 1.0 / math.sqrt(float(d_e))
         z_cpu = z_e.detach().to(device="cpu", dtype=torch.float32)
-        for family_id in family_ids:
-            generator = torch.Generator(device="cpu")
-            generator.manual_seed(_stable_family_seed(seed, family_id))
-            b = torch.randn(d_e, generator=generator, dtype=torch.float32) * scale
-            if distribution == "bernoulli":
-                raw = 1.0 + torch.sign(z_cpu @ b)
-            else:
-                c = torch.randn(d_e, generator=generator, dtype=torch.float32) * scale
-                raw = 0.5 * ((z_cpu @ b).pow(2) + (z_cpu @ c).pow(2))
-                if distribution == "tempered_exponential":
-                    tau = float(temperature)
-                    raw = (1.0 - tau) + tau * raw
-            rows.append(raw)
-        weights = torch.stack(rows, dim=0).to(device=z_e.device, dtype=z_e.dtype)
+        directions = _cached_family_gaussian_directions(
+            tuple(family_ids),
+            int(seed),
+            d_e,
+            num_directions,
+            torch.float32,
+            False,
+        )
+        projections = torch.einsum("md,bqd->bmq", z_cpu, directions) * scale
+        if distribution == "bernoulli":
+            weights = 1.0 + torch.sign(projections[..., 0])
+        else:
+            weights = 0.5 * projections.pow(2).sum(dim=-1)
+            if distribution == "tempered_exponential":
+                tau = float(temperature)
+                weights = (1.0 - tau) + tau * weights
+        weights = weights.to(device=z_e.device, dtype=z_e.dtype)
     weights = weights.clamp(min=float(min_weight), max=float(max_weight))
     if normalize == "per_epistemic_batch":
         weights = weights / weights.mean(dim=0, keepdim=True).clamp_min(float(eps))

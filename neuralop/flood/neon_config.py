@@ -128,6 +128,7 @@ class NEONStage2Config:
     learning_rate: float = 1.0e-4
     weight_decay: float = 1.0e-4
     n_epochs: int = 30
+    validation_interval: int = 1
     selection_min_retention: float = 0.0
     selection_rmse_margin_m: float = 0.001
     selection_metric: str = "mixture_crps"
@@ -316,6 +317,11 @@ class NEONStage2Config:
                 )
         if int(self.n_epochs) < 1:
             raise NEONConfigError(f"n_epochs must be >= 1, got {self.n_epochs}.")
+        if int(self.validation_interval) < 1:
+            raise NEONConfigError(
+                "validation_interval must be >= 1, got "
+                f"{self.validation_interval}."
+            )
         if int(self.lead_time_dim) < 0:
             raise NEONConfigError(f"lead_time_dim must be >= 0, got {self.lead_time_dim}.")
         if int(self.prior_rff_dim) < 0:

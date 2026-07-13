@@ -864,6 +864,58 @@ def neon_stage2_eval_forward(
         ).prediction
 
 
+def neon_stage2_eval_forward_chunked(
+    *,
+    module: nn.Module,
+    base_prediction: torch.Tensor,
+    features: torch.Tensor,
+    z_e: torch.Tensor,
+    k_chunk: int,
+    epistemic_chunk_size: int | None = None,
+    node_coords: torch.Tensor | None = None,
+    canonical_mean_features: torch.Tensor | None = None,
+    output_device: str | torch.device | None = None,
+    output_dtype: torch.dtype | None = None,
+) -> torch.Tensor:
+    """Evaluate nested predictions with independently bounded M and K chunks."""
+
+    if base_prediction.ndim != 5 or features.ndim != 5:
+        raise ValueError("base_prediction and features must have shape [B,K,T,Nv,C]")
+    if z_e.ndim != 2:
+        raise ValueError("z_e must have shape [M,d_e]")
+    if int(base_prediction.shape[1]) != int(features.shape[1]):
+        raise ValueError("base_prediction and features must use the same K")
+    k_total = int(features.shape[1])
+    m_total = int(z_e.shape[0])
+    k_step = max(1, min(int(k_chunk), k_total))
+    m_requested = m_total if epistemic_chunk_size is None else int(epistemic_chunk_size)
+    m_step = max(1, min(m_requested, m_total))
+    target_device = None if output_device is None else torch.device(output_device)
+
+    module.eval()
+    m_parts = []
+    with torch.no_grad():
+        for ms in range(0, m_total, m_step):
+            k_parts = []
+            z_chunk = z_e[ms : ms + m_step]
+            for ks in range(0, k_total, k_step):
+                prediction = module(
+                    base_prediction[:, ks : ks + k_step],
+                    features[:, ks : ks + k_step],
+                    z_chunk,
+                    node_coords=node_coords,
+                    canonical_mean_features=canonical_mean_features,
+                ).prediction.detach()
+                if target_device is not None or output_dtype is not None:
+                    prediction = prediction.to(
+                        device=prediction.device if target_device is None else target_device,
+                        dtype=prediction.dtype if output_dtype is None else output_dtype,
+                    )
+                k_parts.append(prediction)
+            m_parts.append(torch.cat(k_parts, dim=2))
+    return torch.cat(m_parts, dim=1)
+
+
 def build_neon_stage2_optimizer(
     module: NEONEpistemicCorrection,
     *,
@@ -1383,6 +1435,7 @@ def train_neon_stage2_epochs(
     objective: str = "per_epistemic_fcrps",
     epistemic_chunk_size: Optional[int] = None,
     val_seed: Optional[int] = None,
+    validation_interval: int = 1,
     bootstrap_config: Optional[Mapping[str, Any]] = None,
     member_bootstrap_config: Optional[Mapping[str, Any]] = None,
     cancellation_config: Optional[Mapping[str, Any]] = None,
@@ -1425,6 +1478,11 @@ def train_neon_stage2_epochs(
     family_batch_size = max(1, int(family_batch_size))
     effective_batch_size = max(family_batch_size, int(effective_batch_size))
     latent_bank_count = max(1, int(latent_bank_count))
+    validation_interval = int(validation_interval)
+    if validation_interval < 1:
+        raise ValueError(
+            f"validation_interval must be >= 1, got {validation_interval}."
+        )
     epistemic_resample = str(epistemic_resample).strip().lower()
     if epistemic_resample not in {"epoch", "effective_batch"}:
         raise ValueError(
@@ -1626,6 +1684,52 @@ def train_neon_stage2_epochs(
                     epoch_elapsed_sec=time.time() - epoch_start_time,
                 )
 
+        should_validate = (
+            (int(epoch) + 1) % validation_interval == 0
+            or int(epoch) == total_epochs - 1
+        )
+        if not should_validate:
+            row = {
+                "epoch": int(epoch),
+                "train_fit": fit_sum / max(n_train_families, 1),
+                "train_total": total_sum / max(n_train_families, 1),
+                "val_fit": float("nan"),
+                "validation_ran": 0.0,
+            }
+            for key, value in train_diag_sum.items():
+                row[f"train_{key}"] = value / max(n_train_families, 1)
+            row["epoch_seconds"] = float(time.time() - epoch_start_time)
+            history.append(row)
+            if progress_reporter is not None:
+                progress_reporter.epoch_end(
+                    row=row,
+                    best_epoch=best_epoch,
+                    best_val_fit=best_val,
+                    improved=False,
+                    epoch_elapsed_sec=time.time() - epoch_start_time,
+                )
+            if latest_checkpoint_path is not None:
+                latest_metadata = dict(checkpoint_metadata or {})
+                latest_metadata["last_completed_epoch"] = int(epoch)
+                latest_metadata["next_epoch"] = int(epoch) + 1
+                latest_metadata["best_epoch"] = int(best_epoch)
+                latest_metadata["best_val_fit"] = float(best_val)
+                latest_metadata["selection_min_retention"] = float(
+                    selection_min_retention
+                )
+                latest_metadata["n_ineligible_epochs"] = int(n_ineligible_epochs)
+                save_neon_stage2_training_state(
+                    latest_checkpoint_path,
+                    module=module,
+                    optimizer=optimizer,
+                    metadata=latest_metadata,
+                    history=history,
+                    best_epoch=best_epoch,
+                    best_val_fit=best_val,
+                    next_epoch=int(epoch) + 1,
+                )
+            continue
+
         # A fixed val_seed redraws the SAME validation z_e (and any collector
         # sampling) every epoch, so best-epoch selection compares like with
         # like instead of riding sampling noise.
@@ -1671,6 +1775,7 @@ def train_neon_stage2_epochs(
             "train_fit": fit_sum / max(n_train_families, 1),
             "train_total": total_sum / max(n_train_families, 1),
             "val_fit": float(val_fit),
+            "validation_ran": 1.0,
         }
         for key, value in train_diag_sum.items():
             row[f"train_{key}"] = value / max(n_train_families, 1)
@@ -1730,6 +1835,7 @@ def train_neon_stage2_epochs(
                         checkpoint_path=checkpoint_path,
                         val_fit=float(val_fit),
                     )
+        row["epoch_seconds"] = float(time.time() - epoch_start_time)
         if progress_reporter is not None:
             progress_reporter.epoch_end(
                 row=row,

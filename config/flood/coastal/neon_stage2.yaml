@@ -120,3 +120,6 @@ neon:
   learning_rate: 1.0e-4
   weight_decay: 1.0e-4
   n_epochs: 30
+  # Set >1 to reduce expensive full-validation cache reads; the final epoch
+  # is always validated regardless of this interval.
+  validation_interval: 1

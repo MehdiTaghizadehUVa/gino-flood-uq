@@ -116,6 +116,7 @@ def test_runner_trains_saves_and_records_metadata(tmp_path):
     assert meta["calibration_m"] == 64
     assert meta["feature_cache_schema_version"] == "neon_feature_cache_v3"
     assert meta["progress_log_interval_effective_batches"] == 10
+    assert meta["validation_interval"] == 1
     assert "best_epoch" in meta and "val_metrics" in meta
     assert (tmp_path / "progress_events.jsonl").exists()
     assert (tmp_path / "history_partial.jsonl").exists()

@@ -49,6 +49,7 @@ NEONTrainingResult = train_neon.NEONTrainingResult
 train_neon_stage2_epochs = train_neon.train_neon_stage2_epochs
 build_neon_stage2_metadata = train_neon.build_neon_stage2_metadata
 build_neon_stage2_optimizer = train_neon.build_neon_stage2_optimizer
+neon_stage2_eval_forward_chunked = train_neon.neon_stage2_eval_forward_chunked
 
 
 # ---------------------------------------------------------------------------
@@ -103,6 +104,51 @@ def _read_jsonl(path: Path) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
+# Evaluation batching behavior
+# ---------------------------------------------------------------------------
+
+
+def test_chunked_eval_batches_all_particles_for_no_concat_branch():
+    class CountingModule(nn.Module):
+        def __init__(self, inner):
+            super().__init__()
+            self.inner = inner
+            self.epistemic_chunk_sizes = []
+
+        def forward(self, *args, **kwargs):
+            self.epistemic_chunk_sizes.append(int(args[2].shape[0]))
+            return self.inner(*args, **kwargs)
+
+    head = NEONEpistemicCorrection(
+        feature_channels=Cphi,
+        out_channels=C,
+        epistemic_dim=4,
+        hidden_channels=8,
+        branch_type="projected",
+        concat_index=False,
+        alpha=0.1,
+    ).eval()
+    wrapped = CountingModule(head)
+    base = torch.randn(1, 5, T, Nv, C)
+    features = torch.randn(1, 5, T, Nv, Cphi)
+    z_e = torch.randn(7, 4)
+
+    actual = neon_stage2_eval_forward_chunked(
+        module=wrapped,
+        base_prediction=base,
+        features=features,
+        z_e=z_e,
+        k_chunk=2,
+        epistemic_chunk_size=7,
+        output_device="cpu",
+    )
+    expected = head(base, features, z_e).prediction
+
+    torch.testing.assert_close(actual, expected)
+    assert wrapped.epistemic_chunk_sizes == [7, 7, 7]
+
+
+# ---------------------------------------------------------------------------
 # Training-loop behavior
 # ---------------------------------------------------------------------------
 
@@ -123,7 +169,41 @@ def test_epoch_loop_runs_requested_epochs_and_returns_history():
     )
     assert isinstance(result, NEONTrainingResult)
     assert len(result.history) == 3
-    assert set(result.history[0]) >= {"epoch", "train_fit", "val_fit"}
+    assert set(result.history[0]) >= {
+        "epoch",
+        "train_fit",
+        "val_fit",
+        "epoch_seconds",
+    }
+    assert result.history[0]["epoch_seconds"] > 0.0
+
+
+def test_epoch_loop_validates_at_interval_and_final_epoch():
+    module = _module()
+    opt = build_neon_stage2_optimizer(module, learning_rate=1e-2)
+    base_collector = _make_feature_collector()
+    calls = []
+
+    def collector(family, **kwargs):
+        calls.append(family.family_id)
+        return base_collector(family, **kwargs)
+
+    result = train_neon_stage2_epochs(
+        module=module,
+        optimizer=opt,
+        train_families=[_family("train", 0.0)],
+        val_families=[_family("val", 0.2)],
+        feature_collector=collector,
+        n_epochs=5,
+        m_train=2,
+        k_train=4,
+        d_e=4,
+        validation_interval=2,
+    )
+
+    assert calls.count("val") == 3
+    assert [row["validation_ran"] for row in result.history] == [0.0, 1.0, 0.0, 1.0, 1.0]
+    assert all(row["epoch_seconds"] > 0.0 for row in result.history)
 
 
 def test_epoch_loop_saves_latest_state_and_resumes_training(tmp_path):

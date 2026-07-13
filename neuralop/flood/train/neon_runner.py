@@ -735,6 +735,7 @@ def run_neon_stage2_training(
             "progress_log_interval_effective_batches": int(
                 getattr(config, "progress_log_interval_effective_batches", 10)
             ),
+            "validation_interval": int(getattr(config, "validation_interval", 1)),
             "feature_cache_schema_version": "neon_feature_cache_v3",
             "structural_dry_feedback_clamp": bool(
                 target_normalizer is not None
@@ -781,6 +782,7 @@ def run_neon_stage2_training(
         checkpoint_metadata=metadata,
         epistemic_chunk_size=epistemic_chunk_size,
         val_seed=val_seed,
+        validation_interval=int(getattr(config, "validation_interval", 1)),
         bootstrap_config=config.to_bootstrap_config_dict()
         if hasattr(config, "to_bootstrap_config_dict")
         else None,
