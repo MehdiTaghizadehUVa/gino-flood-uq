@@ -159,6 +159,7 @@ def test_eval_cli_dry_run_prints_torch_free_plan(capsys):
         "--stage2-checkpoint", "/tmp/neon_stage2_best.pt",
         "--stage1-bundle", "/tmp/bundle.json",
         "--output-dir", "/tmp/out",
+        "--allow-single-reference",
         "--dry-run",
     ])
     assert rc == 0
@@ -170,3 +171,27 @@ def test_eval_cli_dry_run_prints_torch_free_plan(capsys):
     assert plan["cache_dir"] is None
     assert plan["k_chunk"] == 16
     assert plan["impact_members"] == 60
+    assert plan["allow_single_reference"] is True
+
+
+def test_eval_cli_rejects_single_reference_without_explicit_policy():
+    eval_cli = _load_module(
+        "neuralop.flood.cli.eval_neon_stage2_policy",
+        "neuralop/flood/cli/eval_neon_stage2.py",
+        ("neuralop", "neuralop.flood", "neuralop.flood.cli"),
+    )
+
+    class Family:
+        reference = type("Reference", (), {"shape": (1, 2, 3, 1)})()
+
+    with pytest.raises(ValueError, match="allow-single-reference"):
+        eval_cli.validate_reference_member_policy(
+            [Family()], allow_single_reference=False
+        )
+    policy = eval_cli.validate_reference_member_policy(
+        [Family()], allow_single_reference=True
+    )
+    assert policy["single_reference_family_count"] == 1
+    assert policy["single_reference_policy"] == (
+        "forecast_crps_without_reference_self_distance"
+    )

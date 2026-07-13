@@ -97,6 +97,8 @@ def _parse_args(argv: Optional[Sequence[str]]) -> argparse.Namespace:
                         help="Merge completed shards without loading models or datasets.")
     parser.add_argument("--expected-families", type=int, default=None,
                         help="Required contiguous shard count; mandatory for --merge-only.")
+    parser.add_argument("--allow-single-reference", action="store_true",
+                        help="Permit R=1 reference families; forecast fair CRPS remains valid and only the unavailable reference self-distance is omitted.")
     parser.add_argument("--dry-run", action="store_true",
                         help="Print the resolved evaluation plan without loading torch/data.")
     return parser.parse_args(argv)
@@ -125,6 +127,7 @@ def resolve_eval_plan(args: argparse.Namespace) -> dict[str, Any]:
         "k_chunk": int(args.k_chunk),
         "impact_members": int(args.impact_members),
         "compare_base": bool(args.compare_base),
+        "allow_single_reference": bool(args.allow_single_reference),
         "family_index": None if args.family_index is None else int(args.family_index),
         "shard_dir": None if args.shard_dir is None else str(args.shard_dir),
         "shard_only": bool(args.shard_only),
@@ -135,6 +138,32 @@ def resolve_eval_plan(args: argparse.Namespace) -> dict[str, Any]:
         ),
     }
 
+
+
+def validate_reference_member_policy(
+    families: Sequence[Any], *, allow_single_reference: bool
+) -> dict[str, Any]:
+    """Validate the reference-ensemble contract before expensive inference."""
+
+    counts = [int(family.reference.shape[0]) for family in families]
+    if not counts:
+        raise ValueError("NEON evaluation selected no families.")
+    invalid = [count for count in counts if count < 1]
+    if invalid:
+        raise ValueError("reference families must contain at least one member.")
+    single = sum(count == 1 for count in counts)
+    if single and not allow_single_reference:
+        raise ValueError(
+            f"{single} reference families have R=1; pass --allow-single-reference "
+            "for historical single-trajectory evaluation."
+        )
+    return {
+        "reference_member_counts": sorted(set(counts)),
+        "single_reference_family_count": int(single),
+        "single_reference_policy": (
+            "forecast_crps_without_reference_self_distance" if single else "ensemble_reference"
+        ),
+    }
 
 
 def _rss_gb() -> float:
@@ -248,6 +277,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     families = sorted(families, key=lambda f: f.family_id)
     if args.max_families is not None:
         families = families[: int(args.max_families)]
+    plan.update(
+        validate_reference_member_policy(
+            families, allow_single_reference=bool(args.allow_single_reference)
+        )
+    )
     total_family_count = len(families)
     indexed_families = list(enumerate(families))
     if args.family_index is not None:
