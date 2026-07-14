@@ -1194,6 +1194,62 @@ def _sample_latent_bank_id(
     return int(torch.randint(count, (1,), generator=generator).item())
 
 
+def _epoch_latent_bank_schedule(
+    n_families: int,
+    *,
+    latent_bank_count: int,
+    epoch: int,
+    generator: Optional[torch.Generator],
+) -> list[int]:
+    """Build a reproducible bank schedule without consuming the training RNG.
+
+    Isolating bank selection makes the next disk-cache key knowable for
+    background prefetch while leaving epistemic-index and reference-member
+    sampling unchanged by I/O timing.
+    """
+
+    count = max(1, int(latent_bank_count))
+    if int(n_families) < 1:
+        return []
+    if count == 1:
+        return [0] * int(n_families)
+    base_seed = 0 if generator is None else int(generator.initial_seed())
+    schedule_seed = (
+        base_seed + 1_000_003 * (int(epoch) + 1) + 97_409 * count
+    ) % (2**63 - 1)
+    bank_generator = torch.Generator(device="cpu").manual_seed(schedule_seed)
+    return torch.randint(
+        count,
+        (int(n_families),),
+        generator=bank_generator,
+    ).tolist()
+
+
+def _feature_prefetch_depth(feature_collector: FeatureCollector) -> int:
+    if not callable(getattr(feature_collector, "prefetch", None)):
+        return 0
+    return max(0, int(getattr(feature_collector, "prefetch_depth", 0)))
+
+
+def _prefetch_feature(
+    feature_collector: FeatureCollector,
+    family: NEONFamilySample,
+    *,
+    num_aleatory: int,
+    latent_bank_id: int,
+) -> bool:
+    prefetch = getattr(feature_collector, "prefetch", None)
+    if not callable(prefetch):
+        return False
+    return bool(
+        prefetch(
+            family,
+            num_aleatory=int(num_aleatory),
+            latent_bank_id=int(latent_bank_id),
+        )
+    )
+
+
 def _evaluate_neon_validation(
     *,
     module: NEONEpistemicCorrection,
@@ -1220,8 +1276,16 @@ def _evaluate_neon_validation(
     total = 0.0
     count = 0
     diag_total: dict[str, float] = {}
+    prefetch_depth = _feature_prefetch_depth(feature_collector)
+    for prefetch_idx in range(min(prefetch_depth, len(families))):
+        _prefetch_feature(
+            feature_collector,
+            families[prefetch_idx],
+            num_aleatory=int(k),
+            latent_bank_id=0,
+        )
     with torch.no_grad():
-        for family in families:
+        for family_idx, family in enumerate(families):
             batch = _call_feature_collector(
                 feature_collector,
                 family,
@@ -1229,6 +1293,14 @@ def _evaluate_neon_validation(
                 generator=generator,
                 latent_bank_id=0,
             )
+            next_prefetch_idx = family_idx + prefetch_depth
+            if prefetch_depth and next_prefetch_idx < len(families):
+                _prefetch_feature(
+                    feature_collector,
+                    families[next_prefetch_idx],
+                    num_aleatory=int(k),
+                    latent_bank_id=0,
+                )
             z_e = (
                 fixed_epistemic_support.to(
                     device=batch.features.device, dtype=batch.features.dtype
@@ -1588,6 +1660,21 @@ def train_neon_stage2_epochs(
             shuffle=bool(shuffle_families),
             generator=generator,
         )
+        bank_schedule = _epoch_latent_bank_schedule(
+            len(ordered_indices),
+            latent_bank_count=latent_bank_count,
+            epoch=epoch,
+            generator=generator,
+        )
+        prefetch_depth = _feature_prefetch_depth(feature_collector)
+        for prefetch_position in range(min(prefetch_depth, len(ordered_indices))):
+            _prefetch_feature(
+                feature_collector,
+                train_families[ordered_indices[prefetch_position]],
+                num_aleatory=int(k_train),
+                latent_bank_id=bank_schedule[prefetch_position],
+            )
+        train_family_position = 0
         all_family_ids = [fam.family_id for fam in train_families]
         total_effective_batches = max(
             1,
@@ -1613,10 +1700,7 @@ def train_neon_stage2_epochs(
                 micro_families = [train_families[idx] for idx in micro_indices]
                 micro_batches = []
                 for family in micro_families:
-                    bank_id = _sample_latent_bank_id(
-                        latent_bank_count=latent_bank_count,
-                        generator=generator,
-                    )
+                    bank_id = bank_schedule[train_family_position]
                     micro_batches.append(
                         _call_feature_collector(
                             feature_collector,
@@ -1626,6 +1710,18 @@ def train_neon_stage2_epochs(
                             latent_bank_id=bank_id,
                         )
                     )
+                    next_prefetch_position = train_family_position + prefetch_depth
+                    if (
+                        prefetch_depth
+                        and next_prefetch_position < len(ordered_indices)
+                    ):
+                        _prefetch_feature(
+                            feature_collector,
+                            train_families[ordered_indices[next_prefetch_position]],
+                            num_aleatory=int(k_train),
+                            latent_bank_id=bank_schedule[next_prefetch_position],
+                        )
+                    train_family_position += 1
                 batch = _collate_frozen_batches(micro_batches)
                 if group_z_e is None:
                     if dirichlet_particle_control is not None:

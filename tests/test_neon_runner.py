@@ -421,6 +421,45 @@ def test_disk_cache_collects_once_and_round_trips(tmp_path):
     assert torch.allclose(first.base_prediction, second.base_prediction, atol=1e-2)
 
 
+def test_disk_cache_prefetches_existing_entry_without_recollection(tmp_path):
+    calls = {"n": 0}
+
+    def base(family, *, num_aleatory, generator=None, latent_bank_id=None):
+        calls["n"] += 1
+        return train_neon.FrozenFGNOFeatureBatch(
+            base_prediction=torch.full((1, num_aleatory, T, Nv, C), 0.25),
+            features=torch.full((1, num_aleatory, T, Nv, Cphi), 0.5),
+            aleatory_latents=torch.zeros(num_aleatory, 2),
+        )
+
+    fam = NEONFamilySample(family_id="TR000001", reference=torch.zeros(R, T, Nv, C))
+    writer = runner.make_cached_feature_collector(base, cache_dir=tmp_path)
+    expected = writer(fam, num_aleatory=4, latent_bank_id=2)
+    writer.close()
+
+    def must_not_recollect(*args, **kwargs):
+        raise AssertionError("an existing prefetched cache entry must not be recollected")
+
+    reader = runner.make_cached_feature_collector(
+        must_not_recollect,
+        cache_dir=tmp_path,
+        prefetch_workers=1,
+        prefetch_depth=2,
+    )
+    assert reader.prefetch(fam, num_aleatory=4, latent_bank_id=2)
+    actual = reader(fam, num_aleatory=4, latent_bank_id=2)
+    reader.close()
+
+    assert calls["n"] == 1
+    torch.testing.assert_close(actual.features, expected.features, atol=1.0e-2, rtol=0.0)
+    torch.testing.assert_close(
+        actual.base_prediction,
+        expected.base_prediction,
+        atol=1.0e-2,
+        rtol=0.0,
+    )
+
+
 def test_disk_cache_round_trips_canonical_mean_features_and_bank_hash(tmp_path):
     def base(family, *, num_aleatory, generator=None, latent_bank_id=None):
         return train_neon.FrozenFGNOFeatureBatch(

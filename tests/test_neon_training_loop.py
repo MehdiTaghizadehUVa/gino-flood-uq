@@ -468,6 +468,65 @@ def test_training_passes_latent_bank_ids_to_feature_collector():
     assert all(0 <= bank_id < 3 for bank_id in calls)
 
 
+def test_training_prefetches_the_exact_reproducible_latent_bank_schedule():
+    def run_once():
+        module = _module()
+        opt = build_neon_stage2_optimizer(module, learning_rate=1e-2)
+        base_collector = _make_feature_collector()
+        calls: list[tuple[str, int]] = []
+        prefetched: list[tuple[str, int]] = []
+
+        def collector(
+            family: NEONFamilySample,
+            *,
+            num_aleatory: int,
+            generator=None,
+            latent_bank_id=None,
+        ):
+            calls.append((family.family_id, int(latent_bank_id)))
+            return base_collector(
+                family,
+                num_aleatory=num_aleatory,
+                generator=generator,
+                latent_bank_id=latent_bank_id,
+            )
+
+        def prefetch(family, *, num_aleatory, latent_bank_id=None):
+            prefetched.append((family.family_id, int(latent_bank_id)))
+            return True
+
+        collector.prefetch = prefetch
+        collector.prefetch_depth = 2
+        train_neon_stage2_epochs(
+            module=module,
+            optimizer=opt,
+            train_families=[
+                _family("a", 0.0),
+                _family("b", 0.5),
+                _family("c", 1.0),
+            ],
+            val_families=[_family("v", 0.2)],
+            feature_collector=collector,
+            n_epochs=1,
+            m_train=2,
+            k_train=4,
+            d_e=4,
+            latent_bank_count=3,
+            shuffle_families=False,
+            generator=torch.Generator().manual_seed(17),
+        )
+        return calls, prefetched
+
+    calls_a, prefetched_a = run_once()
+    calls_b, prefetched_b = run_once()
+
+    assert calls_a == calls_b
+    assert prefetched_a == prefetched_b
+    assert prefetched_a
+    for consumed in calls_a:
+        assert consumed in prefetched_a
+
+
 def test_training_subsamples_reference_members_for_fit(monkeypatch):
     module = _module()
     opt = build_neon_stage2_optimizer(module, learning_rate=1e-2)

@@ -13,6 +13,8 @@ import hashlib
 import logging
 import math
 import os
+import threading
+from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Callable, Optional, Sequence, Tuple
 
@@ -286,6 +288,8 @@ def make_cached_feature_collector(
     cache_dtype: torch.dtype = torch.float16,
     cache_dir: Optional[Any] = None,
     cache_key: Optional[str] = None,
+    prefetch_workers: int = 0,
+    prefetch_depth: int = 0,
 ):
     """Wrap a feature collector so each family's frozen rollout runs only once.
 
@@ -303,12 +307,74 @@ def make_cached_feature_collector(
     concurrent jobs can share a cache). Use this when the full family set does
     not fit in memory (e.g. 500 families at T=94 is ~570 GB fp16).
     """
+    prefetch_workers = max(0, int(prefetch_workers))
+    prefetch_depth = max(0, int(prefetch_depth))
     cache: dict[str, tuple] = {}
     dir_path = None
     if cache_dir is not None:
         dir_path = Path(cache_dir)
         dir_path.mkdir(parents=True, exist_ok=True)
     key_prefix = "" if cache_key is None else f"{str(cache_key)}_"
+    executor = (
+        ThreadPoolExecutor(max_workers=prefetch_workers, thread_name_prefix="neon-cache")
+        if dir_path is not None and prefetch_workers > 0 and prefetch_depth > 0
+        else None
+    )
+    prefetch_futures: dict[Path, Future] = {}
+    prefetch_lock = threading.Lock()
+
+    def _entry_path(family_id: str, *, num_aleatory: int, latent_bank_id: int) -> Path:
+        if dir_path is None:
+            raise RuntimeError("disk cache path requested for an in-memory collector")
+        safe_key = "".join(
+            ch if ch.isalnum() or ch in "-_." else "_" for ch in str(family_id)
+        )
+        return dir_path / (
+            f"{key_prefix}{safe_key}_bank{int(latent_bank_id)}_k{int(num_aleatory)}.pt"
+        )
+
+    def _load_payload(path: Path):
+        return torch.load(path, map_location="cpu")
+
+    def _move_for_compute(tensor: torch.Tensor, *, device: torch.device, dtype=None):
+        # Keep the cache dtype during the host-to-device copy, then cast on the
+        # accelerator. This avoids a large fp32 CPU intermediate on every hit.
+        moved = tensor.to(device=device, non_blocking=True)
+        if dtype is not None and moved.dtype != dtype:
+            moved = moved.to(dtype=dtype)
+        return moved
+
+    def _prefetch(
+        family: NEONFamilySample,
+        *,
+        num_aleatory: int,
+        latent_bank_id: int | None = None,
+    ) -> bool:
+        if executor is None:
+            return False
+        bank = 0 if latent_bank_id is None else int(latent_bank_id)
+        path = _entry_path(
+            str(family.family_id),
+            num_aleatory=int(num_aleatory),
+            latent_bank_id=bank,
+        )
+        if not path.exists():
+            return False
+        with prefetch_lock:
+            if path not in prefetch_futures:
+                prefetch_futures[path] = executor.submit(_load_payload, path)
+        return True
+
+    def _take_prefetched_or_load(path: Path):
+        with prefetch_lock:
+            future = prefetch_futures.pop(path, None)
+        return future.result() if future is not None else _load_payload(path)
+
+    def _close() -> None:
+        if executor is not None:
+            executor.shutdown(wait=True, cancel_futures=True)
+        with prefetch_lock:
+            prefetch_futures.clear()
 
     def _store(batch) -> None:
         payload = {
@@ -339,19 +405,24 @@ def make_cached_feature_collector(
         bank = 0 if latent_bank_id is None else int(latent_bank_id)
         cache_key_full = f"{key}|bank{bank}|k{int(num_aleatory)}"
         if dir_path is not None:
-            safe_key = "".join(ch if ch.isalnum() or ch in "-_." else "_" for ch in key)
-            fpath = dir_path / f"{key_prefix}{safe_key}_bank{bank}_k{int(num_aleatory)}.pt"
+            fpath = _entry_path(
+                key,
+                num_aleatory=int(num_aleatory),
+                latent_bank_id=bank,
+            )
             if fpath.exists():
-                p = torch.load(fpath, map_location="cpu")
+                p = _take_prefetched_or_load(fpath)
                 dev, dt = torch.device(p["device"]), p["dtype"]
                 return FrozenFGNOFeatureBatch(
-                    base_prediction=p["base"].to(device=dev, dtype=dt),
-                    features=p["features"].to(device=dev, dtype=dt),
-                    aleatory_latents=p["latents"].to(device=dev),
+                    base_prediction=_move_for_compute(p["base"], device=dev, dtype=dt),
+                    features=_move_for_compute(p["features"], device=dev, dtype=dt),
+                    aleatory_latents=_move_for_compute(p["latents"], device=dev),
                     canonical_mean_features=(
                         None
                         if p.get("canonical_mean_features") is None
-                        else p["canonical_mean_features"].to(device=dev, dtype=dt)
+                        else _move_for_compute(
+                            p["canonical_mean_features"], device=dev, dtype=dt
+                        )
                     ),
                     canonical_latent_hash=p.get("canonical_latent_hash"),
                 )
@@ -395,6 +466,9 @@ def make_cached_feature_collector(
             canonical_latent_hash=canonical_hash,
         )
 
+    collector.prefetch = _prefetch
+    collector.close = _close
+    collector.prefetch_depth = prefetch_depth
     return collector
 
 
@@ -510,7 +584,12 @@ def run_neon_stage2_training(
         )
         cache_key = hashlib.sha256(cache_payload.encode("utf-8")).hexdigest()[:16]
         collector = make_cached_feature_collector(
-            collector, cache_device=cache_device, cache_dir=cache_dir, cache_key=cache_key
+            collector,
+            cache_device=cache_device,
+            cache_dir=cache_dir,
+            cache_key=cache_key,
+            prefetch_workers=int(getattr(config, "feature_prefetch_workers", 2)),
+            prefetch_depth=int(getattr(config, "feature_prefetch_depth", 2)),
         )
 
     # Probe the frozen feature width from one family to size the EpiNet.
@@ -727,6 +806,13 @@ def run_neon_stage2_training(
             "shuffle_families": bool(getattr(config, "shuffle_families", True)),
             "epistemic_resample": str(getattr(config, "epistemic_resample", "epoch")),
             "latent_bank_count": int(getattr(config, "latent_bank_count", 1)),
+            "latent_bank_sampling": "isolated_epoch_rng_v1",
+            "feature_prefetch_workers": int(
+                getattr(config, "feature_prefetch_workers", 0)
+            ),
+            "feature_prefetch_depth": int(
+                getattr(config, "feature_prefetch_depth", 0)
+            ),
             "reference_member_subsample": getattr(config, "reference_member_subsample", None),
             "progress_log_interval_effective_batches": int(
                 getattr(config, "progress_log_interval_effective_batches", 10)
@@ -761,55 +847,72 @@ def run_neon_stage2_training(
         logger=logging.getLogger(__name__),
     )
 
-    return train_neon_stage2_epochs(
-        module=module,
-        optimizer=optimizer,
-        train_families=train_families,
-        val_families=val_families,
-        feature_collector=collector,
-        n_epochs=int(config.n_epochs),
-        m_train=int(config.m_train),
-        k_train=int(config.k_train),
-        d_e=int(config.d_e),
-        loss_weights=loss_weights,
-        generator=generator,
-        stage1_model=stage1,
-        checkpoint_path=checkpoint_path,
-        checkpoint_metadata=metadata,
-        epistemic_chunk_size=epistemic_chunk_size,
-        val_seed=val_seed,
-        validation_interval=int(getattr(config, "validation_interval", 1)),
-        bootstrap_config=config.to_bootstrap_config_dict()
-        if hasattr(config, "to_bootstrap_config_dict")
-        else None,
-        member_bootstrap_config=config.to_member_bootstrap_config_dict()
-        if hasattr(config, "to_member_bootstrap_config_dict")
-        else None,
-        cancellation_config=config.to_cancellation_diagnostics_config_dict()
-        if hasattr(config, "to_cancellation_diagnostics_config_dict")
-        else None,
-        family_batch_size=int(getattr(config, "family_batch_size", 1)),
-        effective_batch_size=int(getattr(config, "effective_batch_size", 1)),
-        shuffle_families=bool(getattr(config, "shuffle_families", True)),
-        epistemic_resample=str(getattr(config, "epistemic_resample", "epoch")),
-        latent_bank_count=int(getattr(config, "latent_bank_count", 1)),
-        reference_member_subsample=getattr(config, "reference_member_subsample", None),
-        selection_min_retention=float(getattr(config, "selection_min_retention", 0.0)),
-        selection_rmse_margin_m=float(
-            getattr(config, "selection_rmse_margin_m", 0.001)
-        ),
-        selection_metric=str(getattr(config, "selection_metric", "mixture_crps")),
-        selection_enforce_rmse=bool(getattr(config, "selection_enforce_rmse", True)),
-        validation_physical_scale=float(validation_physical_scale),
-        validation_target_normalizer=target_normalizer,
-        validation_reference_normalizer=reference_normalizer,
-        dirichlet_particle_control=dirichlet_particle_control,
-        progress_reporter=progress_reporter,
-        latest_checkpoint_path=latest_checkpoint_path,
-        start_epoch=0 if resume_payload is None else int(resume_payload["next_epoch"]),
-        initial_history=None if resume_payload is None else resume_payload.get("history", []),
-        initial_best_epoch=-1 if resume_payload is None else int(resume_payload["best_epoch"]),
-        initial_best_val_fit=math.inf
-        if resume_payload is None
-        else float(resume_payload["best_val_fit"]),
-    )
+    try:
+        return train_neon_stage2_epochs(
+            module=module,
+            optimizer=optimizer,
+            train_families=train_families,
+            val_families=val_families,
+            feature_collector=collector,
+            n_epochs=int(config.n_epochs),
+            m_train=int(config.m_train),
+            k_train=int(config.k_train),
+            d_e=int(config.d_e),
+            loss_weights=loss_weights,
+            generator=generator,
+            stage1_model=stage1,
+            checkpoint_path=checkpoint_path,
+            checkpoint_metadata=metadata,
+            epistemic_chunk_size=epistemic_chunk_size,
+            val_seed=val_seed,
+            validation_interval=int(getattr(config, "validation_interval", 1)),
+            bootstrap_config=config.to_bootstrap_config_dict()
+            if hasattr(config, "to_bootstrap_config_dict")
+            else None,
+            member_bootstrap_config=config.to_member_bootstrap_config_dict()
+            if hasattr(config, "to_member_bootstrap_config_dict")
+            else None,
+            cancellation_config=config.to_cancellation_diagnostics_config_dict()
+            if hasattr(config, "to_cancellation_diagnostics_config_dict")
+            else None,
+            family_batch_size=int(getattr(config, "family_batch_size", 1)),
+            effective_batch_size=int(getattr(config, "effective_batch_size", 1)),
+            shuffle_families=bool(getattr(config, "shuffle_families", True)),
+            epistemic_resample=str(getattr(config, "epistemic_resample", "epoch")),
+            latent_bank_count=int(getattr(config, "latent_bank_count", 1)),
+            reference_member_subsample=getattr(
+                config, "reference_member_subsample", None
+            ),
+            selection_min_retention=float(
+                getattr(config, "selection_min_retention", 0.0)
+            ),
+            selection_rmse_margin_m=float(
+                getattr(config, "selection_rmse_margin_m", 0.001)
+            ),
+            selection_metric=str(getattr(config, "selection_metric", "mixture_crps")),
+            selection_enforce_rmse=bool(
+                getattr(config, "selection_enforce_rmse", True)
+            ),
+            validation_physical_scale=float(validation_physical_scale),
+            validation_target_normalizer=target_normalizer,
+            validation_reference_normalizer=reference_normalizer,
+            dirichlet_particle_control=dirichlet_particle_control,
+            progress_reporter=progress_reporter,
+            latest_checkpoint_path=latest_checkpoint_path,
+            start_epoch=0
+            if resume_payload is None
+            else int(resume_payload["next_epoch"]),
+            initial_history=None
+            if resume_payload is None
+            else resume_payload.get("history", []),
+            initial_best_epoch=-1
+            if resume_payload is None
+            else int(resume_payload["best_epoch"]),
+            initial_best_val_fit=math.inf
+            if resume_payload is None
+            else float(resume_payload["best_val_fit"]),
+        )
+    finally:
+        close_collector = getattr(collector, "close", None)
+        if callable(close_collector):
+            close_collector()

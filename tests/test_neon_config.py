@@ -75,6 +75,8 @@ def test_default_config_matches_plan_defaults():
     assert cfg.shuffle_families is True
     assert cfg.epistemic_resample == "effective_batch"
     assert cfg.latent_bank_count == 4
+    assert cfg.feature_prefetch_workers == 2
+    assert cfg.feature_prefetch_depth == 2
     assert cfg.reference_member_subsample == 32
     assert cfg.objective == "per_epistemic_fcrps"
     assert cfg.reference_term_for_logging is True
@@ -366,6 +368,12 @@ def test_validate_rejects_nonpositive_learning_rate_and_epochs():
         NEONStage2Config(n_epochs=0).validate()
     with pytest.raises(NEONConfigError, match="validation_interval"):
         NEONStage2Config(validation_interval=0).validate()
+
+
+@pytest.mark.parametrize("field", ["feature_prefetch_workers", "feature_prefetch_depth"])
+def test_validate_rejects_negative_feature_prefetch_settings(field):
+    with pytest.raises(NEONConfigError, match=field):
+        NEONStage2Config(**{field: -1}).validate()
 
 
 # ---------------------------------------------------------------------------

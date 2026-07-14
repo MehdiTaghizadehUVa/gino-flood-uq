@@ -101,6 +101,8 @@ class NEONStage2Config:
     shuffle_families: bool = True
     epistemic_resample: str = "effective_batch"
     latent_bank_count: int = 4
+    feature_prefetch_workers: int = 2
+    feature_prefetch_depth: int = 2
     reference_member_subsample: Optional[int] = 32
     progress_log_interval_effective_batches: int = 10
     objective: str = "per_epistemic_fcrps"
@@ -300,6 +302,11 @@ class NEONStage2Config:
                 "effective_batch_size must be >= family_batch_size, got "
                 f"{self.effective_batch_size} < {self.family_batch_size}."
             )
+        for name in ("feature_prefetch_workers", "feature_prefetch_depth"):
+            if int(getattr(self, name)) < 0:
+                raise NEONConfigError(
+                    f"{name} must be >= 0, got {getattr(self, name)}."
+                )
         if self.reference_member_subsample is not None and int(self.reference_member_subsample) < 1:
             raise NEONConfigError(
                 "reference_member_subsample must be >= 1 when set, got "
