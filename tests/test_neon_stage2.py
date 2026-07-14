@@ -887,6 +887,44 @@ def test_fair_crps_members_matches_pairwise_reference_implementation():
     fast_c = neon.fair_crps_members(pred, ref, reduction="mean", chunk_size=5)
     assert abs(float(fast_c) - float(slow)) < 1e-10
 
+    # The order-statistics implementation must preserve training gradients
+    # away from nondifferentiable ties.
+    pred_fast = pred.detach().clone().requires_grad_(True)
+    pred_slow = pred.detach().clone().requires_grad_(True)
+    fast_grad = torch.autograd.grad(
+        neon.fair_crps_members(pred_fast, ref, reduction="mean"),
+        pred_fast,
+    )[0]
+    slow_grad = torch.autograd.grad(
+        neon.per_epistemic_fair_crps(pred_slow.unsqueeze(1), ref, reduction="mean"),
+        pred_slow,
+    )[0]
+    torch.testing.assert_close(fast_grad, slow_grad, rtol=1.0e-10, atol=1.0e-12)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_fair_crps_members_supports_deterministic_cuda_execution():
+    """Mixture validation must preserve deterministic training on CUDA."""
+
+    torch.manual_seed(17)
+    pred = torch.randn(1, 32, 2, 7, 1, device="cuda")
+    ref = torch.randn(1, 10, 2, 7, 1, device="cuda")
+    previous = torch.are_deterministic_algorithms_enabled()
+    try:
+        torch.use_deterministic_algorithms(True)
+        actual = neon.fair_crps_members(pred, ref, chunk_size=5)
+        repeated = neon.fair_crps_members(pred, ref, chunk_size=5)
+        expected = neon.per_epistemic_fair_crps(
+            pred.unsqueeze(1),
+            ref,
+            reduction="mean",
+        )
+    finally:
+        torch.use_deterministic_algorithms(previous)
+
+    torch.testing.assert_close(actual, expected, rtol=1.0e-5, atol=1.0e-6)
+    torch.testing.assert_close(actual, repeated, rtol=0.0, atol=0.0)
+
 
 def test_mixture_crps_cannot_identify_epistemic_grouping():
     """The same predictive mixture has identical skill under different M/K nesting."""

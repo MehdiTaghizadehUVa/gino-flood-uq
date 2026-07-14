@@ -2006,10 +2006,13 @@ def fair_crps_members(
     ...) with the default no-reference-term setting, but O((N + R) log N) per
     location instead of O(N^2 + N R), using order statistics:
 
-      sum_k |x_k - y|        = (2 c - N) y - 2 P_c + S,   c = #{x_k < y},
+      sum_{k,r}|x_k-y_r|
+        = sum_k (L_y(x_k) + U_y(x_k) - R) x_k
+        + sum_r (L_x(y_r) + U_x(y_r) - N) y_r,
       sum_{i<j} (x_(j)-x_(i)) = sum_i (2 i - 1 - N) x_(i),
 
-    where P is the prefix sum of the sorted members and S their total. This is
+    where L and U are the left and right insertion ranks in the sorted opposite
+    ensemble. Using both ranks makes equal-valued pairs contribute zero. This is
     required at evaluation budgets: the flattened marginal ensemble at
     M_eval=32 x K_eval=50 has N=1600 members, for which the pairwise
     self-distance term would be ~1e12 elementwise ops on the coastal mesh.
@@ -2056,17 +2059,19 @@ def fair_crps_members(
         x = flat_pred[..., start:stop].transpose(1, 2).contiguous()  # [B, q, N]
         y = flat_ref[..., start:stop].transpose(1, 2).contiguous()   # [B, q, R]
         xs, _ = torch.sort(x, dim=-1)
-        prefix = torch.zeros(
-            xs.shape[0], xs.shape[1], N + 1, device=xs.device, dtype=dtype
-        )
-        prefix[..., 1:] = xs.cumsum(dim=-1)
-        total = prefix[..., -1]                                       # [B, q]
-        c = torch.searchsorted(xs, y)                                 # [B, q, R]
-        pc = prefix.gather(-1, c)
-        cross = ((2.0 * c.to(dtype) - float(N)) * y - 2.0 * pc + total.unsqueeze(-1)).sum(dim=-1)
-        cross = cross / float(N * R)                                  # E|X - Y| term
-        self_term = (xs * coef).sum(dim=-1) / float(N * (N - 1))      # fair self term
-        crps = cross - self_term                                      # [B, q]
+        ys, _ = torch.sort(y, dim=-1)
+        x_left = torch.searchsorted(ys, xs, right=False)
+        x_right = torch.searchsorted(ys, xs, right=True)
+        y_left = torch.searchsorted(xs, ys, right=False)
+        y_right = torch.searchsorted(xs, ys, right=True)
+        x_rank = x_left.to(dtype) + x_right.to(dtype) - float(R)
+        y_rank = y_left.to(dtype) + y_right.to(dtype) - float(N)
+        cross = (
+            (xs * x_rank).sum(dim=-1)
+            + (ys * y_rank).sum(dim=-1)
+        ) / float(N * R)
+        self_term = (xs * coef).sum(dim=-1) / float(N * (N - 1))
+        crps = cross - self_term
         if flat_weights is not None:
             out = out + (crps * flat_weights[:, start:stop]).sum(dim=-1)
         else:
