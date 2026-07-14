@@ -222,6 +222,48 @@ def _pointwise_mlp(
     return nn.Sequential(*layers)
 
 
+def _grouped_pointwise_mlp_forward(
+    branches: nn.ModuleList,
+    flat_features: torch.Tensor,
+) -> torch.Tensor:
+    """Evaluate equal-topology MLP branches with grouped matrix multiplies.
+
+    Returns ``[D, rows, out_channels]`` while retaining the original
+    ``ModuleList`` parameters and state-dict layout for checkpoint
+    compatibility.
+    """
+
+    if len(branches) < 1:
+        raise ValueError("at least one pointwise MLP branch is required")
+    reference = branches[0]
+    if not isinstance(reference, nn.Sequential):
+        raise TypeError("grouped pointwise branches must be nn.Sequential modules")
+    if any(
+        not isinstance(branch, nn.Sequential) or len(branch) != len(reference)
+        for branch in branches
+    ):
+        raise ValueError("all grouped pointwise branches must have equal topology")
+
+    values = flat_features.unsqueeze(0).expand(len(branches), -1, -1)
+    for layer_idx, reference_layer in enumerate(reference):
+        layers = [branch[layer_idx] for branch in branches]
+        if isinstance(reference_layer, nn.Linear):
+            if not all(isinstance(layer, nn.Linear) for layer in layers):
+                raise ValueError("grouped pointwise branch layer types do not match")
+            weights = torch.stack([layer.weight for layer in layers], dim=0)
+            values = torch.bmm(values, weights.transpose(1, 2))
+            if reference_layer.bias is not None:
+                if not all(layer.bias is not None for layer in layers):
+                    raise ValueError("grouped pointwise branch bias layouts do not match")
+                biases = torch.stack([layer.bias for layer in layers], dim=0)
+                values = values + biases[:, None, :]
+        else:
+            if not all(type(layer) is type(reference_layer) for layer in layers):
+                raise ValueError("grouped pointwise branch activation types do not match")
+            values = reference_layer(values)
+    return values
+
+
 def freeze_stage1_model(model: nn.Module) -> nn.Module:
     """Freeze a pretrained Stage-1 model for NEON Stage-2 training."""
 
@@ -632,9 +674,9 @@ class _ProjectedPriorBranch(nn.Module):
                 "extra_features were supplied but this prior branch was built without them."
             )
         flat = branch_features.reshape(-1, branch_features.shape[-1])
-        basis = torch.stack(
-            [mlp(flat).reshape(B, K, T, Nv, self.out_channels) for mlp in self.basis],
-            dim=-1,
+        grouped = _grouped_pointwise_mlp_forward(self.basis, flat)
+        basis = grouped.permute(1, 2, 0).reshape(
+            B, K, T, Nv, self.out_channels, self.epistemic_dim
         )
         z_dot = z_e.to(device=features.device, dtype=features.dtype).view(
             1, int(z_e.shape[0]), 1, 1, 1, 1, self.epistemic_dim

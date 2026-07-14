@@ -236,6 +236,42 @@ def test_projected_branch_dot_product_matches_constant_coefficients():
     torch.testing.assert_close(out.prediction, expected)
 
 
+def test_projected_prior_batches_basis_networks_without_sequential_dispatch():
+    torch.manual_seed(19)
+    head = NEONEpistemicCorrection(
+        feature_channels=3,
+        out_channels=1,
+        epistemic_dim=4,
+        train_hidden_channels=5,
+        prior_hidden_channels=5,
+        alpha=1.0,
+        branch_type="projected",
+        concat_index=False,
+        epistemic_basis="identity",
+    )
+    features = torch.randn(1, 2, 3, 4, 3)
+    z_e = torch.randn(3, 4)
+    expected = head.compute_prior(features, z_e).detach()
+
+    sequential_dispatches = {"count": 0}
+    hooks = [
+        mlp.register_forward_hook(
+            lambda module, inputs, output: sequential_dispatches.__setitem__(
+                "count", sequential_dispatches["count"] + 1
+            )
+        )
+        for mlp in head.prior_branch.basis
+    ]
+    try:
+        actual = head.compute_prior(features, z_e).detach()
+    finally:
+        for hook in hooks:
+            hook.remove()
+
+    torch.testing.assert_close(actual, expected)
+    assert sequential_dispatches["count"] == 0
+
+
 def test_freeze_stage1_model_switches_to_eval_and_removes_gradients():
     model = nn.Sequential(nn.Linear(3, 4), nn.Dropout(p=0.5), nn.Linear(4, 1))
     model.train()
