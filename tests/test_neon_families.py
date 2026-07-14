@@ -34,6 +34,7 @@ fam_mod = _load_module("neuralop.flood.train.neon_families", "neuralop/flood/tra
 grouped_sample_to_family = fam_mod.grouped_sample_to_family
 split_families_by_id = fam_mod.split_families_by_id
 grouped_samples_to_families = fam_mod.grouped_samples_to_families
+build_families_from_config = fam_mod.build_families_from_config
 _prepare_family_dataset_config = fam_mod._prepare_family_dataset_config
 
 
@@ -146,6 +147,37 @@ def test_grouped_samples_to_families_end_to_end_and_max_cap():
     assert len(train) + len(val) == 5  # capped
     # produced real families usable by the training loop
     assert all(f.reference.ndim == 4 for f in train + val)
+
+
+def test_build_families_explicitly_forwards_single_reference_opt_in(monkeypatch):
+    captured = {}
+
+    def fake_builder(*args, **kwargs):
+        captured.update(kwargs)
+        return object(), [_sample("HIST_A", R=1), _sample("HIST_B", R=1)]
+
+    eval_pkg = types.ModuleType("neuralop.flood.eval")
+    datasets_mod = types.ModuleType("neuralop.flood.eval.datasets")
+    datasets_mod._build_rollout_normalized_dataset = fake_builder
+    monkeypatch.setitem(sys.modules, "neuralop.flood.eval", eval_pkg)
+    monkeypatch.setitem(sys.modules, "neuralop.flood.eval.datasets", datasets_mod)
+
+    cfg = SimpleNamespace(
+        data=SimpleNamespace(n_history=3, skip_before_timestep=2),
+        rollout_data=SimpleNamespace(root="/historical/test", test_txt="historical.txt"),
+    )
+    train, val = build_families_from_config(
+        cfg,
+        normalizers={},
+        target_variables=["wd"],
+        logger=None,
+        dataset_split="test",
+        allow_single_reference=True,
+        val_fraction=0.5,
+    )
+
+    assert captured["include_single_reference_groups"] is True
+    assert [family.reference.shape[0] for family in train + val] == [1, 1]
 
 
 def test_training_family_config_uses_train_package_without_mutating_eval_config():

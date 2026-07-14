@@ -263,6 +263,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         rollout_length=args.rollout_length,
         val_fraction=float(args.val_fraction),
         dataset_split="test",
+        allow_single_reference=bool(args.allow_single_reference),
     )
     # Select the requested split and drop the other list immediately: the full
     # 500-family TR set is ~15 GB of host RAM, and the per-family metric pass

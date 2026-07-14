@@ -354,6 +354,7 @@ def build_families_from_config(
     wettable_area_weights: bool = True,
     dataset_split: str = "train",
     split_txt: str | None = None,
+    allow_single_reference: bool = False,
 ) -> Tuple[list[NEONFamilySample], list[NEONFamilySample]]:
     """Build (train, val) NEONFamilySample splits from a flood eval config.
 
@@ -363,7 +364,8 @@ def build_families_from_config(
     skip_before_timestep, rollout_length, query_res) and ``rollout_data``
     sections. By default, an eval-style ``rollout_data`` test view is converted
     to the grouped training package described by ``data.train_root``. Requires
-    grouped hydrographs (R>1 references).
+    grouped hydrographs (R>1 references) unless ``allow_single_reference`` is
+    explicitly enabled for retrospective evaluation against one trajectory.
     """
     # Lazy import so this module's converter unit tests stay free of the heavy
     # dataset/IO dependency chain.
@@ -391,11 +393,13 @@ def build_families_from_config(
         split_txt=resolved_split_txt,
         split_name=split_name,
         config_section="rollout_data",
+        include_single_reference_groups=bool(allow_single_reference),
     )
     if not hydrograph_samples:
         raise ValueError(
             "dataset builder produced no grouped hydrograph samples; NEON Stage-2 "
-            "requires grouped families with R>1 HEC-RAS references per hydrograph."
+            "requires grouped families with R>1 HEC-RAS references per hydrograph "
+            "unless allow_single_reference=True is explicitly selected."
         )
     data_section = _get(family_config, "data")
     skip = int(_get(data_section, "skip_before_timestep", 0)) if data_section is not None else 0

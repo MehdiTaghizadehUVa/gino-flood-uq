@@ -493,6 +493,7 @@ def _build_rollout_normalized_dataset(
     split_txt: str | None = None,
     split_name: str = "test",
     config_section: str = "rollout_data",
+    include_single_reference_groups: bool = False,
 ) -> Tuple[Any, Optional[List[Dict[str, Any]]]]:
     """Build rollout dataset and optional grouped hydrograph samples.
 
@@ -500,7 +501,8 @@ def _build_rollout_normalized_dataset(
     previous implementation collected every run, stacked the full package into
     large tensors, then regrouped it. That doubled peak host memory and can OOM
     before rollout starts. For grouped runs, normalize and yield one hydrograph
-    at a time instead.
+    at a time instead. Single-run groups remain disabled by default and are
+    exposed only for explicit single-reference retrospective evaluation.
     """
     cfg = getattr(config, config_section)
     rollout_length = config.data.rollout_length
@@ -572,7 +574,13 @@ def _build_rollout_normalized_dataset(
 
     groups = group_run_ids_by_hydrograph(rds.valid_run_ids)
     sims_per_hydro = [len(v) for v in groups.values()] if groups else []
-    grouped_mode = bool(sims_per_hydro and max(sims_per_hydro) > 1)
+    grouped_mode = bool(
+        sims_per_hydro
+        and (
+            bool(include_single_reference_groups)
+            or max(sims_per_hydro) > 1
+        )
+    )
     if grouped_mode:
         logger.info(
             "Rollout runs: %d total | Hydrographs: %d (sims per hydrograph min=%d max=%d)",
@@ -618,9 +626,10 @@ def _build_rollout_normalized_dataset(
     if grouped_mode:
         run_id_to_idx = {rid: i for i, rid in enumerate(rds.valid_run_ids)}
         group_items = []
+        minimum_group_size = 1 if include_single_reference_groups else 2
         for hydro_id, run_ids_group in groups.items():
             indices = [run_id_to_idx[rid] for rid in run_ids_group if rid in run_id_to_idx]
-            if len(indices) >= 2:
+            if len(indices) >= minimum_group_size:
                 group_items.append((hydro_id, indices))
 
         def _build_hydrograph_sample(hydro_id: str, normalized_group: List[Dict[str, Any]]):
