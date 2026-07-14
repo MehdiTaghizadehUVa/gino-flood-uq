@@ -59,3 +59,19 @@ def test_g1_gate_fails_worse_crps_even_with_rmse_parity(tmp_path):
     )
     assert report["gate_passed"] is False
     assert report["checks"]["mixture_crps_nonworse"] is False
+
+
+def test_g1_report_writer_emits_all_formats(tmp_path):
+    script = _load_script()
+    report = script.evaluate_g1(
+        _write_run(tmp_path), bootstrap_replicates=100, seed=7
+    )
+    output_dir = tmp_path / "reports"
+
+    script._write_reports(output_dir, report)
+
+    assert (output_dir / "g1_gate.json").is_file()
+    assert (output_dir / "g1_gate.csv").is_file()
+    markdown = (output_dir / "g1_gate.md").read_text()
+    assert "| Frozen model-0 |" in markdown
+    assert "**G1 passed:** `true`" in markdown

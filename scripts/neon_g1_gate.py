@@ -167,9 +167,9 @@ def _write_reports(output_dir: Path, report: dict[str, Any]) -> None:
     ]
     for row in report["comparison_table"]:
         lines.append(
-            f"| {row[estimator]} | {row[fair_crps_m]:.6f} | {row[rmse_m]:.6f} |"
+            f"| {row['estimator']} | {row['fair_crps_m']:.6f} | {row['rmse_m']:.6f} |"
         )
-    lines.extend(("", f"**G1 passed:** `{str(report[gate_passed]).lower()}`"))
+    lines.extend(("", f"**G1 passed:** `{str(report['gate_passed']).lower()}`"))
     (output_dir / "g1_gate.md").write_text("\n".join(lines) + "\n")
 
 
