@@ -635,6 +635,9 @@ def run_neon_stage2_training(
             map_location=probe.features.device,
         )
         module.load_state_dict(resume_payload["state_dict"])
+        generator_state = resume_payload.get("generator_state")
+        if generator is not None and generator_state is not None:
+            generator.set_state(generator_state.detach().cpu())
         logging.getLogger(__name__).info(
             "resuming NEON Stage-2 training from %s at epoch %d",
             resume_path,
@@ -911,6 +914,12 @@ def run_neon_stage2_training(
             initial_best_val_fit=math.inf
             if resume_payload is None
             else float(resume_payload["best_val_fit"]),
+            initial_particle_training_step=0
+            if resume_payload is None
+            else int(resume_payload.get("particle_training_step", 0)),
+            initial_n_ineligible_epochs=0
+            if resume_payload is None
+            else int(resume_payload.get("n_ineligible_epochs", 0)),
         )
     finally:
         close_collector = getattr(collector, "close", None)

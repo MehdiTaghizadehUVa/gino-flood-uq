@@ -49,3 +49,16 @@ def test_preflight_manifest_records_fully_validated_config(tmp_path):
     assert payload["ladder_rung"] == "B4"
     assert payload["config"]["prior_scale"]["mode"] == "de_spread_target"
     assert payload["config"]["prior_scale"]["target_std_m"] == 0.023
+
+
+def test_training_state_paths_resume_only_from_an_existing_epoch_state(tmp_path):
+    script = _load_script()
+
+    latest, resume = script._training_state_paths(tmp_path)
+    assert latest == tmp_path / "neon_stage2_latest_state.pt"
+    assert resume is None
+
+    latest.write_bytes(b"completed epoch state")
+    latest_again, resume = script._training_state_paths(tmp_path)
+    assert latest_again == latest
+    assert resume == latest

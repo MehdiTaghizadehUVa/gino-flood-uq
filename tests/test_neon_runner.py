@@ -597,3 +597,67 @@ def test_runner_allows_large_disk_feature_cache(tmp_path):
 
     assert result.history
     assert list((tmp_path / "feature_cache").glob("*_bank0_k2.pt"))
+
+
+def test_runner_resume_matches_uninterrupted_training_exactly(tmp_path):
+    def run(output_dir, *, n_epochs, seed, resume=False):
+        config = NEONStage2Config(
+            enabled=True,
+            d_e=4,
+            m_train=2,
+            k_train=2,
+            m_eval=2,
+            k_eval=2,
+            n_epochs=n_epochs,
+            feature_source="decoder_pre_projection",
+            alpha=0.05,
+            lead_time_dim=0,
+        )
+        state_path = output_dir / "neon_stage2_latest_state.pt"
+        return run_neon_stage2_training(
+            config=config,
+            stage1_checkpoint="dummy_fgno.pt",
+            output_dir=output_dir,
+            data_root="ignored",
+            load_stage1_fn=lambda ckpt: _DummyStage1(),
+            build_families_fn=lambda root, cfg: (
+                [_family("a", 0.0), _family("b", 0.5)],
+                [_family("v", 0.2)],
+            ),
+            latent_dim=8,
+            calibrate_prior=False,
+            generator=torch.Generator().manual_seed(seed),
+            latest_checkpoint_path=state_path,
+            resume_state_path=state_path if resume else None,
+        )
+
+    uninterrupted_dir = tmp_path / "uninterrupted"
+    torch.manual_seed(91)
+    uninterrupted = run(uninterrupted_dir, n_epochs=2, seed=37)
+
+    resumed_dir = tmp_path / "resumed"
+    torch.manual_seed(91)
+    first = run(resumed_dir, n_epochs=1, seed=37)
+    assert len(first.history) == 1
+    # A different caller seed must be replaced by the saved generator state.
+    resumed = run(resumed_dir, n_epochs=2, seed=999, resume=True)
+
+    stable_history = lambda rows: [
+        {key: value for key, value in row.items() if key != "epoch_seconds"}
+        for row in rows
+    ]
+    assert stable_history(uninterrupted.history) == stable_history(resumed.history)
+    full_state = train_neon.load_neon_stage2_training_state(
+        uninterrupted_dir / "neon_stage2_latest_state.pt"
+    )
+    resumed_state = train_neon.load_neon_stage2_training_state(
+        resumed_dir / "neon_stage2_latest_state.pt"
+    )
+    assert torch.equal(full_state["generator_state"], resumed_state["generator_state"])
+    assert full_state["particle_training_step"] == resumed_state["particle_training_step"]
+    assert full_state["n_ineligible_epochs"] == resumed_state["n_ineligible_epochs"]
+    assert full_state["state_dict"].keys() == resumed_state["state_dict"].keys()
+    for key in full_state["state_dict"]:
+        torch.testing.assert_close(
+            full_state["state_dict"][key], resumed_state["state_dict"][key], rtol=0, atol=0
+        )

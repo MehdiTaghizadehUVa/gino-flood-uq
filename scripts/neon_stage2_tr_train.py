@@ -192,6 +192,13 @@ def _sha256(path: str) -> str:
     return h.hexdigest()
 
 
+def _training_state_paths(output_dir: Path) -> tuple[Path, Path | None]:
+    """Return the atomic epoch-state target and an existing resume source."""
+
+    latest = Path(output_dir) / "neon_stage2_latest_state.pt"
+    return latest, latest if latest.is_file() else None
+
+
 def main() -> int:
     config = _resolved_ladder_config(
         LADDER_RUNG,
@@ -280,6 +287,12 @@ def main() -> int:
 
     gen = torch.Generator().manual_seed(0)
     t1 = time.time()
+    latest_state_path, resume_state_path = _training_state_paths(OUT_DIR)
+    if resume_state_path is not None:
+        LOG.info("resuming completed-epoch state from %s", resume_state_path)
+    else:
+        LOG.info("starting a new run; epoch state will be saved to %s", latest_state_path)
+
     def load_prepared_stage1(_checkpoint):
         return stage1
 
@@ -302,6 +315,8 @@ def main() -> int:
         epistemic_chunk_size=1,
         val_seed=VAL_SEED,
         prior_seed=PRIOR_SEED,
+        latest_checkpoint_path=latest_state_path,
+        resume_state_path=resume_state_path,
         normalizer_fingerprint=normalizer_fingerprint,
         structural_dry_policy={
             "policy": "frozen_stage1_bundle",

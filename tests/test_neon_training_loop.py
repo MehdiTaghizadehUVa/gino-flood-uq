@@ -210,6 +210,7 @@ def test_epoch_loop_saves_latest_state_and_resumes_training(tmp_path):
     module = _module()
     opt = build_neon_stage2_optimizer(module, learning_rate=1e-2)
     latest = tmp_path / "neon_stage2_latest.pt"
+    generator = torch.Generator().manual_seed(123)
 
     first = train_neon_stage2_epochs(
         module=module,
@@ -221,6 +222,7 @@ def test_epoch_loop_saves_latest_state_and_resumes_training(tmp_path):
         m_train=2,
         k_train=4,
         d_e=4,
+        generator=generator,
         latest_checkpoint_path=latest,
     )
     assert latest.exists()
@@ -228,6 +230,9 @@ def test_epoch_loop_saves_latest_state_and_resumes_training(tmp_path):
     assert state["next_epoch"] == 1
     assert len(state["history"]) == 1
     assert state["best_epoch"] == first.best_epoch
+    assert torch.equal(state["generator_state"], generator.get_state())
+    assert state["particle_training_step"] == 0
+    assert state["n_ineligible_epochs"] >= 0
 
     resumed_module = _module()
     resumed_optimizer = build_neon_stage2_optimizer(resumed_module, learning_rate=1e-2)

@@ -35,18 +35,61 @@ test -z "$(git -C "${REPO}" status --porcelain)" || {
   echo "Refusing to preflight a dirty tree" >&2
   exit 2
 }
+
+CONTINUE=${NEON_CONTINUE:-0}
+STATE_PATH=${OUT_DIR}/neon_stage2_latest_state.pt
+SUBMISSION_MODE=initial
+EXPECTED_PREFLIGHT_SHA=
+GENERATED_PREFLIGHT=${PREFLIGHT}
 if [[ -s "${OUT_DIR}/job_id.txt" ]]; then
-  echo "Output already has a submitted job: ${OUT_DIR}" >&2
-  exit 2
+  [[ "${CONTINUE}" == 1 ]] || {
+    echo "Output already has a submitted job: ${OUT_DIR}; set NEON_CONTINUE=1 only after it stops" >&2
+    exit 2
+  }
+  SUBMISSION_MODE=continuation
+  GENERATED_PREFLIGHT=${PREFLIGHT}.candidate.$$
+  PREVIOUS_JOB_ID=$(<"${OUT_DIR}/job_id.txt")
+  [[ -s "${STATE_PATH}" ]] || {
+    echo "Cannot continue without a completed-epoch state: ${STATE_PATH}" >&2
+    exit 2
+  }
+  [[ -s "${OUT_DIR}/git_head.txt" ]] || {
+    echo "Cannot verify provenance: missing ${OUT_DIR}/git_head.txt" >&2
+    exit 2
+  }
+  [[ "$(<"${OUT_DIR}/git_head.txt")" == "${HEAD}" ]] || {
+    echo "Refusing cross-commit continuation for ${OUT_DIR}" >&2
+    exit 2
+  }
+  [[ -s "${PREFLIGHT}" ]] || {
+    echo "Cannot verify continuation config: missing ${PREFLIGHT}" >&2
+    exit 2
+  }
+  EXPECTED_PREFLIGHT_SHA=$(sha256sum "${PREFLIGHT}" | cut -d" " -f1)
+  if squeue -j "${PREVIOUS_JOB_ID}" -h 2>/dev/null | grep -q .; then
+    echo "Previous job ${PREVIOUS_JOB_ID} is still active; refusing duplicate continuation" >&2
+    exit 2
+  fi
+else
+  [[ "${CONTINUE}" != 1 ]] || {
+    echo "NEON_CONTINUE=1 requested, but no prior job exists in ${OUT_DIR}" >&2
+    exit 2
+  }
 fi
 mkdir -p "${OUT_DIR}"
+cleanup_candidate() {
+  if [[ "${GENERATED_PREFLIGHT}" != "${PREFLIGHT}" ]]; then
+    rm -f "${GENERATED_PREFLIGHT}"
+  fi
+}
+trap cleanup_candidate EXIT
 
 module purge
 module load apptainer
 export APPTAINERENV_PYTHONPATH="${REPO}"
 ENV_ARGS=(
   "NEON_PLAN_ONLY=1"
-  "NEON_PREFLIGHT_PATH=${PREFLIGHT}"
+  "NEON_PREFLIGHT_PATH=${GENERATED_PREFLIGHT}"
   "NEON_LADDER_RUNG=${RUNG}"
   "NEON_N_TRAIN=${N_TRAIN}"
   "NEON_OUT_DIR=${OUT_DIR}"
@@ -57,14 +100,30 @@ if [[ -n "${NEON_DE_SPREAD_MULTIPLIER:-}" ]]; then
 fi
 apptainer exec --bind /scratch,/home "${CONTAINER}" \
   env "${ENV_ARGS[@]}" python "${REPO}/scripts/neon_stage2_tr_train.py"
-test -s "${PREFLIGHT}"
+test -s "${GENERATED_PREFLIGHT}"
 apptainer exec --bind /scratch,/home "${CONTAINER}" \
   python -c 'import json,sys; p=json.load(open(sys.argv[1])); assert p["schema_version"] == "neon_repair_preflight_v1"' \
-  "${PREFLIGHT}"
+  "${GENERATED_PREFLIGHT}"
+if [[ -n "${EXPECTED_PREFLIGHT_SHA}" ]]; then
+  CURRENT_PREFLIGHT_SHA=$(sha256sum "${GENERATED_PREFLIGHT}" | cut -d" " -f1)
+  [[ "${CURRENT_PREFLIGHT_SHA}" == "${EXPECTED_PREFLIGHT_SHA}" ]] || {
+    echo "Refusing continuation because the validated preflight config changed" >&2
+    exit 2
+  }
+  apptainer exec --bind /scratch,/home "${CONTAINER}" \
+    python -c 'import json,sys,torch
+state=torch.load(sys.argv[1], map_location="cpu")
+preflight=json.load(open(sys.argv[2]))
+next_epoch=int(state["next_epoch"])
+n_epochs=int(preflight["config"]["n_epochs"])
+assert next_epoch < n_epochs, f"training already complete: next_epoch={next_epoch}, n_epochs={n_epochs}"' \
+    "${STATE_PATH}" "${GENERATED_PREFLIGHT}"
+fi
 printf '%s\n' "${HEAD}" > "${OUT_DIR}/preflight_git_head.txt"
 
 if [[ "${NEON_SUBMIT_DRY_RUN:-0}" == 1 ]]; then
-  printf 'Validated only: rung=%s head=%s preflight=%s\n' "${RUNG}" "${HEAD}" "${PREFLIGHT}"
+  printf 'Validated only: rung=%s mode=%s head=%s preflight=%s\n' \
+    "${RUNG}" "${SUBMISSION_MODE}" "${HEAD}" "${PREFLIGHT}"
   exit 0
 fi
 
@@ -79,4 +138,9 @@ JOB_ID=$(sbatch --parsable \
   --export="${EXPORTS}" \
   "${SBATCH_SCRIPT}")
 printf '%s\n' "${JOB_ID}" > "${OUT_DIR}/job_id.txt"
-printf 'Submitted %s: job=%s head=%s preflight=%s\n' "${RUNG}" "${JOB_ID}" "${HEAD}" "${PREFLIGHT}"
+printf '%s\n' "${JOB_ID}" >> "${OUT_DIR}/job_ids.txt"
+printf '%s\t%s\t%s\t%s\n' \
+  "$(date --iso-8601=seconds)" "${SUBMISSION_MODE}" "${JOB_ID}" "${HEAD}" \
+  >> "${OUT_DIR}/submission_history.tsv"
+printf 'Submitted %s (%s): job=%s head=%s preflight=%s\n' \
+  "${RUNG}" "${SUBMISSION_MODE}" "${JOB_ID}" "${HEAD}" "${PREFLIGHT}"

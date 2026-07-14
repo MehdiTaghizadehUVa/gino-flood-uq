@@ -979,6 +979,9 @@ def save_neon_stage2_training_state(
     best_epoch: int = -1,
     best_val_fit: float = math.inf,
     next_epoch: int = 0,
+    generator: Optional[torch.Generator] = None,
+    particle_training_step: int = 0,
+    n_ineligible_epochs: int = 0,
 ) -> None:
     """Save resumable Stage-2 training state after a completed epoch."""
 
@@ -993,6 +996,11 @@ def save_neon_stage2_training_state(
         "best_epoch": int(best_epoch),
         "best_val_fit": float(best_val_fit),
         "next_epoch": int(next_epoch),
+        "generator_state": (
+            None if generator is None else generator.get_state().detach().cpu().clone()
+        ),
+        "particle_training_step": int(particle_training_step),
+        "n_ineligible_epochs": int(n_ineligible_epochs),
     }
     tmp = state_path.with_name(f"{state_path.name}.tmp{os.getpid()}")
     torch.save(payload, tmp)
@@ -1591,6 +1599,8 @@ def train_neon_stage2_epochs(
     initial_history: Optional[Sequence[Mapping[str, Any]]] = None,
     initial_best_epoch: int = -1,
     initial_best_val_fit: float = math.inf,
+    initial_particle_training_step: int = 0,
+    initial_n_ineligible_epochs: int = 0,
 ) -> NEONTrainingResult:
     """Run the family-level Stage-2 epoch loop.
 
@@ -1625,8 +1635,8 @@ def train_neon_stage2_epochs(
     history: list[dict[str, float]] = [dict(row) for row in (initial_history or [])]
     best_val = float(initial_best_val_fit)
     best_epoch = int(initial_best_epoch)
-    n_ineligible_epochs = 0
-    particle_training_step = 0
+    n_ineligible_epochs = int(initial_n_ineligible_epochs)
+    particle_training_step = int(initial_particle_training_step)
     first_epoch = max(0, int(start_epoch))
     total_epochs = int(n_epochs)
     if first_epoch > total_epochs:
@@ -1883,6 +1893,9 @@ def train_neon_stage2_epochs(
                     best_epoch=best_epoch,
                     best_val_fit=best_val,
                     next_epoch=int(epoch) + 1,
+                    generator=generator,
+                    particle_training_step=particle_training_step,
+                    n_ineligible_epochs=n_ineligible_epochs,
                 )
             continue
 
@@ -2035,6 +2048,9 @@ def train_neon_stage2_epochs(
                 best_epoch=best_epoch,
                 best_val_fit=best_val,
                 next_epoch=int(epoch) + 1,
+                generator=generator,
+                particle_training_step=particle_training_step,
+                n_ineligible_epochs=n_ineligible_epochs,
             )
 
     if checkpoint_path is not None and best_epoch < 0 and history:
