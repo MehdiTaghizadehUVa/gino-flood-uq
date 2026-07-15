@@ -18,6 +18,7 @@ from neuralop.flood.serving.repository import (
     _runtime_seconds,
 )
 from neuralop.flood.serving.run_spec import RunSpec, RunStatus, ensure_transition
+from neuralop.flood.serving.sql_schema import create_all_safely
 
 
 class SqlRunRepository:
@@ -46,7 +47,7 @@ class SqlRunRepository:
             sa.Column("completed_at", sa.DateTime(timezone=True), nullable=True),
             sa.Column("runtime_seconds", sa.Float, nullable=True),
         )
-        self.table.metadata.create_all(self.engine)
+        create_all_safely(self.sa, self.engine, self.table.metadata)
         self._ensure_runtime_columns()
 
     def _ensure_runtime_columns(self) -> None:

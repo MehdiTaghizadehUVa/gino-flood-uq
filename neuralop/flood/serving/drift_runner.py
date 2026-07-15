@@ -15,6 +15,7 @@ from datetime import datetime, timezone
 
 from neuralop.flood.serving.drift import DriftDetector, DriftTestConfig, DriftTestResult
 from neuralop.flood.serving.monitoring import MonitoringBundle, MonitoringPhase
+from neuralop.flood.serving.sql_schema import create_all_safely
 
 logger = logging.getLogger(__name__)
 
@@ -62,7 +63,7 @@ def run_drift_tests(
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False, index=True),
         extend_existing=True,
     )
-    metadata.create_all(engine, tables=[drift_results_table])
+    create_all_safely(sa, engine, metadata, tables=[drift_results_table])
     _ensure_drift_columns(sa, engine)
 
     with engine.begin() as conn:

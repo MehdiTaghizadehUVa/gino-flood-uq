@@ -17,7 +17,7 @@ services:
       postgres:
         condition: service_healthy
     healthcheck:
-      test: ["CMD-SHELL", "python -c 'import urllib.request; r=urllib.request.urlopen(\"http://127.0.0.1:8000/api/health\", timeout=3); import sys; sys.exit(0 if r.status == 200 else 1)'"]
+      test: ["CMD-SHELL", "python -c 'import json, sys, urllib.request; r=urllib.request.urlopen(\"http://127.0.0.1:8000/api/health\", timeout=3); payload=json.loads(r.read().decode()); sys.exit(0 if r.status == 200 and payload.get(\"status\") == \"ok\" and payload.get(\"production_inference_ready\") is True else 1)'"]
       interval: 30s
       timeout: 5s
       retries: 5

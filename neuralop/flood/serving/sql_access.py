@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from typing import Iterable
 
 from neuralop.flood.serving.access import AccessRecord, _normalize_email
+from neuralop.flood.serving.sql_schema import create_all_safely
 
 
 class SqlAccessRepository:
@@ -27,7 +28,7 @@ class SqlAccessRepository:
             sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
             sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
         )
-        self.table.metadata.create_all(self.engine)
+        create_all_safely(self.sa, self.engine, self.table.metadata)
 
     def _row_to_record(self, row) -> AccessRecord:
         row = getattr(row, "_mapping", row)

@@ -15,6 +15,7 @@ from neuralop.flood.serving.monitoring import (
     MonitoringPhase,
     MonitoringReport,
 )
+from neuralop.flood.serving.sql_schema import create_all_safely
 
 
 class SqlMonitoringRepository:
@@ -103,7 +104,7 @@ class SqlMonitoringRepository:
             sa.Column("details_json", sa.Text, nullable=True),
             sa.Column("created_at", sa.DateTime(timezone=True), nullable=False, index=True),
         )
-        metadata.create_all(self.engine)
+        create_all_safely(self.sa, self.engine, metadata)
         self._ensure_phase2_columns()
 
     def create_report(self, report: MonitoringReport) -> MonitoringReport:

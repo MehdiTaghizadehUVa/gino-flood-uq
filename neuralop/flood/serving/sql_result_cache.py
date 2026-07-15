@@ -18,6 +18,7 @@ from neuralop.flood.serving.result_cache import (
     ResultCacheRunRole,
     ResultCacheRunStatus,
 )
+from neuralop.flood.serving.sql_schema import create_all_safely
 
 
 class SqlResultCacheRepository(ResultCacheRepository):
@@ -50,7 +51,7 @@ class SqlResultCacheRepository(ResultCacheRepository):
             sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
             sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
         )
-        metadata.create_all(self.engine)
+        create_all_safely(self.sa, self.engine, metadata)
 
     def reserve_or_find(self, cache_key: str, producer_run_id: str) -> ResultCacheReservation:
         now = datetime.now(timezone.utc)

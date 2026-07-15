@@ -805,6 +805,62 @@ def test_sql_result_cache_repository_records_hits_and_waiters(tmp_path):
     assert repo.link_for_run("third").status.value == "MATERIALIZED"
 
 
+def test_sql_schema_create_all_safely_locks_postgres_schema_init():
+    from neuralop.flood.serving.sql_schema import SCHEMA_INIT_ADVISORY_LOCK_KEY, create_all_safely
+
+    class _Dialect:
+        name = "postgresql"
+
+    class _Connection:
+        def __init__(self):
+            self.executed = []
+
+        def execute(self, statement, params):
+            self.executed.append((statement, params))
+
+    class _Begin:
+        def __init__(self, connection):
+            self.connection = connection
+
+        def __enter__(self):
+            return self.connection
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    class _Engine:
+        dialect = _Dialect()
+
+        def __init__(self):
+            self.connection = _Connection()
+
+        def begin(self):
+            return _Begin(self.connection)
+
+    class _Metadata:
+        def __init__(self):
+            self.create_all_calls = []
+
+        def create_all(self, bind, *, tables=None):
+            self.create_all_calls.append((bind, tables))
+
+    class _SqlAlchemy:
+        @staticmethod
+        def text(statement):
+            return statement
+
+    engine = _Engine()
+    metadata = _Metadata()
+    tables = [object()]
+
+    create_all_safely(_SqlAlchemy, engine, metadata, tables=tables)
+
+    assert engine.connection.executed == [
+        ("SELECT pg_advisory_xact_lock(:lock_key)", {"lock_key": SCHEMA_INIT_ADVISORY_LOCK_KEY})
+    ]
+    assert metadata.create_all_calls == [(engine.connection, tables)]
+
+
 def test_result_cache_materialization_replaces_partial_local_artifact(tmp_path):
     repo = InMemoryResultCacheRepository()
     run_store = LocalArtifactStore(tmp_path / "runs")

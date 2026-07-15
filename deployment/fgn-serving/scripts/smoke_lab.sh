@@ -39,10 +39,51 @@ https_check() {
   done
 }
 
-log "checking public API health endpoint."
-https_check "https://${FGN_SITE_HOSTNAME}/api/health" 12 5 15
-log "checking public model-bundle health endpoint."
-https_check "https://${FGN_SITE_HOSTNAME}/api/model-bundle-health" 8 5 30
+api_json_check() {
+  local path="$1" max_attempts="${2:-10}" delay="${3:-5}"
+  local attempt=0
+  until compose exec -T api python - "${path}" <<'PY' >/dev/null; do
+import json
+import sys
+import urllib.request
+
+path = sys.argv[1]
+response = urllib.request.urlopen(f"http://127.0.0.1:8000{path}", timeout=15)
+payload = json.loads(response.read().decode())
+if response.status != 200:
+    raise SystemExit(f"{path} returned HTTP {response.status}")
+if path == "/api/health":
+    if payload.get("status") != "ok" or payload.get("production_inference_ready") is not True:
+        raise SystemExit(f"{path} not ready: {payload}")
+elif path == "/api/model-bundle-health":
+    required = ("bundle_id", "total_members", "max_forecast_steps", "initial_condition")
+    missing = [key for key in required if key not in payload]
+    if missing:
+        raise SystemExit(f"{path} missing required keys: {missing}")
+PY
+    attempt=$(( attempt + 1 ))
+    if (( attempt >= max_attempts )); then
+      compose exec -T api python - "${path}" <<'PY'
+import json
+import sys
+import urllib.request
+
+path = sys.argv[1]
+response = urllib.request.urlopen(f"http://127.0.0.1:8000{path}", timeout=15)
+payload = json.loads(response.read().decode())
+print(json.dumps(payload, indent=2, sort_keys=True))
+raise SystemExit(f"{path} failed readiness checks")
+PY
+    fi
+    log "API JSON health not ready (attempt ${attempt}/${max_attempts}): ${path} — retrying in ${delay}s"
+    sleep "${delay}"
+  done
+}
+
+log "checking internal API health payload."
+api_json_check "/api/health" 12 5
+log "checking internal model-bundle health payload."
+api_json_check "/api/model-bundle-health" 8 5
 log "checking public frontend route."
 https_check "https://${FGN_SITE_HOSTNAME}/" 8 5 15
 
