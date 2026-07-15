@@ -1910,7 +1910,7 @@ export default function Page() {
                   disabled={busy}
                   aria-label={`Load ${scenario.name} scenario: ${scenario.description}`}
                 >
-                  <span className="scenario-kicker">{scenario.testCaseId} · full held-out forcing</span>
+                  <span className="scenario-kicker">{scenario.testCaseId} · preloaded historical forcing</span>
                   <strong>{scenario.name}</strong>
                   <span className="scenario-desc">{scenario.description}</span>
                   <span className="scenario-meta">
