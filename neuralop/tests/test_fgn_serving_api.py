@@ -192,6 +192,13 @@ def test_create_run_disallowed_email_returns_403(env):
     assert response.status_code == 403
 
 
+def test_get_unknown_run_returns_404_instead_of_500(env):
+    env["provider"].current = _alice()
+    response = env["client"].get("/api/runs/not-a-real-run")
+    assert response.status_code == 404
+    assert "Run not found" in response.json()["detail"]
+
+
 def test_create_run_invalid_csv_returns_400_and_does_not_queue(env):
     env["provider"].current = _alice()
     bad_csv = "stage,precipitation\n1.0\n"  # missing rows + bad timestep

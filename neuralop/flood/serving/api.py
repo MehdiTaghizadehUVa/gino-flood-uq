@@ -107,6 +107,12 @@ def create_app(orchestrator: RunOrchestrator, *, current_user: Callable[[], User
         except PermissionError as exc:
             raise HTTPException(status_code=403, detail=str(exc)) from exc
 
+    def _get_run_or_404(run_id: str):
+        try:
+            return orchestrator.repository.get(run_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=f"Run not found: {run_id}") from exc
+
     def _require_admin(user: User) -> None:
         try:
             orchestrator.access_policy.require_admin(user)
@@ -442,13 +448,13 @@ def create_app(orchestrator: RunOrchestrator, *, current_user: Callable[[], User
 
     @app.get("/api/runs/{run_id}")
     def get_run(run_id: str, user: User = Depends(_current_user)):
-        record = orchestrator.repository.get(run_id)
+        record = _get_run_or_404(run_id)
         _require_run_read(user, record)
         return _run_payload(record, include_admin_cache=bool(user.is_admin))
 
     @app.get("/api/runs/{run_id}/monitoring")
     def get_run_monitoring(run_id: str, user: User = Depends(_current_user)):
-        record = orchestrator.repository.get(run_id)
+        record = _get_run_or_404(run_id)
         _require_run_read(user, record)
         if orchestrator.monitoring_orchestrator is None:
             return {"available": False, "monitoring_bundle_id": None, "reports": [], "candidate": None}
@@ -456,7 +462,7 @@ def create_app(orchestrator: RunOrchestrator, *, current_user: Callable[[], User
 
     @app.get("/api/runs/{run_id}/artifacts")
     def list_artifacts(run_id: str, user: User = Depends(_current_user)):
-        record = orchestrator.repository.get(run_id)
+        record = _get_run_or_404(run_id)
         _require_run_read(user, record)
         return [
             {"artifact_id": ref.artifact_id, "content_type": ref.content_type, "size_bytes": ref.size_bytes}
@@ -465,7 +471,7 @@ def create_app(orchestrator: RunOrchestrator, *, current_user: Callable[[], User
 
     @app.get("/api/runs/{run_id}/artifacts/{artifact_id}")
     def get_artifact(run_id: str, artifact_id: str, user: User = Depends(_current_user)):
-        record = orchestrator.repository.get(run_id)
+        record = _get_run_or_404(run_id)
         _require_run_read(user, record)
         data = orchestrator.artifact_store.read_bytes(run_id, artifact_id)
         refs = {ref.artifact_id: ref for ref in orchestrator.artifact_store.list(run_id)}
@@ -474,8 +480,8 @@ def create_app(orchestrator: RunOrchestrator, *, current_user: Callable[[], User
 
     @app.get("/api/runs/{run_id}/compare/{other_run_id}")
     def compare_runs(run_id: str, other_run_id: str, user: User = Depends(_current_user)):
-        record_a = orchestrator.repository.get(run_id)
-        record_b = orchestrator.repository.get(other_run_id)
+        record_a = _get_run_or_404(run_id)
+        record_b = _get_run_or_404(other_run_id)
         _require_run_read(user, record_a)
         _require_run_read(user, record_b)
         if record_a.status != RunStatus.COMPLETED or record_b.status != RunStatus.COMPLETED:
@@ -534,7 +540,7 @@ def create_app(orchestrator: RunOrchestrator, *, current_user: Callable[[], User
 
     @app.post("/api/runs/{run_id}/cancel")
     def cancel_run(run_id: str, user: User = Depends(_current_user)):
-        record = orchestrator.repository.get(run_id)
+        record = _get_run_or_404(run_id)
         _require_run_read(user, record)
         return _run_payload(orchestrator.cancel(run_id), include_admin_cache=bool(user.is_admin))
 
@@ -552,7 +558,7 @@ def create_app(orchestrator: RunOrchestrator, *, current_user: Callable[[], User
         ``cell_index`` is out of range, and 403 if the caller does not own the
         run.
         """
-        record = orchestrator.repository.get(run_id)
+        record = _get_run_or_404(run_id)
         _require_run_read(user, record)
         try:
             h5_bytes = orchestrator.artifact_store.read_bytes(run_id, "forecast_members.h5")
@@ -919,7 +925,7 @@ def create_app(orchestrator: RunOrchestrator, *, current_user: Callable[[], User
     @app.post("/api/admin/runs/{run_id}/cancel")
     def admin_cancel_run(run_id: str, user: User = Depends(_current_user)):
         _require_admin(user)
-        record = orchestrator.repository.get(run_id)
+        record = _get_run_or_404(run_id)
         if record.status in TERMINAL_STATUSES:
             return _run_payload(record)
         return _run_payload(orchestrator.cancel(run_id))
