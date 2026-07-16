@@ -3,6 +3,7 @@ import caseStudyManifest from "../../public/marketing/portsmouth/manifest.json";
 import { ArrowDown, ArrowRight, ArrowUpRight, Check, Play, ShieldCheck } from "lucide-react";
 import { CalibrationGraphic } from "./components/CalibrationGraphic";
 import { ComparisonMatrix } from "./components/ComparisonMatrix";
+import { HeroFloodVideo } from "./components/HeroFloodVideo";
 import { MarketingFooter } from "./components/MarketingFooter";
 import { MarketingNav } from "./components/MarketingNav";
 import { NumberedGrid } from "./components/NumberedGrid";
@@ -84,14 +85,10 @@ export default function MarketingPage() {
       <MarketingNav />
       <main id="main-content">
         <section id="top" className="marketing-hero" aria-labelledby="hero-title">
-          <Image
-            className="hero-media"
-            src={caseStudyManifest.flagship.hero.src}
-            alt=""
-            fill
-            priority
-            sizes="100vw"
-            aria-hidden="true"
+          <HeroFloodVideo
+            posterSrc={caseStudyManifest.flagship.hero.posterSrc}
+            mp4Src={caseStudyManifest.flagship.hero.mp4Src}
+            webmSrc={caseStudyManifest.flagship.hero.webmSrc}
           />
           <div className="hero-scrim" aria-hidden="true" />
           <div className="hero-content">

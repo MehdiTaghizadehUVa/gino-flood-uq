@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import numpy as np
 import pytest
 from PIL import Image
@@ -18,6 +20,7 @@ from neuralop.flood.serving.case_study_rendering import (
     render_spatial_webp,
     render_validation_trajectory_svg,
 )
+from neuralop.flood.serving.case_study_video import encode_case_study_hero
 
 
 def test_showcase_frames_span_horizon_and_keep_scientific_milestones():
@@ -30,6 +33,32 @@ def test_showcase_frames_span_horizon_and_keep_scientific_milestones():
     assert len(selected) == 32
     assert selected == sorted(set(selected))
     assert {0, 19, 46, 66, 93}.issubset(selected)
+
+
+def test_hero_encoder_rejects_an_incomplete_scientific_sequence(tmp_path):
+    hero_dir = tmp_path / "hero"
+    frame_dir = hero_dir / "frames"
+    frame_dir.mkdir(parents=True)
+    (frame_dir / "irene_001.webp").write_bytes(b"one-frame")
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "flagship": {
+                    "hero": {
+                        "frameCount": 2,
+                        "frameRate": 4,
+                        "mp4Src": "/marketing/portsmouth/hero/animation.mp4",
+                        "webmSrc": "/marketing/portsmouth/hero/animation.webm",
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="frame count mismatch"):
+        encode_case_study_hero(manifest_path=manifest_path, ffmpeg_path="unused")
 
 
 def test_map_faces_below_display_floor_remain_transparent():

@@ -529,7 +529,57 @@ def _render_flagship(
             }
         )
 
-    hero_path = output_dir / "hero" / "irene_mean_depth_peak.webp"
+    hero_dir = output_dir / "hero"
+    hero_frame_dir = hero_dir / "frames"
+    hero_path = hero_dir / "irene_mean_depth_poster.webp"
+    hero_mp4_path = hero_dir / "irene_mean_depth_propagation.mp4"
+    hero_webm_path = hero_dir / "irene_mean_depth_propagation.webm"
+    hero_sequence_path = hero_dir / "sequence.json"
+    # The video is encoded by the lightweight case-study video tool after the
+    # scientific export. Removing prior encodes prevents stale visual evidence
+    # from surviving a regenerated frame sequence.
+    hero_mp4_path.unlink(missing_ok=True)
+    hero_webm_path.unlink(missing_ok=True)
+
+    hero_sequence: list[dict[str, int | float | str]] = []
+    for sequence_index, time_idx in enumerate(frame_indices, start=1):
+        frame_path = hero_frame_dir / f"irene_{sequence_index:03d}.webp"
+        render_spatial_webp(
+            values=mean_depth[time_idx],
+            geometry_xy=run.geometry_xy,
+            terrain=terrain,
+            output_path=frame_path,
+            title="",
+            colorbar_label="",
+            cmap=depth_cmap(),
+            vmin=0.05,
+            vmax=depth_vmax,
+            display_floor=0.05,
+            quality=80,
+            show_title=False,
+            show_colorbar=False,
+        )
+        hero_sequence.append(
+            {
+                "sequence": sequence_index,
+                "timeIndex": int(time_idx),
+                "leadHours": round(float(lead[time_idx]), 2),
+            }
+        )
+    hero_sequence_path.write_text(
+        json.dumps(
+            {
+                "schemaVersion": 1,
+                "eventId": "2011_IRENE",
+                "product": "Calibrated mean water depth",
+                "frameRate": 4,
+                "frameCount": len(hero_sequence),
+                "frames": hero_sequence,
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
     render_spatial_webp(
         values=mean_depth[peak_area_idx],
         geometry_xy=run.geometry_xy,
@@ -667,6 +717,13 @@ def _render_flagship(
         "posterSrc": products[0]["frames"][0]["src"],
         "hero": {
             "src": _relative_asset(config.public_prefix, output_dir, hero_path),
+            "posterSrc": _relative_asset(config.public_prefix, output_dir, hero_path),
+            "mp4Src": _relative_asset(config.public_prefix, output_dir, hero_mp4_path),
+            "webmSrc": _relative_asset(config.public_prefix, output_dir, hero_webm_path),
+            "sequenceSrc": _relative_asset(config.public_prefix, output_dir, hero_sequence_path),
+            "frameCount": len(hero_sequence),
+            "frameRate": 4,
+            "durationSeconds": round(len(hero_sequence) / 4.0, 2),
             "product": "Calibrated mean water depth",
             "leadHours": round(float(lead[peak_area_idx]), 2),
             "displayFloorM": 0.05,

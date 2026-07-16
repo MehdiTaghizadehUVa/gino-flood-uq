@@ -30,6 +30,13 @@ export type CaseStudyManifest = {
     posterSrc: string;
     hero: {
       src: string;
+      posterSrc: string;
+      mp4Src: string;
+      webmSrc: string;
+      sequenceSrc: string;
+      frameCount: number;
+      frameRate: number;
+      durationSeconds: number;
       product: string;
       leadHours: number;
       displayFloorM: number;

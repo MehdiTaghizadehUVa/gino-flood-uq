@@ -56,6 +56,22 @@ assert.equal(manifest.flagship.thresholdM, 0.3);
 assert.equal(manifest.flagship.hero.product, "Calibrated mean water depth");
 assert.equal(manifest.flagship.hero.displayFloorM, 0.05);
 assert.equal(manifest.flagship.hero.selection, "Peak expected footprint above 0.30 m");
+assert.equal(manifest.flagship.hero.frameCount, 32, "Hero animation must use the scientific story frame set.");
+assert.ok(
+  manifest.flagship.hero.durationSeconds >= 6 && manifest.flagship.hero.durationSeconds <= 12,
+  "Hero animation duration must remain calm enough to read and short enough to loop."
+);
+const heroSequence = JSON.parse(
+  await readFile(path.join(frontendRoot, "public", manifest.flagship.hero.sequenceSrc), "utf8")
+);
+assert.equal(heroSequence.frameCount, manifest.flagship.hero.frameCount);
+assert.equal(heroSequence.frameRate, manifest.flagship.hero.frameRate);
+assert.equal(heroSequence.frames.length, manifest.flagship.hero.frameCount);
+assert.deepEqual(
+  heroSequence.frames.map((frame) => frame.timeIndex),
+  manifest.flagship.products.find((product) => product.id === "meanDepth").frames.map((frame) => frame.timeIndex),
+  "Hero animation must preserve the same lead-time milestones as the public mean-depth evidence."
+);
 assert.deepEqual(
   manifest.flagship.decomposition.maps.map((item) => item.label),
   ["Epistemic uncertainty", "Aleatoric uncertainty"],
@@ -109,6 +125,10 @@ assert.ok(!/100[- ]member/i.test(caseStudyManifestSource), "Public evidence must
 const assetPaths = [
   manifest.flagship.posterSrc,
   manifest.flagship.hero.src,
+  manifest.flagship.hero.posterSrc,
+  manifest.flagship.hero.mp4Src,
+  manifest.flagship.hero.webmSrc,
+  manifest.flagship.hero.sequenceSrc,
   ...manifest.flagship.products.flatMap((product) => product.frames.map((frame) => frame.src)),
   ...manifest.flagship.snapshot.map((item) => item.src),
   ...manifest.flagship.locations.flatMap((item) => [item.mapSrc, item.panelSrc]),
@@ -129,6 +149,18 @@ const posterStats = await stat(path.join(frontendRoot, "public", manifest.flagsh
 assert.ok(posterStats.size <= 180 * 1024, `Case-study poster is ${(posterStats.size / 1024).toFixed(1)} KB; limit is 180 KB.`);
 const heroStats = await stat(path.join(frontendRoot, "public", manifest.flagship.hero.src));
 assert.ok(heroStats.size <= 350 * 1024, `Hero map is ${(heroStats.size / 1024).toFixed(1)} KB; limit is 350 KB.`);
+const heroPosterStats = await stat(path.join(frontendRoot, "public", manifest.flagship.hero.posterSrc));
+assert.ok(
+  heroPosterStats.size <= 180 * 1024,
+  `Hero poster is ${(heroPosterStats.size / 1024).toFixed(1)} KB; limit is 180 KB.`
+);
+for (const videoSrc of [manifest.flagship.hero.mp4Src, manifest.flagship.hero.webmSrc]) {
+  const videoStats = await stat(path.join(frontendRoot, "public", videoSrc));
+  assert.ok(
+    videoStats.size <= 4 * 1024 * 1024,
+    `Hero video ${videoSrc} is ${(videoStats.size / 1024 / 1024).toFixed(2)} MB; limit is 4 MB.`
+  );
+}
 
 const marketingFiles = await readdir(marketingRoot, { recursive: true, withFileTypes: true });
 const marketingSources = await Promise.all(
@@ -138,6 +170,7 @@ const marketingSources = await Promise.all(
 );
 const allMarketingSource = marketingSources.join("\n");
 assert.ok(!allMarketingSource.includes("/api/"), "The public marketing route must not call runtime APIs.");
+assert.ok(pageSource.includes("<HeroFloodVideo"), "The marketing hero must use the managed video component.");
 for (const legacyTerm of ["between-model", "within-model", "between model", "within model"]) {
   assert.ok(
     !allMarketingSource.toLowerCase().includes(legacyTerm),

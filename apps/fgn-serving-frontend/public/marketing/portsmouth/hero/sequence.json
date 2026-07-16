@@ -1,0 +1,169 @@
+{
+  "schemaVersion": 1,
+  "eventId": "2011_IRENE",
+  "product": "Calibrated mean water depth",
+  "frameRate": 4,
+  "frameCount": 32,
+  "frames": [
+    {
+      "sequence": 1,
+      "timeIndex": 0,
+      "leadHours": 0.25
+    },
+    {
+      "sequence": 2,
+      "timeIndex": 3,
+      "leadHours": 1.0
+    },
+    {
+      "sequence": 3,
+      "timeIndex": 6,
+      "leadHours": 1.75
+    },
+    {
+      "sequence": 4,
+      "timeIndex": 9,
+      "leadHours": 2.5
+    },
+    {
+      "sequence": 5,
+      "timeIndex": 12,
+      "leadHours": 3.25
+    },
+    {
+      "sequence": 6,
+      "timeIndex": 15,
+      "leadHours": 4.0
+    },
+    {
+      "sequence": 7,
+      "timeIndex": 18,
+      "leadHours": 4.75
+    },
+    {
+      "sequence": 8,
+      "timeIndex": 21,
+      "leadHours": 5.5
+    },
+    {
+      "sequence": 9,
+      "timeIndex": 24,
+      "leadHours": 6.25
+    },
+    {
+      "sequence": 10,
+      "timeIndex": 27,
+      "leadHours": 7.0
+    },
+    {
+      "sequence": 11,
+      "timeIndex": 30,
+      "leadHours": 7.75
+    },
+    {
+      "sequence": 12,
+      "timeIndex": 33,
+      "leadHours": 8.5
+    },
+    {
+      "sequence": 13,
+      "timeIndex": 36,
+      "leadHours": 9.25
+    },
+    {
+      "sequence": 14,
+      "timeIndex": 39,
+      "leadHours": 10.0
+    },
+    {
+      "sequence": 15,
+      "timeIndex": 42,
+      "leadHours": 10.75
+    },
+    {
+      "sequence": 16,
+      "timeIndex": 46,
+      "leadHours": 11.75
+    },
+    {
+      "sequence": 17,
+      "timeIndex": 48,
+      "leadHours": 12.25
+    },
+    {
+      "sequence": 18,
+      "timeIndex": 51,
+      "leadHours": 13.0
+    },
+    {
+      "sequence": 19,
+      "timeIndex": 54,
+      "leadHours": 13.75
+    },
+    {
+      "sequence": 20,
+      "timeIndex": 57,
+      "leadHours": 14.5
+    },
+    {
+      "sequence": 21,
+      "timeIndex": 60,
+      "leadHours": 15.25
+    },
+    {
+      "sequence": 22,
+      "timeIndex": 63,
+      "leadHours": 16.0
+    },
+    {
+      "sequence": 23,
+      "timeIndex": 66,
+      "leadHours": 16.75
+    },
+    {
+      "sequence": 24,
+      "timeIndex": 69,
+      "leadHours": 17.5
+    },
+    {
+      "sequence": 25,
+      "timeIndex": 72,
+      "leadHours": 18.25
+    },
+    {
+      "sequence": 26,
+      "timeIndex": 75,
+      "leadHours": 19.0
+    },
+    {
+      "sequence": 27,
+      "timeIndex": 78,
+      "leadHours": 19.75
+    },
+    {
+      "sequence": 28,
+      "timeIndex": 81,
+      "leadHours": 20.5
+    },
+    {
+      "sequence": 29,
+      "timeIndex": 84,
+      "leadHours": 21.25
+    },
+    {
+      "sequence": 30,
+      "timeIndex": 87,
+      "leadHours": 22.0
+    },
+    {
+      "sequence": 31,
+      "timeIndex": 90,
+      "leadHours": 22.75
+    },
+    {
+      "sequence": 32,
+      "timeIndex": 93,
+      "leadHours": 23.5
+    }
+  ]
+}
