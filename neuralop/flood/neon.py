@@ -827,11 +827,6 @@ class NEONEpistemicCorrection(nn.Module):
                 concat_index=False,
                 lead_time_dim=self.lead_time_dim,
             )
-            # Stage 2 is a residual extension of a frozen, already trained
-            # operator. Start the trainable correction at exact Stage-1 parity;
-            # the separately frozen randomized prior remains active through
-            # ``alpha`` and is intentionally not zero-initialized.
-            _zero_last_linear(self.trainable_branch.mlp)
         elif self.branch_type == "film":
             self.epistemic_basis_module = None
             self.trainable_branch = _CorrectionBranch(
@@ -887,6 +882,14 @@ class NEONEpistemicCorrection(nn.Module):
             else None
         )
         if self.deterministic_head is not None:
+            # Stage 2 is a residual extension of a frozen, already trained
+            # operator. Start both learned corrections at exact Stage-1 parity;
+            # the separately frozen randomized prior remains active through
+            # ``alpha`` and is intentionally not zero-initialized. Legacy heads
+            # without the deterministic Stage-2 mean branch keep their original
+            # initialization behavior.
+            if self.branch_type == "projected":
+                _zero_last_linear(self.trainable_branch.mlp)
             _zero_last_linear(self.deterministic_head)
 
     def set_prior_scale(self, alpha: float) -> None:
