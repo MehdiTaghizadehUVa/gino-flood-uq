@@ -120,7 +120,7 @@ def test_rendered_subthreshold_forecast_leaves_dem_pixels_unchanged(tmp_path):
             terrain=terrain,
             output_path=path,
             title="Synthetic probability",
-            colorbar_label="Probability / values below 0.10 hidden",
+            colorbar_label="Probability",
             cmap=probability_cmap(),
             vmin=0.10,
             vmax=1.0,

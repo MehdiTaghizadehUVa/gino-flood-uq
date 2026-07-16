@@ -22,7 +22,7 @@ export function HistoricalValidation({ historical }: { historical: Historical })
             <EvidenceCaption
               title="Maximum-event exceedance probability"
               insight="Shows how consistently production ensemble members place meaningful flooding during the historical event."
-              method="Probability is the fraction of calibrated depth members whose cellwise maximum exceeds 0.10 m. Values below 0.10 probability are transparent. The white, dark-haloed line is the HEC-RAS reference contour."
+              method="Probability is the fraction of calibrated depth members whose cellwise maximum exceeds 0.10 m. The white, dark-haloed line is the HEC-RAS reference contour."
             />
           </figure>
           <figure className="case-study-figure">
@@ -31,7 +31,7 @@ export function HistoricalValidation({ historical }: { historical: Historical })
             <EvidenceCaption
               title="Maximum-event 90% interval width"
               insight="Locates where the memberwise maximum response remains more dispersed across the event."
-              method="Width is p95 minus p05 of memberwise maximum depth. Values below 0.08 m are transparent, and every storm uses the same color scale."
+              method="Width is p95 minus p05 of memberwise maximum depth, and every storm uses the same color scale."
             />
           </figure>
           <figure className="case-study-figure historical-trajectory">

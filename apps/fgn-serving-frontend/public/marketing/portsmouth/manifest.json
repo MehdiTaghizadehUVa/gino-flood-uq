@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "caseStudyId": "portsmouth-irene-2011",
-  "generatedAt": "2026-07-16T15:29:30.873163+00:00",
+  "generatedAt": "2026-07-16T16:34:22.732876+00:00",
   "title": "From historical forcing to calibrated flood probabilities.",
   "eyebrow": "PORTSMOUTH, VIRGINIA / DEPLOYMENT PROOF",
   "intro": "A named historical event shows how a domain-specific FloodUQ deployment turns coastal forcing into probability, timing, extent, and uncertainty evidence. Portsmouth is the proof case; the service pattern is repeated through a new domain's own terrain and reference simulations.",

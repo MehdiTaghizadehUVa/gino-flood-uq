@@ -32,7 +32,7 @@ export function UncertaintyDecomposition({ decomposition }: { decomposition: Dec
                   ? "Highlights epistemic uncertainty where independently trained model checkpoints produce different central responses."
                   : "Highlights aleatoric uncertainty where latent members from the same checkpoint retain a wider range."
               }
-              method={`Both maps show standard deviation in meters on one shared scale. Values below ${decomposition.displayFloorM.toFixed(2)} m are hidden. Epistemic uncertainty is estimated across checkpoint means; aleatoric uncertainty is estimated among latent members within each checkpoint. These components describe the deployed ensemble structure and do not prove model error.`}
+              method="Both maps show standard deviation in meters on one shared scale. Epistemic uncertainty is estimated across checkpoint means; aleatoric uncertainty is estimated among latent members within each checkpoint. These components describe the deployed ensemble structure and do not prove model error."
             />
           </figure>
         ))}

@@ -144,6 +144,19 @@ for (const legacyTerm of ["between-model", "within-model", "between model", "wit
     `Legacy public uncertainty term found: ${legacyTerm}`
   );
 }
+for (const maskingPhrase of [
+  "values below",
+  "values under",
+  "are hidden",
+  "are transparent",
+  "display floor",
+  "display cutoff"
+]) {
+  assert.ok(
+    !allMarketingSource.toLowerCase().includes(maskingPhrase),
+    `Public masking-language found: ${maskingPhrase}`
+  );
+}
 assert.ok(pageSource.includes('<math display="block"'), "The variance decomposition must use semantic MathML.");
 assert.ok(pageSource.includes("epistemic uncertainty"));
 assert.ok(pageSource.includes("aleatoric uncertainty"));

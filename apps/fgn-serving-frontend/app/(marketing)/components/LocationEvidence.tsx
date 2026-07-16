@@ -42,7 +42,7 @@ export function LocationEvidence({ locations }: { locations: Location[] }) {
           <img src={selected.panelSrc} alt={`${selected.label} depth ensemble, exceedance probability, and arrival-time distribution`} width={1700} height={520} loading="lazy" />
           <EvidenceCaption
             title="One cell, the full ensemble story"
-            insight="The depth fan, calibrated exceedance trace, and arrival distribution reveal information hidden by a central map alone."
+            insight="The depth fan, calibrated exceedance trace, and arrival distribution provide context that a central map alone cannot convey."
             method="The chart is rendered from the 60 production members. Member traces are shown only as a static scientific figure; the public page does not ship HDF5 files or numerical member arrays."
           />
         </figure>

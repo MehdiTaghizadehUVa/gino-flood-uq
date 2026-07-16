@@ -142,7 +142,7 @@ export function ForecastStoryPlayer({
         <EvidenceCaption
           title="A forecast through time, not a single peak map"
           insight="Track where the selected product emerges, concentrates, and recedes across the full Irene 2011 horizon."
-          method={`Frames are sampled from the complete production rollout while preserving onset, peak footprint, peak disagreement, and recession. ${product.label} values below the stated display floor are transparent so the terrain remains visible.`}
+          method="Frames are sampled from the complete production rollout while preserving onset, peak footprint, peak disagreement, and recession."
         />
       </figure>
     </div>
