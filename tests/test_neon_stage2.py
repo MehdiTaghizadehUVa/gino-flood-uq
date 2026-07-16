@@ -807,6 +807,41 @@ def test_deterministic_head_uses_canonical_mean_feature_not_runtime_member_count
     )
 
 
+def test_centered_hermite_residual_heads_start_at_frozen_base_when_prior_is_disabled():
+    head = NEONEpistemicCorrection(
+        feature_channels=3,
+        out_channels=1,
+        epistemic_dim=2,
+        alpha=0.0,
+        branch_type="projected",
+        concat_index=False,
+        epistemic_basis="hermite_random_projection",
+        epistemic_quadratic_terms=2,
+        deterministic_head=True,
+        deterministic_head_feature="canonical_aleatory_mean",
+        prior_rff_dim=0,
+    ).eval()
+    base = torch.randn(1, 3, 2, 4, 1)
+    features = torch.randn(1, 3, 2, 4, 3)
+    canonical = torch.randn(1, 2, 4, 3)
+    z_e = torch.randn(5, 2)
+
+    out = head(
+        base,
+        features,
+        z_e,
+        canonical_mean_features=canonical,
+    )
+
+    torch.testing.assert_close(out.prediction, base.unsqueeze(1).expand_as(out.prediction))
+    torch.testing.assert_close(
+        out.trainable_correction, torch.zeros_like(out.trainable_correction)
+    )
+    torch.testing.assert_close(
+        out.deterministic_correction, torch.zeros_like(out.deterministic_correction)
+    )
+
+
 def test_nested_variance_handles_single_epistemic_particle():
     pred = torch.randn(1, 1, 3, 2, 4, 1)
 

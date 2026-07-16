@@ -684,6 +684,18 @@ class _ProjectedPriorBranch(nn.Module):
         return (basis.unsqueeze(1) * z_dot).sum(dim=-1)
 
 
+def _zero_last_linear(module: nn.Module) -> None:
+    """Initialize a residual head at the identity model without muting gradients."""
+
+    for child in reversed(list(module.modules())):
+        if isinstance(child, nn.Linear):
+            nn.init.zeros_(child.weight)
+            if child.bias is not None:
+                nn.init.zeros_(child.bias)
+            return
+    raise ValueError("residual head must contain at least one linear output layer")
+
+
 class NEONEpistemicCorrection(nn.Module):
     """Randomized-prior EpiNet correction head for frozen FGNO features."""
 
@@ -815,6 +827,11 @@ class NEONEpistemicCorrection(nn.Module):
                 concat_index=False,
                 lead_time_dim=self.lead_time_dim,
             )
+            # Stage 2 is a residual extension of a frozen, already trained
+            # operator. Start the trainable correction at exact Stage-1 parity;
+            # the separately frozen randomized prior remains active through
+            # ``alpha`` and is intentionally not zero-initialized.
+            _zero_last_linear(self.trainable_branch.mlp)
         elif self.branch_type == "film":
             self.epistemic_basis_module = None
             self.trainable_branch = _CorrectionBranch(
@@ -869,6 +886,8 @@ class NEONEpistemicCorrection(nn.Module):
             if self.deterministic_head_enabled
             else None
         )
+        if self.deterministic_head is not None:
+            _zero_last_linear(self.deterministic_head)
 
     def set_prior_scale(self, alpha: float) -> None:
         """Set the randomized-prior scale ``alpha`` (e.g. from auto-calibration)."""
