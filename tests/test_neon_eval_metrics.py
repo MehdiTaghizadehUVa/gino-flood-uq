@@ -191,6 +191,18 @@ def test_marginal_fair_crps_matches_core_fixture():
     assert m["marginal_fair_crps"] == pytest.approx(0.0, abs=1e-6)
 
 
+def test_predictive_metrics_do_not_penalize_collapsed_crossed_epistemic_axis():
+    torch.manual_seed(14)
+    base = torch.randn(2, 5, 3, 4, 1, dtype=torch.float64)
+    pred = base.unsqueeze(1).expand(-1, 4, -1, -1, -1, -1)
+    ref = torch.randn(2, 3, 3, 4, 1, dtype=torch.float64)
+
+    metrics = neon_predictive_metrics(pred, ref)
+    expected = neon.fair_crps_members(base, ref)
+
+    assert metrics["marginal_fair_crps"] == pytest.approx(float(expected), rel=1e-12)
+
+
 def test_brier_exceedance_known_value():
     # threshold 0.5: forecast members all exceed (prob 1), reference none (prob 0)
     pred = torch.ones(1, 2, 2, 1, 3, 1)   # all = 1 > 0.5

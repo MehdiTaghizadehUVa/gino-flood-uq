@@ -216,6 +216,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         save_nested_forecast_artifact,
         spread_error_diagnostics,
         write_variance_maps,
+        fixed_support_sampling_design,
     )
     from neuralop.flood.neon import (
         PersistentDirichletParticleControl,
@@ -393,7 +394,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         weights = fam.weights
         prediction_physical = inverse_transform_on_tensor_device(target_normalizer, prediction)
         reference_physical = inverse_transform_on_tensor_device(reference_normalizer, reference)
-        sampling_design = crossed_sampling_design(
+        sampling_design_factory = (
+            fixed_support_sampling_design
+            if isinstance(module, PersistentDirichletParticleControl)
+            else crossed_sampling_design
+        )
+        sampling_design = sampling_design_factory(
             batch.aleatory_latents,
             m=int(args.m_eval),
             bank_id=f"{fam.family_id}:eval-bank-0:k{int(args.k_eval)}",

@@ -2150,3 +2150,188 @@ def fair_crps_members(
     if reduction == "mean":
         return out.mean()
     raise ValueError(f"reduction must be one of none|sum|mean, got {reduction!r}.")
+
+
+def crossed_fair_crps_members(
+    prediction: torch.Tensor,
+    reference: torch.Tensor,
+    *,
+    weights: torch.Tensor | None = None,
+    reduction: str = "mean",
+    chunk_size: int | None = 65536,
+    _sampling_design: str = "crossed",
+) -> torch.Tensor:
+    r"""Fair CRPS for a crossed epistemic-by-aleatory sample design.
+
+    ``prediction`` contains a full factorial sample ``[B, M, K, T, Nv, C]``.
+    The M epistemic particles share the same K aleatory latent bank, so the
+    flattened M*K members are not independent. An unbiased self-distance
+    U-statistic must therefore exclude pairs that share either factor:
+
+    .. math::
+
+       \frac{1}{M(M-1)K(K-1)}
+       \sum_{m \ne m'}\sum_{k \ne k'}
+       |x_{mk} - x_{m'k'}|.
+
+    The implementation obtains the allowed unordered-pair sum by subtracting
+    same-M and same-K pair sums from the all-member pair sum. Each term uses
+    order statistics, avoiding an O(M^2 K^2) pairwise tensor. In particular,
+    repeating a collapsed base ensemble over M gives exactly the K-member
+    ``fair_crps_members`` score instead of a duplication-dependent penalty.
+    """
+
+    if prediction.ndim != 6:
+        raise ValueError(
+            "prediction must be [B, M, K, T, Nv, C]; got "
+            f"{tuple(prediction.shape)}."
+        )
+    B, M, K, T, Nv, C = (int(v) for v in prediction.shape)
+    if M < 2 or K < 2:
+        raise ValueError("crossed fair CRPS requires M >= 2 and K >= 2.")
+    if (
+        reference.ndim != 5
+        or int(reference.shape[0]) != B
+        or reference.shape[2:] != prediction.shape[3:]
+    ):
+        raise ValueError(
+            "reference must be [B, R, T, Nv, C] matching prediction; got "
+            f"prediction={tuple(prediction.shape)} reference={tuple(reference.shape)}."
+        )
+    R = int(reference.shape[1])
+    N = M * K
+    n_loc = T * Nv * C
+    flat_pred = prediction.reshape(B, M, K, n_loc)
+    flat_ref = reference.reshape(B, R, n_loc)
+    if chunk_size is None:
+        chunk_size = n_loc
+    chunk_size = max(1, int(chunk_size))
+
+    flat_weights = None
+    if weights is not None:
+        flat_weights = _normalize_score_weights(
+            weights,
+            batch_size=B,
+            time_steps=T,
+            num_nodes=Nv,
+            channels=C,
+            device=prediction.device,
+            dtype=prediction.dtype,
+        ).reshape(B, n_loc)
+
+    dtype = prediction.dtype
+    coef_all = (
+        torch.arange(1, N + 1, device=prediction.device, dtype=dtype) * 2.0
+        - float(N + 1)
+    )
+    coef_k = (
+        torch.arange(1, K + 1, device=prediction.device, dtype=dtype) * 2.0
+        - float(K + 1)
+    )
+    coef_m = (
+        torch.arange(1, M + 1, device=prediction.device, dtype=dtype) * 2.0
+        - float(M + 1)
+    )
+    out = prediction.new_zeros((B,))
+    for start in range(0, n_loc, chunk_size):
+        stop = min(start + chunk_size, n_loc)
+        q = stop - start
+        x = flat_pred[..., start:stop].permute(0, 3, 1, 2).contiguous()
+        y = flat_ref[..., start:stop].transpose(1, 2).contiguous()
+        xf = x.reshape(B, q, N)
+        xs, _ = torch.sort(xf, dim=-1)
+        ys, _ = torch.sort(y, dim=-1)
+
+        x_left = torch.searchsorted(ys, xs, right=False)
+        x_right = torch.searchsorted(ys, xs, right=True)
+        y_left = torch.searchsorted(xs, ys, right=False)
+        y_right = torch.searchsorted(xs, ys, right=True)
+        x_rank = x_left.to(dtype) + x_right.to(dtype) - float(R)
+        y_rank = y_left.to(dtype) + y_right.to(dtype) - float(N)
+        cross = (
+            (xs * x_rank).sum(dim=-1) + (ys * y_rank).sum(dim=-1)
+        ) / float(N * R)
+
+        all_pairs = (xs * coef_all).sum(dim=-1)
+        row_sorted, _ = torch.sort(x, dim=-1)
+        same_m_pairs = (row_sorted * coef_k).sum(dim=-1).sum(dim=-1)
+        col_sorted, _ = torch.sort(x.transpose(-2, -1), dim=-1)
+        same_k_pairs = (col_sorted * coef_m).sum(dim=-1).sum(dim=-1)
+        if _sampling_design == "fixed_support":
+            # The complete particle support is integrated exactly, so equal
+            # epistemic indices are valid. Only shared aleatory columns must
+            # be excluded from the finite-K U-statistic.
+            allowed_pairs = all_pairs - same_k_pairs
+            self_denominator = M * M * K * (K - 1)
+        elif _sampling_design == "independent_nested":
+            # Different epistemic particles have independent aleatory banks.
+            # Any cross-particle K pair is valid, including equal column IDs.
+            allowed_pairs = all_pairs - same_m_pairs
+            self_denominator = M * (M - 1) * K * K
+        elif _sampling_design == "crossed":
+            allowed_pairs = all_pairs - same_m_pairs - same_k_pairs
+            self_denominator = M * (M - 1) * K * (K - 1)
+        else:
+            raise ValueError(f"unsupported factorial sampling design {_sampling_design!r}.")
+        self_term = allowed_pairs / float(self_denominator)
+        crps = cross - self_term
+        if flat_weights is not None:
+            out = out + (crps * flat_weights[:, start:stop]).sum(dim=-1)
+        else:
+            out = out + crps.sum(dim=-1)
+    if flat_weights is None:
+        out = out / float(n_loc)
+
+    if reduction == "none":
+        return out
+    if reduction == "sum":
+        return out.sum()
+    if reduction == "mean":
+        return out.mean()
+    raise ValueError(f"reduction must be one of none|sum|mean, got {reduction!r}.")
+
+
+def fixed_support_fair_crps_members(
+    prediction: torch.Tensor,
+    reference: torch.Tensor,
+    *,
+    weights: torch.Tensor | None = None,
+    reduction: str = "mean",
+    chunk_size: int | None = 65536,
+) -> torch.Tensor:
+    """Fair CRPS for fixed epistemic particles and a shared sampled K-bank.
+
+    Unlike sampled continuous epistemic indices, the persistent particle axis
+    is a complete discrete support and is integrated exactly. Self-distance
+    pairs may therefore share a particle, but they must use different columns
+    of the common aleatory bank.
+    """
+
+    return crossed_fair_crps_members(
+        prediction,
+        reference,
+        weights=weights,
+        reduction=reduction,
+        chunk_size=chunk_size,
+        _sampling_design="fixed_support",
+    )
+
+
+def independent_nested_fair_crps_members(
+    prediction: torch.Tensor,
+    reference: torch.Tensor,
+    *,
+    weights: torch.Tensor | None = None,
+    reduction: str = "mean",
+    chunk_size: int | None = 65536,
+) -> torch.Tensor:
+    """Fair CRPS when every epistemic particle has an independent K-bank."""
+
+    return crossed_fair_crps_members(
+        prediction,
+        reference,
+        weights=weights,
+        reduction=reduction,
+        chunk_size=chunk_size,
+        _sampling_design="independent_nested",
+    )

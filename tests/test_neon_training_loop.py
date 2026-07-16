@@ -803,6 +803,30 @@ def test_validation_selection_metrics_are_inverse_transformed_to_physical_space(
     )
 
 
+def test_validation_mixture_score_equals_base_when_epistemic_correction_collapses():
+    """Shared aleatory draws must not be penalized when repeated over M."""
+
+    module = _module()
+    module.alpha = 0.0
+    with torch.no_grad():
+        for parameter in module.trainable_branch.parameters():
+            parameter.zero_()
+
+    _, diagnostics = train_neon._evaluate_neon_validation(
+        module=module,
+        families=[_family("v", 0.2)],
+        feature_collector=_make_feature_collector(),
+        m=4,
+        k=5,
+        d_e=4,
+        generator=torch.Generator().manual_seed(71),
+    )
+
+    assert diagnostics["mixture_fair_crps_physical"] == pytest.approx(
+        diagnostics["base_fair_crps_physical"], rel=1e-6, abs=1e-7
+    )
+
+
 def test_validation_runs_without_grad_and_leaves_module_in_train_mode_between_epochs():
     module = _module()
     opt = build_neon_stage2_optimizer(module, learning_rate=1e-2)

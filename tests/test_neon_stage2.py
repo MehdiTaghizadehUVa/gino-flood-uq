@@ -1003,6 +1003,72 @@ def test_fair_crps_members_matches_pairwise_reference_implementation():
     torch.testing.assert_close(fast_grad, slow_grad, rtol=1.0e-10, atol=1.0e-12)
 
 
+def test_crossed_fair_crps_matches_manual_independent_factor_pairs():
+    """The M x K score excludes pairs sharing either sampled factor."""
+
+    prediction = torch.tensor(
+        [[[[[[0.0]]], [[[1.0]]]], [[[[2.0]]], [[[4.0]]]]]],
+        dtype=torch.float64,
+    )
+    reference = torch.tensor([[[[[0.5]]], [[[3.0]]]]], dtype=torch.float64)
+
+    observed = neon.crossed_fair_crps_members(prediction, reference)
+
+    values = prediction.reshape(2, 2)
+    cross = torch.abs(values[..., None] - reference.reshape(2)).mean()
+    allowed = []
+    for m in range(2):
+        for k in range(2):
+            for mp in range(2):
+                for kp in range(2):
+                    if m != mp and k != kp:
+                        allowed.append(torch.abs(values[m, k] - values[mp, kp]))
+    expected = cross - 0.5 * torch.stack(allowed).mean()
+    torch.testing.assert_close(observed, expected)
+
+
+def test_crossed_fair_crps_repeated_base_equals_base_fair_crps():
+    """A collapsed epistemic axis must not worsen skill by duplicating K draws."""
+
+    torch.manual_seed(91)
+    base = torch.randn(2, 5, 3, 7, 1, dtype=torch.float64)
+    reference = torch.randn(2, 4, 3, 7, 1, dtype=torch.float64)
+    nested = base.unsqueeze(1).expand(-1, 6, -1, -1, -1, -1)
+    weights = torch.rand(3, 7, 1, dtype=torch.float64)
+
+    crossed = neon.crossed_fair_crps_members(
+        nested, reference, weights=weights, chunk_size=5
+    )
+    base_score = neon.fair_crps_members(
+        base, reference, weights=weights, chunk_size=5
+    )
+    torch.testing.assert_close(crossed, base_score, rtol=1.0e-12, atol=1.0e-12)
+
+
+def test_fixed_support_fair_crps_matches_manual_particle_mixture():
+    """Persistent particles are integrated exactly while K remains sampled."""
+
+    prediction = torch.tensor(
+        [[[[[[0.0]]], [[[1.0]]]], [[[[2.0]]], [[[4.0]]]]]],
+        dtype=torch.float64,
+    )
+    reference = torch.tensor([[[[[0.5]]], [[[3.0]]]]], dtype=torch.float64)
+
+    observed = neon.fixed_support_fair_crps_members(prediction, reference)
+
+    values = prediction.reshape(2, 2)
+    cross = torch.abs(values[..., None] - reference.reshape(2)).mean()
+    allowed = []
+    for m in range(2):
+        for k in range(2):
+            for mp in range(2):
+                for kp in range(2):
+                    if k != kp:
+                        allowed.append(torch.abs(values[m, k] - values[mp, kp]))
+    expected = cross - 0.5 * torch.stack(allowed).mean()
+    torch.testing.assert_close(observed, expected)
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 def test_fair_crps_members_supports_deterministic_cuda_execution():
     """Mixture validation must preserve deterministic training on CUDA."""

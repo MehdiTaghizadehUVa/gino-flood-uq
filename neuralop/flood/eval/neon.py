@@ -10,7 +10,10 @@ import numpy as np
 import torch
 
 from neuralop.flood.neon import (
+    crossed_fair_crps_members,
     fair_crps_members,
+    fixed_support_fair_crps_members,
+    independent_nested_fair_crps_members,
     _weighted_mean,
     anova_corrected_epistemic_variance,
     anova_corrected_epistemic_variance_independent,
@@ -47,7 +50,10 @@ class NestedSamplingDesign:
             raise ValueError("sampling metadata must contain one bank id/hash per epistemic particle")
         if not str(self.state_update_mode).strip():
             raise ValueError("state_update_mode must be recorded for nested evaluation")
-        if self.kind == "crossed_common_random_numbers":
+        if self.kind in {
+            "crossed_common_random_numbers",
+            "fixed_epistemic_support_common_random_numbers",
+        }:
             if len(set(self.bank_ids)) != 1 or len(set(self.latent_hashes)) != 1:
                 raise ValueError(
                     "crossed-design ANOVA requires every epistemic particle to use "
@@ -86,6 +92,31 @@ def crossed_sampling_design(
         aleatory_order=tuple(range(k)),
         k=k,
         state_update_mode=str(state_update_mode),
+    )
+
+
+def fixed_support_sampling_design(
+    aleatory_latents: torch.Tensor,
+    *,
+    m: int,
+    bank_id: str,
+    state_update_mode: str,
+) -> NestedSamplingDesign:
+    """Build metadata for persistent particles sharing one aleatory bank."""
+
+    design = crossed_sampling_design(
+        aleatory_latents,
+        m=m,
+        bank_id=bank_id,
+        state_update_mode=state_update_mode,
+    )
+    return NestedSamplingDesign(
+        kind="fixed_epistemic_support_common_random_numbers",
+        bank_ids=design.bank_ids,
+        latent_hashes=design.latent_hashes,
+        aleatory_order=design.aleatory_order,
+        k=design.k,
+        state_update_mode=design.state_update_mode,
     )
 
 
@@ -340,13 +371,14 @@ def neon_predictive_metrics(
     thresholds=(0.1, 0.3, 0.5),
     weights: torch.Tensor | None = None,
     csi_thresholds=None,
+    sampling_design: NestedSamplingDesign | None = None,
 ) -> dict[str, float]:
     """Predictive metrics for a nested NEON forecast vs a reference ensemble.
 
     ``prediction`` is ``[B, M, K, T, Nv, C]`` and ``reference`` is
-    ``[B, R, T, Nv, C]``. Returns ensemble-mean RMSE, marginal (flattened
-    ``M*K``) fair CRPS, per-threshold exceedance Brier scores, and CSI at
-    matching inundation thresholds.
+    ``[B, R, T, Nv, C]``. Returns ensemble-mean RMSE, crossed-design fair
+    CRPS, per-threshold exceedance Brier scores, and CSI at matching
+    inundation thresholds.
     """
     if prediction.ndim != 6:
         raise ValueError(
@@ -354,15 +386,30 @@ def neon_predictive_metrics(
         )
     if reference.ndim != 5:
         raise ValueError(f"reference must be [B,R,T,Nv,C]; got {tuple(reference.shape)}.")
+    if sampling_design is not None:
+        sampling_design.validate(prediction)
 
     flat = flatten_nested_predictions(prediction)  # [B, M*K, T, Nv, C]
     out: dict[str, float] = {}
     out["ensemble_mean_rmse"] = base_rmse_from_reference(flat, reference, weights=weights)
-    # Marginal (flattened M*K) fair CRPS needs >= 2 members; a degenerate
-    # single-member ensemble is reported as NaN rather than crashing.
-    if int(flat.shape[1]) >= 2:
-        # Sort-based exact fair CRPS: the flattened marginal ensemble at eval
-        # budgets (M*K up to 1600 members) makes the pairwise path infeasible.
+    # The common aleatory bank makes the M*K factorial members dependent.
+    # Use the crossed U-statistic whenever both sampled axes support it;
+    # retain the ordinary K-member estimator for M=1 compatibility.
+    if int(prediction.shape[1]) >= 2 and int(prediction.shape[2]) >= 2:
+        design_kind = (
+            "crossed_common_random_numbers"
+            if sampling_design is None
+            else sampling_design.kind
+        )
+        score_fn = {
+            "crossed_common_random_numbers": crossed_fair_crps_members,
+            "fixed_epistemic_support_common_random_numbers": fixed_support_fair_crps_members,
+            "independent_nested": independent_nested_fair_crps_members,
+        }[design_kind]
+        out["marginal_fair_crps"] = float(
+            score_fn(prediction, reference, weights=weights, reduction="mean").item()
+        )
+    elif int(flat.shape[1]) >= 2:
         out["marginal_fair_crps"] = float(
             fair_crps_members(flat, reference, weights=weights, reduction="mean").item()
         )
@@ -474,7 +521,15 @@ def evaluate_neon_nested(
 ) -> dict[str, float]:
     """Full NEON nested-evaluation bundle: predictive + epistemic diagnostics."""
     out: dict[str, float] = {}
-    out.update(neon_predictive_metrics(prediction, reference, thresholds=thresholds, weights=weights))
+    out.update(
+        neon_predictive_metrics(
+            prediction,
+            reference,
+            thresholds=thresholds,
+            weights=weights,
+            sampling_design=sampling_design,
+        )
+    )
     variance = domain_average_variance_summary(
         prediction, weights=weights, sampling_design=sampling_design
     )

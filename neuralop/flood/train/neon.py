@@ -26,7 +26,9 @@ from neuralop.flood.neon import (
     epistemic_bootstrap_weights,
     epistemic_member_bootstrap_weights,
     freeze_stage1_model,
+    crossed_fair_crps_members,
     fair_crps_members,
+    fixed_support_fair_crps_members,
     per_epistemic_fair_crps,
     prior_psi_floor_diagnostic,
     sample_epistemic_indices,
@@ -1398,8 +1400,14 @@ def _evaluate_neon_validation(
                 deterministic_metric = deterministic_prediction
                 reference_metric = reference_on_device
                 metric_scale = float(physical_scale)
-            mixture_crps = fair_crps_members(
-                flat_metric,
+            nested_metric = flat_metric.reshape_as(nested_prediction)
+            mixture_score = (
+                fixed_support_fair_crps_members
+                if isinstance(module, PersistentDirichletParticleControl)
+                else crossed_fair_crps_members
+            )
+            mixture_crps = mixture_score(
+                nested_metric,
                 reference_metric,
                 weights=family.weights,
                 reduction="mean",
