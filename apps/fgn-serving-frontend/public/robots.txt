@@ -1,0 +1,8 @@
+User-agent: *
+Allow: /
+Disallow: /demo
+Disallow: /admin
+Disallow: /api
+Disallow: /oauth2
+
+Sitemap: https://flooduq.app/sitemap.xml

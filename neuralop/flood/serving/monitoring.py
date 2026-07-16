@@ -1394,7 +1394,7 @@ def _post_run_reference_score(
         score = max(score, s)
         flags.append(MonitoringFlag(
             code="high_checkpoint_disagreement_spread",
-            message="Trained checkpoints disagree more strongly than expected for the reference population.",
+            message="Epistemic uncertainty is stronger than expected for the reference population.",
             severity="candidate" if s >= 1.0 else "warning",
             descriptor="peak_area_weighted_between_checkpoint_spread_wd_m",
             value=checkpoint_spread,
@@ -1414,7 +1414,7 @@ def _post_run_reference_score(
         score = max(score, s)
         flags.append(MonitoringFlag(
             code="high_checkpoint_disagreement_share",
-            message="A large share of ensemble variance comes from checkpoint-to-checkpoint disagreement.",
+            message="A large share of ensemble variance is attributed to epistemic uncertainty.",
             severity="candidate" if s >= 1.0 else "warning",
             descriptor="peak_area_weighted_between_checkpoint_variance_share",
             value=checkpoint_share,
@@ -1436,7 +1436,7 @@ def _post_run_reference_score(
         score = max(score, s)
         flags.append(MonitoringFlag(
             code="broad_checkpoint_disagreement_footprint",
-            message="Checkpoint-driven disagreement covers an unusually large part of the wettable domain.",
+            message="Epistemic uncertainty covers an unusually large part of the wettable domain.",
             severity="candidate" if s >= 1.0 else "warning",
             descriptor="peak_high_checkpoint_disagreement_area_fraction_wettable",
             value=disagreement_fraction,

@@ -615,7 +615,7 @@ class RunOrchestrator:
         """Persist uncertainty-tab diagnostics.
 
         Bundles together: empirical CRPS map (peak-time intra-ensemble
-        spread), spread decomposition (between vs within checkpoint
+        spread), spread decomposition (epistemic vs aleatoric
         variance) with summary, and reliability curves JSON. PNG renderings
         of the three spatial maps are persisted alongside the .npy/.npz
         files so the frontend can ``<img>`` them directly. Failure is

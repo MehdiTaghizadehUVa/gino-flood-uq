@@ -26,15 +26,32 @@ if [[ "${DRY_RUN}" == "1" ]]; then
   exit 0
 fi
 
-https_check() {
-  local url="$1" max_attempts="${2:-10}" delay="${3:-5}" timeout="${4:-15}"
-  local attempt=0
-  until curl -fsSk --max-time "${timeout}" "${url}" >/dev/null 2>&1; do
+http_expect() {
+  local url="$1" expected_statuses="$2" body_marker="${3:-}" location_pattern="${4:-}"
+  local max_attempts="${5:-10}" delay="${6:-5}" timeout="${7:-15}"
+  local attempt=0 response_dir status
+  response_dir="$(mktemp -d)"
+
+  while true; do
+    status="$(curl -sSk --max-time "${timeout}" \
+      -D "${response_dir}/headers" \
+      -o "${response_dir}/body" \
+      -w '%{http_code}' "${url}" || true)"
+    if [[ ",${expected_statuses}," == *",${status},"* ]] \
+      && { [[ -z "${body_marker}" ]] || grep -Fq "${body_marker}" "${response_dir}/body"; } \
+      && { [[ -z "${location_pattern}" ]] || grep -Eiq "^location: .*${location_pattern}" "${response_dir}/headers"; }; then
+      rm -rf "${response_dir}"
+      return 0
+    fi
+
     attempt=$(( attempt + 1 ))
     if (( attempt >= max_attempts )); then
-      curl -fsSk --max-time "${timeout}" "${url}" >/dev/null
+      cat "${response_dir}/headers" >&2 || true
+      cat "${response_dir}/body" >&2 || true
+      rm -rf "${response_dir}"
+      die "Unexpected response from ${url}: HTTP ${status}; expected ${expected_statuses}."
     fi
-    log "HTTPS not ready (attempt ${attempt}/${max_attempts}): ${url} — retrying in ${delay}s"
+    log "HTTP route not ready (attempt ${attempt}/${max_attempts}): ${url}; retrying in ${delay}s"
     sleep "${delay}"
   done
 }
@@ -84,8 +101,16 @@ log "checking internal API health payload."
 api_json_check "/api/health" 12 5
 log "checking internal model-bundle health payload."
 api_json_check "/api/model-bundle-health" 8 5
-log "checking public frontend route."
-https_check "https://${FGN_SITE_HOSTNAME}/" 8 5 15
+log "checking public product site and compliance marker."
+http_expect "https://${FGN_SITE_HOSTNAME}/" "200" \
+  "Research only; not for emergency or operational decision use." "" 8 5 15
+log "checking public marketing media."
+http_expect "https://${FGN_SITE_HOSTNAME}/marketing/hero-poster.jpg" "200" "" "" 8 5 15
+log "checking protected demo and administration routes."
+http_expect "https://${FGN_SITE_HOSTNAME}/demo" "302" "" "/oauth2/sign_in" 8 5 15
+http_expect "https://${FGN_SITE_HOSTNAME}/admin" "302" "" "/oauth2/sign_in" 8 5 15
+log "checking protected API boundary."
+http_expect "https://${FGN_SITE_HOSTNAME}/api/health" "302,401" "" "" 8 5 15
 
 log "checking Compose service state."
 compose ps --status running api worker-gpu frontend redis postgres proxy >/dev/null

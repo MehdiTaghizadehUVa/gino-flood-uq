@@ -21,6 +21,7 @@ def test_production_compose_uses_published_images_not_builds() -> None:
     assert "FGN_WORKER_IMAGE" in compose
     assert "FGN_CLEANUP_IMAGE" in compose
     assert "FGN_FRONTEND_IMAGE" in compose
+    assert "FGN_PROXY_IMAGE" in compose
     assert "dockerfile: deployment/fgn-serving/python.Dockerfile" not in compose
     assert "context: ../../apps/fgn-serving-frontend" not in compose
 
@@ -49,6 +50,7 @@ def test_image_workflow_publishes_sha_tagged_ghcr_images() -> None:
     assert "ghcr.io/${GITHUB_REPOSITORY,,}" in workflow
     assert "${namespace}/fgn-serving-python:${sha}" in workflow
     assert "${namespace}/fgn-serving-frontend:${sha}" in workflow
+    assert "${namespace}/fgn-serving-proxy:${sha}" in workflow
     assert "${namespace}/fgn-serving-python:main" in workflow
     assert "${namespace}/fgn-serving-frontend:main" in workflow
     assert "docker/build-push-action@v6" in workflow
@@ -75,6 +77,7 @@ def test_deploy_dry_run_does_not_write_deployment_records(tmp_path: Path) -> Non
             "FGN_WORKER_IMAGE": "ghcr.io/example/fgn-serving-python:test",
             "FGN_CLEANUP_IMAGE": "ghcr.io/example/fgn-serving-python:test",
             "FGN_FRONTEND_IMAGE": "ghcr.io/example/fgn-serving-frontend:test",
+            "FGN_PROXY_IMAGE": "ghcr.io/example/fgn-serving-proxy:test",
         }
     )
 

@@ -78,7 +78,22 @@ jobs:
         working-directory: apps/fgn-serving-frontend
         run: |
           npm ci
+          npm run validate:marketing
           npm run build
+          npm run start -- --hostname 127.0.0.1 --port 3000 >/tmp/fgn-frontend.log 2>&1 &
+          frontend_pid=$!
+          trap 'kill "${frontend_pid}"' EXIT
+          for attempt in $(seq 1 20); do
+            if curl -fsS http://127.0.0.1:3000/ >/dev/null; then
+              break
+            fi
+            if [ "${attempt}" -eq 20 ]; then
+              cat /tmp/fgn-frontend.log
+              exit 1
+            fi
+            sleep 1
+          done
+          sh scripts/smoke_routes.sh
 
   deployment-config:
     runs-on: ubuntu-latest

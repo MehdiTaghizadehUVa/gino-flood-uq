@@ -3,6 +3,7 @@ import {
   Activity,
   CircleDot,
   Database,
+  Globe2,
   Home,
   LineChart,
   ListChecks,
@@ -22,18 +23,19 @@ type AppShellProps = {
 const navItems: Array<{
   href: string;
   label: string;
-  active: AppSection;
+  active: AppSection | null;
   icon: ReactNode;
 }> = [
-  { href: "/?workspace=new", label: "New analysis", active: "home", icon: <Home size={16} /> },
-  { href: "/?workspace=runs#runs", label: "Analysis queue", active: "runs", icon: <ListChecks size={16} /> },
+  { href: "/demo?workspace=new", label: "New analysis", active: "home", icon: <Home size={16} /> },
+  { href: "/demo?workspace=runs#runs", label: "Analysis queue", active: "runs", icon: <ListChecks size={16} /> },
   { href: "/admin", label: "Admin", active: "admin", icon: <ShieldCheck size={16} /> },
   {
     href: "/admin/monitoring",
     label: "Monitoring",
     active: "monitoring",
     icon: <LineChart size={16} />
-  }
+  },
+  { href: "/", label: "Product site", active: null, icon: <Globe2 size={16} /> }
 ];
 
 export function AppShell({ active = "home", children, userEmail }: AppShellProps) {

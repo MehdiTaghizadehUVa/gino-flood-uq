@@ -1,0 +1,722 @@
+{
+  "schemaVersion": 1,
+  "caseStudyId": "portsmouth-irene-2011",
+  "generatedAt": "2026-07-16T15:29:30.873163+00:00",
+  "title": "From historical forcing to calibrated flood probabilities.",
+  "eyebrow": "PORTSMOUTH, VIRGINIA / DEPLOYMENT PROOF",
+  "intro": "A named historical event shows how a domain-specific FloodUQ deployment turns coastal forcing into probability, timing, extent, and uncertainty evidence. Portsmouth is the proof case; the service pattern is repeated through a new domain's own terrain and reference simulations.",
+  "flagship": {
+    "eventId": "2011_IRENE",
+    "label": "Irene 2011",
+    "thresholdM": 0.3,
+    "metrics": [
+      {
+        "value": "3.16 km\u00b2",
+        "label": "Peak expected footprint above 0.30 m"
+      },
+      {
+        "value": "+16.75 h",
+        "label": "Lead to peak expected footprint"
+      },
+      {
+        "value": "0.23 m",
+        "label": "Area-weighted 90% interval width at peak"
+      },
+      {
+        "value": "14.2 min",
+        "label": "Measured full workflow on RTX 4090"
+      }
+    ],
+    "peakAreaTimeIndex": 66,
+    "peakDisagreementTimeIndex": 46,
+    "posterSrc": "/marketing/portsmouth/frames/probability/irene_t001.webp",
+    "hero": {
+      "src": "/marketing/portsmouth/hero/irene_mean_depth_peak.webp",
+      "product": "Calibrated mean water depth",
+      "leadHours": 16.75,
+      "displayFloorM": 0.05,
+      "selection": "Peak expected footprint above 0.30 m"
+    },
+    "products": [
+      {
+        "id": "probability",
+        "label": "P(WD > 0.30 m)",
+        "displayFloor": 0.1,
+        "vmin": 0.1,
+        "vmax": 1.0,
+        "frames": [
+          {
+            "timeIndex": 0,
+            "leadHours": 0.25,
+            "src": "/marketing/portsmouth/frames/probability/irene_t001.webp"
+          },
+          {
+            "timeIndex": 3,
+            "leadHours": 1.0,
+            "src": "/marketing/portsmouth/frames/probability/irene_t004.webp"
+          },
+          {
+            "timeIndex": 6,
+            "leadHours": 1.75,
+            "src": "/marketing/portsmouth/frames/probability/irene_t007.webp"
+          },
+          {
+            "timeIndex": 9,
+            "leadHours": 2.5,
+            "src": "/marketing/portsmouth/frames/probability/irene_t010.webp"
+          },
+          {
+            "timeIndex": 12,
+            "leadHours": 3.25,
+            "src": "/marketing/portsmouth/frames/probability/irene_t013.webp"
+          },
+          {
+            "timeIndex": 15,
+            "leadHours": 4.0,
+            "src": "/marketing/portsmouth/frames/probability/irene_t016.webp"
+          },
+          {
+            "timeIndex": 18,
+            "leadHours": 4.75,
+            "src": "/marketing/portsmouth/frames/probability/irene_t019.webp"
+          },
+          {
+            "timeIndex": 21,
+            "leadHours": 5.5,
+            "src": "/marketing/portsmouth/frames/probability/irene_t022.webp"
+          },
+          {
+            "timeIndex": 24,
+            "leadHours": 6.25,
+            "src": "/marketing/portsmouth/frames/probability/irene_t025.webp"
+          },
+          {
+            "timeIndex": 27,
+            "leadHours": 7.0,
+            "src": "/marketing/portsmouth/frames/probability/irene_t028.webp"
+          },
+          {
+            "timeIndex": 30,
+            "leadHours": 7.75,
+            "src": "/marketing/portsmouth/frames/probability/irene_t031.webp"
+          },
+          {
+            "timeIndex": 33,
+            "leadHours": 8.5,
+            "src": "/marketing/portsmouth/frames/probability/irene_t034.webp"
+          },
+          {
+            "timeIndex": 36,
+            "leadHours": 9.25,
+            "src": "/marketing/portsmouth/frames/probability/irene_t037.webp"
+          },
+          {
+            "timeIndex": 39,
+            "leadHours": 10.0,
+            "src": "/marketing/portsmouth/frames/probability/irene_t040.webp"
+          },
+          {
+            "timeIndex": 42,
+            "leadHours": 10.75,
+            "src": "/marketing/portsmouth/frames/probability/irene_t043.webp"
+          },
+          {
+            "timeIndex": 46,
+            "leadHours": 11.75,
+            "src": "/marketing/portsmouth/frames/probability/irene_t047.webp"
+          },
+          {
+            "timeIndex": 48,
+            "leadHours": 12.25,
+            "src": "/marketing/portsmouth/frames/probability/irene_t049.webp"
+          },
+          {
+            "timeIndex": 51,
+            "leadHours": 13.0,
+            "src": "/marketing/portsmouth/frames/probability/irene_t052.webp"
+          },
+          {
+            "timeIndex": 54,
+            "leadHours": 13.75,
+            "src": "/marketing/portsmouth/frames/probability/irene_t055.webp"
+          },
+          {
+            "timeIndex": 57,
+            "leadHours": 14.5,
+            "src": "/marketing/portsmouth/frames/probability/irene_t058.webp"
+          },
+          {
+            "timeIndex": 60,
+            "leadHours": 15.25,
+            "src": "/marketing/portsmouth/frames/probability/irene_t061.webp"
+          },
+          {
+            "timeIndex": 63,
+            "leadHours": 16.0,
+            "src": "/marketing/portsmouth/frames/probability/irene_t064.webp"
+          },
+          {
+            "timeIndex": 66,
+            "leadHours": 16.75,
+            "src": "/marketing/portsmouth/frames/probability/irene_t067.webp"
+          },
+          {
+            "timeIndex": 69,
+            "leadHours": 17.5,
+            "src": "/marketing/portsmouth/frames/probability/irene_t070.webp"
+          },
+          {
+            "timeIndex": 72,
+            "leadHours": 18.25,
+            "src": "/marketing/portsmouth/frames/probability/irene_t073.webp"
+          },
+          {
+            "timeIndex": 75,
+            "leadHours": 19.0,
+            "src": "/marketing/portsmouth/frames/probability/irene_t076.webp"
+          },
+          {
+            "timeIndex": 78,
+            "leadHours": 19.75,
+            "src": "/marketing/portsmouth/frames/probability/irene_t079.webp"
+          },
+          {
+            "timeIndex": 81,
+            "leadHours": 20.5,
+            "src": "/marketing/portsmouth/frames/probability/irene_t082.webp"
+          },
+          {
+            "timeIndex": 84,
+            "leadHours": 21.25,
+            "src": "/marketing/portsmouth/frames/probability/irene_t085.webp"
+          },
+          {
+            "timeIndex": 87,
+            "leadHours": 22.0,
+            "src": "/marketing/portsmouth/frames/probability/irene_t088.webp"
+          },
+          {
+            "timeIndex": 90,
+            "leadHours": 22.75,
+            "src": "/marketing/portsmouth/frames/probability/irene_t091.webp"
+          },
+          {
+            "timeIndex": 93,
+            "leadHours": 23.5,
+            "src": "/marketing/portsmouth/frames/probability/irene_t094.webp"
+          }
+        ]
+      },
+      {
+        "id": "meanDepth",
+        "label": "Calibrated mean depth",
+        "displayFloor": 0.05,
+        "vmin": 0.05,
+        "vmax": 3.0,
+        "frames": [
+          {
+            "timeIndex": 0,
+            "leadHours": 0.25,
+            "src": "/marketing/portsmouth/frames/meanDepth/irene_t001.webp"
+          },
+          {
+            "timeIndex": 3,
+            "leadHours": 1.0,
+            "src": "/marketing/portsmouth/frames/meanDepth/irene_t004.webp"
+          },
+          {
+            "timeIndex": 6,
+            "leadHours": 1.75,
+            "src": "/marketing/portsmouth/frames/meanDepth/irene_t007.webp"
+          },
+          {
+            "timeIndex": 9,
+            "leadHours": 2.5,
+            "src": "/marketing/portsmouth/frames/meanDepth/irene_t010.webp"
+          },
+          {
+            "timeIndex": 12,
+            "leadHours": 3.25,
+            "src": "/marketing/portsmouth/frames/meanDepth/irene_t013.webp"
+          },
+          {
+            "timeIndex": 15,
+            "leadHours": 4.0,
+            "src": "/marketing/portsmouth/frames/meanDepth/irene_t016.webp"
+          },
+          {
+            "timeIndex": 18,
+            "leadHours": 4.75,
+            "src": "/marketing/portsmouth/frames/meanDepth/irene_t019.webp"
+          },
+          {
+            "timeIndex": 21,
+            "leadHours": 5.5,
+            "src": "/marketing/portsmouth/frames/meanDepth/irene_t022.webp"
+          },
+          {
+            "timeIndex": 24,
+            "leadHours": 6.25,
+            "src": "/marketing/portsmouth/frames/meanDepth/irene_t025.webp"
+          },
+          {
+            "timeIndex": 27,
+            "leadHours": 7.0,
+            "src": "/marketing/portsmouth/frames/meanDepth/irene_t028.webp"
+          },
+          {
+            "timeIndex": 30,
+            "leadHours": 7.75,
+            "src": "/marketing/portsmouth/frames/meanDepth/irene_t031.webp"
+          },
+          {
+            "timeIndex": 33,
+            "leadHours": 8.5,
+            "src": "/marketing/portsmouth/frames/meanDepth/irene_t034.webp"
+          },
+          {
+            "timeIndex": 36,
+            "leadHours": 9.25,
+            "src": "/marketing/portsmouth/frames/meanDepth/irene_t037.webp"
+          },
+          {
+            "timeIndex": 39,
+            "leadHours": 10.0,
+            "src": "/marketing/portsmouth/frames/meanDepth/irene_t040.webp"
+          },
+          {
+            "timeIndex": 42,
+            "leadHours": 10.75,
+            "src": "/marketing/portsmouth/frames/meanDepth/irene_t043.webp"
+          },
+          {
+            "timeIndex": 46,
+            "leadHours": 11.75,
+            "src": "/marketing/portsmouth/frames/meanDepth/irene_t047.webp"
+          },
+          {
+            "timeIndex": 48,
+            "leadHours": 12.25,
+            "src": "/marketing/portsmouth/frames/meanDepth/irene_t049.webp"
+          },
+          {
+            "timeIndex": 51,
+            "leadHours": 13.0,
+            "src": "/marketing/portsmouth/frames/meanDepth/irene_t052.webp"
+          },
+          {
+            "timeIndex": 54,
+            "leadHours": 13.75,
+            "src": "/marketing/portsmouth/frames/meanDepth/irene_t055.webp"
+          },
+          {
+            "timeIndex": 57,
+            "leadHours": 14.5,
+            "src": "/marketing/portsmouth/frames/meanDepth/irene_t058.webp"
+          },
+          {
+            "timeIndex": 60,
+            "leadHours": 15.25,
+            "src": "/marketing/portsmouth/frames/meanDepth/irene_t061.webp"
+          },
+          {
+            "timeIndex": 63,
+            "leadHours": 16.0,
+            "src": "/marketing/portsmouth/frames/meanDepth/irene_t064.webp"
+          },
+          {
+            "timeIndex": 66,
+            "leadHours": 16.75,
+            "src": "/marketing/portsmouth/frames/meanDepth/irene_t067.webp"
+          },
+          {
+            "timeIndex": 69,
+            "leadHours": 17.5,
+            "src": "/marketing/portsmouth/frames/meanDepth/irene_t070.webp"
+          },
+          {
+            "timeIndex": 72,
+            "leadHours": 18.25,
+            "src": "/marketing/portsmouth/frames/meanDepth/irene_t073.webp"
+          },
+          {
+            "timeIndex": 75,
+            "leadHours": 19.0,
+            "src": "/marketing/portsmouth/frames/meanDepth/irene_t076.webp"
+          },
+          {
+            "timeIndex": 78,
+            "leadHours": 19.75,
+            "src": "/marketing/portsmouth/frames/meanDepth/irene_t079.webp"
+          },
+          {
+            "timeIndex": 81,
+            "leadHours": 20.5,
+            "src": "/marketing/portsmouth/frames/meanDepth/irene_t082.webp"
+          },
+          {
+            "timeIndex": 84,
+            "leadHours": 21.25,
+            "src": "/marketing/portsmouth/frames/meanDepth/irene_t085.webp"
+          },
+          {
+            "timeIndex": 87,
+            "leadHours": 22.0,
+            "src": "/marketing/portsmouth/frames/meanDepth/irene_t088.webp"
+          },
+          {
+            "timeIndex": 90,
+            "leadHours": 22.75,
+            "src": "/marketing/portsmouth/frames/meanDepth/irene_t091.webp"
+          },
+          {
+            "timeIndex": 93,
+            "leadHours": 23.5,
+            "src": "/marketing/portsmouth/frames/meanDepth/irene_t094.webp"
+          }
+        ]
+      },
+      {
+        "id": "intervalWidth",
+        "label": "90% interval width",
+        "displayFloor": 0.08,
+        "vmin": 0.08,
+        "vmax": 1.0,
+        "frames": [
+          {
+            "timeIndex": 0,
+            "leadHours": 0.25,
+            "src": "/marketing/portsmouth/frames/intervalWidth/irene_t001.webp"
+          },
+          {
+            "timeIndex": 3,
+            "leadHours": 1.0,
+            "src": "/marketing/portsmouth/frames/intervalWidth/irene_t004.webp"
+          },
+          {
+            "timeIndex": 6,
+            "leadHours": 1.75,
+            "src": "/marketing/portsmouth/frames/intervalWidth/irene_t007.webp"
+          },
+          {
+            "timeIndex": 9,
+            "leadHours": 2.5,
+            "src": "/marketing/portsmouth/frames/intervalWidth/irene_t010.webp"
+          },
+          {
+            "timeIndex": 12,
+            "leadHours": 3.25,
+            "src": "/marketing/portsmouth/frames/intervalWidth/irene_t013.webp"
+          },
+          {
+            "timeIndex": 15,
+            "leadHours": 4.0,
+            "src": "/marketing/portsmouth/frames/intervalWidth/irene_t016.webp"
+          },
+          {
+            "timeIndex": 18,
+            "leadHours": 4.75,
+            "src": "/marketing/portsmouth/frames/intervalWidth/irene_t019.webp"
+          },
+          {
+            "timeIndex": 21,
+            "leadHours": 5.5,
+            "src": "/marketing/portsmouth/frames/intervalWidth/irene_t022.webp"
+          },
+          {
+            "timeIndex": 24,
+            "leadHours": 6.25,
+            "src": "/marketing/portsmouth/frames/intervalWidth/irene_t025.webp"
+          },
+          {
+            "timeIndex": 27,
+            "leadHours": 7.0,
+            "src": "/marketing/portsmouth/frames/intervalWidth/irene_t028.webp"
+          },
+          {
+            "timeIndex": 30,
+            "leadHours": 7.75,
+            "src": "/marketing/portsmouth/frames/intervalWidth/irene_t031.webp"
+          },
+          {
+            "timeIndex": 33,
+            "leadHours": 8.5,
+            "src": "/marketing/portsmouth/frames/intervalWidth/irene_t034.webp"
+          },
+          {
+            "timeIndex": 36,
+            "leadHours": 9.25,
+            "src": "/marketing/portsmouth/frames/intervalWidth/irene_t037.webp"
+          },
+          {
+            "timeIndex": 39,
+            "leadHours": 10.0,
+            "src": "/marketing/portsmouth/frames/intervalWidth/irene_t040.webp"
+          },
+          {
+            "timeIndex": 42,
+            "leadHours": 10.75,
+            "src": "/marketing/portsmouth/frames/intervalWidth/irene_t043.webp"
+          },
+          {
+            "timeIndex": 46,
+            "leadHours": 11.75,
+            "src": "/marketing/portsmouth/frames/intervalWidth/irene_t047.webp"
+          },
+          {
+            "timeIndex": 48,
+            "leadHours": 12.25,
+            "src": "/marketing/portsmouth/frames/intervalWidth/irene_t049.webp"
+          },
+          {
+            "timeIndex": 51,
+            "leadHours": 13.0,
+            "src": "/marketing/portsmouth/frames/intervalWidth/irene_t052.webp"
+          },
+          {
+            "timeIndex": 54,
+            "leadHours": 13.75,
+            "src": "/marketing/portsmouth/frames/intervalWidth/irene_t055.webp"
+          },
+          {
+            "timeIndex": 57,
+            "leadHours": 14.5,
+            "src": "/marketing/portsmouth/frames/intervalWidth/irene_t058.webp"
+          },
+          {
+            "timeIndex": 60,
+            "leadHours": 15.25,
+            "src": "/marketing/portsmouth/frames/intervalWidth/irene_t061.webp"
+          },
+          {
+            "timeIndex": 63,
+            "leadHours": 16.0,
+            "src": "/marketing/portsmouth/frames/intervalWidth/irene_t064.webp"
+          },
+          {
+            "timeIndex": 66,
+            "leadHours": 16.75,
+            "src": "/marketing/portsmouth/frames/intervalWidth/irene_t067.webp"
+          },
+          {
+            "timeIndex": 69,
+            "leadHours": 17.5,
+            "src": "/marketing/portsmouth/frames/intervalWidth/irene_t070.webp"
+          },
+          {
+            "timeIndex": 72,
+            "leadHours": 18.25,
+            "src": "/marketing/portsmouth/frames/intervalWidth/irene_t073.webp"
+          },
+          {
+            "timeIndex": 75,
+            "leadHours": 19.0,
+            "src": "/marketing/portsmouth/frames/intervalWidth/irene_t076.webp"
+          },
+          {
+            "timeIndex": 78,
+            "leadHours": 19.75,
+            "src": "/marketing/portsmouth/frames/intervalWidth/irene_t079.webp"
+          },
+          {
+            "timeIndex": 81,
+            "leadHours": 20.5,
+            "src": "/marketing/portsmouth/frames/intervalWidth/irene_t082.webp"
+          },
+          {
+            "timeIndex": 84,
+            "leadHours": 21.25,
+            "src": "/marketing/portsmouth/frames/intervalWidth/irene_t085.webp"
+          },
+          {
+            "timeIndex": 87,
+            "leadHours": 22.0,
+            "src": "/marketing/portsmouth/frames/intervalWidth/irene_t088.webp"
+          },
+          {
+            "timeIndex": 90,
+            "leadHours": 22.75,
+            "src": "/marketing/portsmouth/frames/intervalWidth/irene_t091.webp"
+          },
+          {
+            "timeIndex": 93,
+            "leadHours": 23.5,
+            "src": "/marketing/portsmouth/frames/intervalWidth/irene_t094.webp"
+          }
+        ]
+      }
+    ],
+    "snapshot": [
+      {
+        "id": "probability",
+        "label": "P(WD > 0.30 m)",
+        "src": "/marketing/portsmouth/frames/probability/irene_t067.webp"
+      },
+      {
+        "id": "meanDepth",
+        "label": "Calibrated mean depth",
+        "src": "/marketing/portsmouth/frames/meanDepth/irene_t067.webp"
+      },
+      {
+        "id": "intervalWidth",
+        "label": "90% interval width",
+        "src": "/marketing/portsmouth/frames/intervalWidth/irene_t067.webp"
+      }
+    ],
+    "locations": [
+      {
+        "id": "a",
+        "label": "Location A",
+        "interpretation": "Early onset",
+        "cellIndex": 3146,
+        "coordinates": {
+          "easting": 384179.4,
+          "northing": 4074805.0
+        },
+        "mapSrc": "/marketing/portsmouth/locations/location_a_map.webp",
+        "panelSrc": "/marketing/portsmouth/locations/location_a_evidence.svg"
+      },
+      {
+        "id": "b",
+        "label": "Location B",
+        "interpretation": "Elevated member spread",
+        "cellIndex": 1525,
+        "coordinates": {
+          "easting": 384679.4,
+          "northing": 4075705.0
+        },
+        "mapSrc": "/marketing/portsmouth/locations/location_b_map.webp",
+        "panelSrc": "/marketing/portsmouth/locations/location_b_evidence.svg"
+      },
+      {
+        "id": "c",
+        "label": "Location C",
+        "interpretation": "Later response",
+        "cellIndex": 194,
+        "coordinates": {
+          "easting": 383879.4,
+          "northing": 4076655.0
+        },
+        "mapSrc": "/marketing/portsmouth/locations/location_c_map.webp",
+        "panelSrc": "/marketing/portsmouth/locations/location_c_evidence.svg"
+      }
+    ],
+    "decomposition": {
+      "leadHours": 11.75,
+      "betweenVarianceShare": 0.1863,
+      "displayFloorM": 0.02,
+      "sharedVmaxM": 0.81,
+      "maps": [
+        {
+          "id": "betweenModel",
+          "label": "Epistemic uncertainty",
+          "src": "/marketing/portsmouth/decomposition/betweenModel.webp"
+        },
+        {
+          "id": "withinModel",
+          "label": "Aleatoric uncertainty",
+          "src": "/marketing/portsmouth/decomposition/withinModel.webp"
+        }
+      ]
+    }
+  },
+  "historicalValidation": {
+    "thresholdM": 0.1,
+    "events": [
+      {
+        "eventId": "2023_OPHELIA",
+        "label": "Ophelia 2023",
+        "thresholdM": 0.1,
+        "probabilitySrc": "/marketing/portsmouth/validation/2023_ophelia/probability.webp",
+        "intervalWidthSrc": "/marketing/portsmouth/validation/2023_ophelia/interval_width.webp",
+        "trajectorySrc": "/marketing/portsmouth/validation/2023_ophelia/extent_trajectory.svg",
+        "runId": "75794a43c33147dc9d1b953fb16a7e6d"
+      },
+      {
+        "eventId": "2003_ISABEL",
+        "label": "Isabel 2003",
+        "thresholdM": 0.1,
+        "probabilitySrc": "/marketing/portsmouth/validation/2003_isabel/probability.webp",
+        "intervalWidthSrc": "/marketing/portsmouth/validation/2003_isabel/interval_width.webp",
+        "trajectorySrc": "/marketing/portsmouth/validation/2003_isabel/extent_trajectory.svg",
+        "runId": "63379a0593664363acd43f6f9e569610"
+      },
+      {
+        "eventId": "2011_IRENE",
+        "label": "Irene 2011",
+        "thresholdM": 0.1,
+        "probabilitySrc": "/marketing/portsmouth/validation/2011_irene/probability.webp",
+        "intervalWidthSrc": "/marketing/portsmouth/validation/2011_irene/interval_width.webp",
+        "trajectorySrc": "/marketing/portsmouth/validation/2011_irene/extent_trajectory.svg",
+        "runId": "e8594d55d86d4d6595776d456a44f4e0"
+      }
+    ],
+    "note": "The historical validation threshold is 0.10 m and is not directly compared with the 0.30 m product view. Maximum-over-horizon maps use ensemble frequencies from calibrated depth members; no separate maximum-event isotonic mapping is implied."
+  },
+  "performance": {
+    "workflow": {
+      "hardware": "NVIDIA RTX 4090",
+      "scope": "Complete 60-member workflow including HDF5, summaries, maps, animation, and scrub frames",
+      "event": "Irene 2011"
+    },
+    "comparison": {
+      "sample": "50 held-out coastal events",
+      "ensembleBudget": "20 members per method",
+      "hardware": "NVIDIA A100",
+      "timingScope": "Forward-only inference per event",
+      "fairCrpsUnit": "meters",
+      "brierThresholdM": 0.3,
+      "sourceArtifact": "coastal_uq_model_comparison/skill_cost_pareto_3x20_50events_optimized_20260613_034635/skill_cost_metrics_by_size.csv"
+    }
+  },
+  "provenance": {
+    "bundleId": "coastal-fgn-3x20-calibrated-v1-20260510",
+    "bundleGitCommit": "8d3c1310bf2324f1e84f250ad5fc24f116cb39d1",
+    "calibrationMode": "calibrated_default",
+    "ensemblePolicy": "3 checkpoints x 20 members",
+    "seed": 123,
+    "initialConditionLibraryId": "coastal-fgn-3x20-calibrated-v1-20260510-initial-condition-train_calibration",
+    "initialConditionReferenceScope": "train_calibration",
+    "meshHash": "b65401c2214b4da9063036d703a160a68de1488b85b7ebd93624d118dbe8aa95",
+    "terrainSha256": "4cb46d4d94d6c28e0ff5b151c4b1448d1b9791545eb73a60e54d63478d40f1e6",
+    "terrainSourceCrs": "EPSG:26918",
+    "terrainTargetCrs": "EPSG:32618",
+    "historicalReferenceSha256": "a83b6285ee5d8ef53acbaaaaaab576b7e5a0e5b391fad5e6fb1312f4ddc68487",
+    "dtSeconds": 900,
+    "forecastSteps": 94
+  },
+  "displayPolicy": {
+    "demRangeM": [
+      -15.1,
+      19.9
+    ],
+    "demAlpha": 0.92,
+    "overlayAlpha": 0.9,
+    "meanDepthFloorM": 0.05,
+    "probabilityFloor": 0.1,
+    "intervalWidthFloorM": 0.08,
+    "decompositionSdFloorM": 0.02,
+    "longTriangleEdgeFactor": 2.5,
+    "terrainSourceExtent": [
+      374240.41816411517,
+      386414.1690246669,
+      4071277.599297895,
+      4080559.0561408484
+    ],
+    "terrainViewport": [
+      379858.15,
+      384950.65,
+      4072748.75,
+      4077211.25
+    ],
+    "meshExtent": [
+      379979.4,
+      384829.4,
+      4072855.0,
+      4077105.0
+    ],
+    "terrainExtendsBeyondMesh": true,
+    "viewportPolicy": "mesh_bounds_plus_2p5_percent"
+  },
+  "researchDisclaimer": "Research only; not for emergency or operational decision use."
+}

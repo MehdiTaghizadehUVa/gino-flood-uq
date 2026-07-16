@@ -2,36 +2,43 @@
 	tls internal
 	encode gzip
 
-	handle /oauth2/* {
-		reverse_proxy oauth2-proxy:4180 {
-			header_up X-Real-IP {remote_host}
-			header_up X-Forwarded-Uri {uri}
-		}
-	}
-
-	route /api/* {
-		forward_auth oauth2-proxy:4180 {
-			uri /oauth2/auth
-			header_up X-Real-IP {remote_host}
-			copy_headers X-Auth-Request-Email X-Auth-Request-User
-			@error status 401
-			handle_response @error {
-				redir * /oauth2/sign_in?rd={scheme}://{host}{uri} 302
-			}
-		}
-		reverse_proxy api:8000
-	}
-
 	route {
-		forward_auth oauth2-proxy:4180 {
-			uri /oauth2/auth
-			header_up X-Real-IP {remote_host}
-			copy_headers X-Auth-Request-Email X-Auth-Request-User
-			@error status 401
-			handle_response @error {
-				redir * /oauth2/sign_in?rd={scheme}://{host}{uri} 302
+		handle /oauth2/* {
+			reverse_proxy oauth2-proxy:4180 {
+				header_up X-Real-IP {remote_host}
+				header_up X-Forwarded-Uri {uri}
 			}
 		}
-		reverse_proxy frontend:3000
+
+		handle /api/* {
+			forward_auth oauth2-proxy:4180 {
+				uri /oauth2/auth
+				header_up X-Real-IP {remote_host}
+				copy_headers X-Auth-Request-Email X-Auth-Request-User
+				@error status 401
+				handle_response @error {
+					redir * /oauth2/sign_in?rd={scheme}://{host}{uri} 302
+				}
+			}
+			reverse_proxy api:8000
+		}
+
+		@public path / /_next/* /marketing/* /favicon.ico /robots.txt /sitemap.xml
+		handle @public {
+			reverse_proxy frontend:3000
+		}
+
+		handle {
+			forward_auth oauth2-proxy:4180 {
+				uri /oauth2/auth
+				header_up X-Real-IP {remote_host}
+				copy_headers X-Auth-Request-Email X-Auth-Request-User
+				@error status 401
+				handle_response @error {
+					redir * /oauth2/sign_in?rd={scheme}://{host}{uri} 302
+				}
+			}
+			reverse_proxy frontend:3000
+		}
 	}
 }

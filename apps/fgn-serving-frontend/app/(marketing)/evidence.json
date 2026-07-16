@@ -1,0 +1,47 @@
+{
+  "caseStudy": "Portsmouth, Virginia",
+  "benchmark": {
+    "label": "Held-out probabilistic skill-cost benchmark",
+    "sample": "50 held-out coastal events",
+    "ensembleBudget": "20 members per method",
+    "hardware": "NVIDIA A100",
+    "timingScope": "Forward-only inference per event",
+    "skillMetrics": "Fair CRPS in meters and Brier error for WD > 0.30 m",
+    "figure": "/marketing/skill-cost-pareto.png"
+  },
+  "claims": [
+    {
+      "id": "diffusion-speedup",
+      "value": "44.5x",
+      "label": "faster than the tested diffusion surrogate",
+      "scope": "Portsmouth held-out benchmark at a 20-member ensemble budget",
+      "sample": "50 held-out coastal events; timing measured over 10 events",
+      "hardware": "NVIDIA A100",
+      "measurement": "29.76 s FGNO versus 1324.71 s diffusion, forward-only inference per event",
+      "sourceArtifact": "coastal_uq_model_comparison/skill_cost_pareto_3x20_50events_optimized_20260613_034635/skill_cost_metrics_by_size.csv",
+      "measured": true
+    },
+    {
+      "id": "crps-reduction",
+      "value": "75.4%",
+      "label": "lower fair CRPS than the tested diffusion surrogate",
+      "scope": "Portsmouth held-out benchmark at a 20-member ensemble budget",
+      "sample": "50 held-out coastal events",
+      "hardware": "NVIDIA A100",
+      "measurement": "0.01833 m FGNO versus 0.07446 m diffusion fair CRPS",
+      "sourceArtifact": "coastal_uq_model_comparison/skill_cost_pareto_3x20_50events_optimized_20260613_034635/skill_cost_metrics_by_size.csv",
+      "measured": true
+    },
+    {
+      "id": "brier-reduction",
+      "value": "91.4%",
+      "label": "lower exceedance Brier error than the tested diffusion surrogate",
+      "scope": "Portsmouth held-out benchmark at a 20-member ensemble budget",
+      "sample": "50 held-out coastal events",
+      "hardware": "NVIDIA A100",
+      "measurement": "0.00367 FGNO versus 0.04289 diffusion Brier error for WD > 0.30 m",
+      "sourceArtifact": "coastal_uq_model_comparison/skill_cost_pareto_3x20_50events_optimized_20260613_034635/skill_cost_metrics_by_size.csv",
+      "measured": true
+    }
+  ]
+}

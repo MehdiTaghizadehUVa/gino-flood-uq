@@ -377,17 +377,16 @@ class ForecastProductBuilder:
         member_model_id: Sequence[str] | None,
     ) -> tuple[np.ndarray, np.ndarray, dict] | None:
         """Per-cell decomposition of ensemble variance into
-        between-checkpoint vs within-checkpoint components.
+        epistemic and aleatoric uncertainty components.
 
         Bundles produce 60 members as 3 checkpoints × 20 latent samples each.
         ``member_model_id`` is the per-member checkpoint label
         (``["model_0", ..., "model_2"]``). With it, total spread can be split:
 
-        - **between**: variance across the per-checkpoint mean depths.
-          Reflects disagreement *between* the trained models — closer to
-          structural / epistemic uncertainty.
-        - **within**: mean of the per-checkpoint variances.
-          Reflects latent / aleatoric variability the model itself encodes.
+        - **epistemic**: variance across the per-checkpoint mean depths.
+          Represents uncertainty in learned model structure and parameters.
+        - **aleatoric**: mean of the per-checkpoint variances.
+          Represents variability among latent members inside each checkpoint.
 
         Returns ``(between_var, within_var, summary)`` or ``None`` when
         ``member_model_id`` is missing or has fewer than two distinct groups
@@ -444,11 +443,11 @@ class ForecastProductBuilder:
         The serving ensemble is structured as checkpoints × latent samples.
         This helper decomposes variance at each lead time into:
 
-        - between-checkpoint variance: disagreement among trained checkpoints;
-        - within-checkpoint variance: latent variability inside each checkpoint.
+        - epistemic variance: disagreement among trained checkpoints;
+        - aleatoric variance: latent variability inside each checkpoint.
 
-        A "high checkpoint-disagreement footprint" is the wettable area where
-        checkpoint disagreement explains at least half of total ensemble
+        A "high epistemic-uncertainty footprint" is the wettable area where
+        epistemic uncertainty explains at least half of total ensemble
         variance and the total ensemble spread is at least 5 cm. The spread
         floor avoids treating numerically tiny differences in dry areas as a
         meaningful disagreement signal.
@@ -942,8 +941,8 @@ class ForecastProductBuilder:
     ) -> None:
         """Render the three uncertainty maps with a consistent palette so
         the Uncertainty tab reads at a glance: empirical CRPS in magma
-        (uncertainty palette), between in cividis (model variability),
-        within in viridis (latent variability)."""
+        (uncertainty palette), epistemic uncertainty in cividis, and
+        aleatoric uncertainty in viridis."""
         metadata = forecast.metadata or {}
         geometry = metadata.get("geometry_xy")
         if geometry is None:
@@ -990,10 +989,10 @@ class ForecastProductBuilder:
         if decomp_path is not None:
             with np.load(decomp_path) as data:
                 for key, cmap, title, cbar, png_name in (
-                    ("between_var", "cividis", "Between-checkpoint variance at peak",
-                     "Var across checkpoint means (m²)", "between_var_map.png"),
-                    ("within_var", "viridis", "Within-checkpoint (latent) variance at peak",
-                     "Mean of per-checkpoint variances (m²)", "within_var_map.png"),
+                    ("between_var", "cividis", "Epistemic uncertainty at peak",
+                     "Epistemic variance (m²)", "between_var_map.png"),
+                    ("within_var", "viridis", "Aleatoric uncertainty at peak",
+                     "Aleatoric variance (m²)", "within_var_map.png"),
                 ):
                     arr = np.asarray(data[key])
                     values = np.where(np.isfinite(arr), arr, 0.0)
