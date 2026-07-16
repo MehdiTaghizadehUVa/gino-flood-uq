@@ -1916,7 +1916,7 @@ def _save_nonspatial_uq_diagnostics(
         if small_box_data:
             ax_small.boxplot(
                 small_box_data,
-                labels=small_box_labels,
+                tick_labels=small_box_labels,
                 showfliers=False,
                 whis=(5, 95),
             )
@@ -1931,7 +1931,7 @@ def _save_nonspatial_uq_diagnostics(
         if ratio_data is not None:
             ax_ratio.boxplot(
                 [ratio_data],
-                labels=["spread_ratio_wd"],
+                tick_labels=["spread_ratio_wd"],
                 showfliers=False,
                 whis=(5, 95),
             )
