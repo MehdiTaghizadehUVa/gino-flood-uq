@@ -107,6 +107,40 @@ def _normalizer_physical_scale(normalizer: Any) -> float:
     return scale
 
 
+def _frozen_rollout_cache_key(
+    *,
+    stage1_checkpoint: Any,
+    config: Any,
+    latent_dim: int,
+    n_history: int,
+    structural_dry_enabled: bool,
+) -> str:
+    """Return the cache key for tensors produced solely by frozen Stage 1.
+
+    Canonical deterministic-head features have their own hash-validated
+    sidecar namespace. Keeping those Stage-2 settings out of this key allows
+    B2+ runs to reuse the exact frozen rollouts produced by B0/B1.
+    The three trailing neutral fields preserve the established v3 namespace.
+    """
+
+    payload = "|".join(
+        [
+            "neon_feature_cache_v3",
+            str(stage1_checkpoint),
+            str(config.feature_source),
+            str(latent_dim),
+            str(getattr(config, "k_train", "")),
+            str(getattr(config, "latent_bank_count", "")),
+            str(n_history),
+            str(bool(structural_dry_enabled)),
+            "0",
+            "0",
+            "False",
+        ]
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
+
+
 def _estimate_cached_feature_bytes(
     probe: FrozenFGNOFeatureBatch,
     *,
@@ -160,6 +194,123 @@ def make_feature_collector_from_frozen_model(
     if canonical_disk_dir is not None:
         canonical_disk_dir.mkdir(parents=True, exist_ok=True)
 
+    def _model_device() -> torch.device:
+        try:
+            return next(stage1_model.parameters()).device
+        except StopIteration:  # parameter-less model (shouldn't happen for GINO)
+            return torch.device("cpu")
+
+    def _collect(
+        family: NEONFamilySample,
+        *,
+        latent_bank: torch.Tensor,
+        histories: torch.Tensor,
+        model_device: torch.device,
+    ) -> FrozenFGNOFeatureBatch:
+        if target_normalizer is not None:
+            target_normalizer.to(model_device)
+        return collect_frozen_fgno_rollout_features(
+            stage1_model=stage1_model,
+            static=family.static.to(model_device),
+            geometry=family.geometry.to(model_device),
+            query_points=family.query_points.to(model_device),
+            boundary_sequence=family.boundary_sequence.to(model_device),
+            initial_histories=histories,
+            aleatory_latents=latent_bank,
+            rollout_length=int(family.reference.shape[1]),
+            n_history=int(n_history),
+            feature_source=feature_source,
+            structural_dry_mask=(
+                None
+                if family.structural_dry_mask is None
+                else family.structural_dry_mask.to(model_device)
+            ),
+            target_normalizer=target_normalizer,
+        )
+
+    canonical_latents_cpu: Optional[torch.Tensor] = None
+    canonical_hash: Optional[str] = None
+    if int(canonical_k) > 0:
+        k0 = int(canonical_k)
+        if canonical_zero_latent:
+            canonical_latents_cpu = torch.zeros(1, int(latent_dim))
+        else:
+            canonical_generator = torch.Generator(device="cpu")
+            canonical_generator.manual_seed(
+                _stable_canonical_latent_seed(
+                    seed=int(canonical_seed),
+                    canonical_k=k0,
+                    latent_dim=int(latent_dim),
+                )
+            )
+            half = k0 // 2
+            positive = torch.randn(
+                half, int(latent_dim), generator=canonical_generator
+            )
+            canonical_latents_cpu = torch.cat([positive, -positive], dim=0)
+            if canonical_latents_cpu.shape[0] < k0:
+                canonical_latents_cpu = torch.cat(
+                    [canonical_latents_cpu, torch.zeros(1, int(latent_dim))],
+                    dim=0,
+                )
+            canonical_latents_cpu = canonical_latents_cpu[:k0]
+        canonical_bytes = canonical_latents_cpu.contiguous().numpy().tobytes()
+        canonical_hash = hashlib.sha256(canonical_bytes).hexdigest()
+
+    def load_canonical_features(
+        family: NEONFamilySample,
+    ) -> tuple[Optional[torch.Tensor], Optional[str]]:
+        """Load or compute only the canonical mean feature for one family."""
+
+        if canonical_latents_cpu is None or canonical_hash is None:
+            return None, None
+        if family.initial_histories is None:
+            raise ValueError(
+                f"family {family.family_id!r} lacks initial_histories for rollout."
+            )
+        cache_token = hashlib.sha256(
+            str(family.family_id).encode("utf-8")
+        ).hexdigest()[:20]
+        canonical_path = (
+            None
+            if canonical_disk_dir is None
+            else canonical_disk_dir / f"{cache_token}_{canonical_hash[:16]}.pt"
+        )
+        cached = canonical_memory_cache.get(str(family.family_id))
+        if cached is None and canonical_path is not None and canonical_path.exists():
+            payload = torch.load(canonical_path, map_location="cpu")
+            if payload.get("latent_hash") != canonical_hash:
+                raise ValueError("canonical feature-cache latent hash mismatch.")
+            cached = (payload["features"], canonical_hash)
+        if cached is None:
+            model_device = _model_device()
+            canonical_latents = canonical_latents_cpu.to(model_device)
+            canonical_init = family.initial_histories.to(model_device)
+            if canonical_init.ndim == 3:
+                canonical_init = canonical_init.unsqueeze(0).expand(
+                    canonical_latents.shape[0], -1, -1, -1
+                ).contiguous()
+            canonical_batch = _collect(
+                family,
+                latent_bank=canonical_latents,
+                histories=canonical_init,
+                model_device=model_device,
+            )
+            canonical_features = canonical_batch.features.mean(dim=1)
+            cached_cpu = canonical_features.detach().to(
+                device="cpu", dtype=torch.float16
+            )
+            cached = (cached_cpu, canonical_hash)
+            if canonical_path is None:
+                canonical_memory_cache[str(family.family_id)] = cached
+            else:
+                tmp = canonical_path.with_suffix(f".tmp{os.getpid()}.pt")
+                torch.save(
+                    {"features": cached_cpu, "latent_hash": canonical_hash}, tmp
+                )
+                os.replace(tmp, canonical_path)
+        return cached
+
     def collector(
         family: NEONFamilySample,
         *,
@@ -171,10 +322,7 @@ def make_feature_collector_from_frozen_model(
             raise ValueError(f"family {family.family_id!r} lacks initial_histories for rollout.")
         # The collector owns device placement: move all inputs to the frozen
         # model's device so the AR rollout is device-consistent on GPU.
-        try:
-            model_device = next(stage1_model.parameters()).device
-        except StopIteration:  # parameter-less model (shouldn't happen for GINO)
-            model_device = torch.device("cpu")
+        model_device = _model_device()
         bank = 0 if latent_bank_id is None else int(latent_bank_id)
         latent_generator = torch.Generator(device="cpu")
         latent_generator.manual_seed(
@@ -194,90 +342,21 @@ def make_feature_collector_from_frozen_model(
         init = family.initial_histories.to(model_device)
         if init.ndim == 3:  # [n_history, Nv, C] -> broadcast to K members
             init = init.unsqueeze(0).expand(int(num_aleatory), -1, -1, -1).contiguous()
-        if target_normalizer is not None:
-            target_normalizer.to(model_device)
-
-        def collect(latent_bank: torch.Tensor, histories: torch.Tensor):
-            return collect_frozen_fgno_rollout_features(
-                stage1_model=stage1_model,
-                static=family.static.to(model_device),
-                geometry=family.geometry.to(model_device),
-                query_points=family.query_points.to(model_device),
-                boundary_sequence=family.boundary_sequence.to(model_device),
-                initial_histories=histories,
-                aleatory_latents=latent_bank,
-                rollout_length=int(family.reference.shape[1]),
-                n_history=int(n_history),
-                feature_source=feature_source,
-                structural_dry_mask=(
-                    None
-                    if family.structural_dry_mask is None
-                    else family.structural_dry_mask.to(model_device)
-                ),
-                target_normalizer=target_normalizer,
-            )
-
-        batch = collect(latents, init)
-        if int(canonical_k) > 0:
-            k0 = int(canonical_k)
-            if canonical_zero_latent:
-                canonical_latents = torch.zeros(1, int(latent_dim))
-                k0 = 1
-            else:
-                canonical_generator = torch.Generator(device="cpu")
-                canonical_generator.manual_seed(
-                    _stable_canonical_latent_seed(
-                        seed=int(canonical_seed),
-                        canonical_k=k0,
-                        latent_dim=int(latent_dim),
-                    )
-                )
-                half = k0 // 2
-                positive = torch.randn(half, int(latent_dim), generator=canonical_generator)
-                canonical_latents = torch.cat([positive, -positive], dim=0)
-                if canonical_latents.shape[0] < k0:
-                    canonical_latents = torch.cat(
-                        [canonical_latents, torch.zeros(1, int(latent_dim))], dim=0
-                    )
-            canonical_latents = canonical_latents[:k0].to(model_device)
-            canonical_bytes = canonical_latents.detach().to("cpu").contiguous().numpy().tobytes()
-            canonical_hash = hashlib.sha256(canonical_bytes).hexdigest()
-            cache_token = hashlib.sha256(str(family.family_id).encode("utf-8")).hexdigest()[:20]
-            canonical_path = (
-                None
-                if canonical_disk_dir is None
-                else canonical_disk_dir / f"{cache_token}_{canonical_hash[:16]}.pt"
-            )
-            cached = canonical_memory_cache.get(str(family.family_id))
-            if cached is None and canonical_path is not None and canonical_path.exists():
-                payload = torch.load(canonical_path, map_location="cpu")
-                if payload.get("latent_hash") != canonical_hash:
-                    raise ValueError("canonical feature-cache latent hash mismatch.")
-                cached = (payload["features"], canonical_hash)
-            if cached is None:
-                canonical_init = family.initial_histories.to(model_device)
-                if canonical_init.ndim == 3:
-                    canonical_init = canonical_init.unsqueeze(0).expand(
-                        k0, -1, -1, -1
-                    ).contiguous()
-                canonical_batch = collect(canonical_latents, canonical_init)
-                canonical_features = canonical_batch.features.mean(dim=1)
-                cached_cpu = canonical_features.detach().to(device="cpu", dtype=torch.float16)
-                cached = (cached_cpu, canonical_hash)
-                if canonical_path is None:
-                    canonical_memory_cache[str(family.family_id)] = cached
-                else:
-                    tmp = canonical_path.with_suffix(f".tmp{os.getpid()}.pt")
-                    torch.save(
-                        {"features": cached_cpu, "latent_hash": canonical_hash}, tmp
-                    )
-                    os.replace(tmp, canonical_path)
-            batch.canonical_mean_features = cached[0].to(
+        batch = _collect(
+            family,
+            latent_bank=latents,
+            histories=init,
+            model_device=model_device,
+        )
+        canonical_features, loaded_canonical_hash = load_canonical_features(family)
+        if canonical_features is not None:
+            batch.canonical_mean_features = canonical_features.to(
                 device=batch.features.device, dtype=batch.features.dtype
             )
-            batch.canonical_latent_hash = canonical_hash
+            batch.canonical_latent_hash = loaded_canonical_hash
         return batch
 
+    collector.load_canonical_features = load_canonical_features
     return collector
 
 
@@ -310,6 +389,7 @@ def make_cached_feature_collector(
     prefetch_workers = max(0, int(prefetch_workers))
     prefetch_depth = max(0, int(prefetch_depth))
     cache: dict[str, tuple] = {}
+    canonical_loader = getattr(base_collector, "load_canonical_features", None)
     dir_path = None
     if cache_dir is not None:
         dir_path = Path(cache_dir)
@@ -376,19 +456,22 @@ def make_cached_feature_collector(
         with prefetch_lock:
             prefetch_futures.clear()
 
-    def _store(batch) -> None:
+    def _store(batch) -> dict[str, Any]:
+        use_canonical_sidecar = canonical_loader is not None
         payload = {
             "base": batch.base_prediction.detach().to(device=cache_device, dtype=cache_dtype),
             "features": batch.features.detach().to(device=cache_device, dtype=cache_dtype),
             "latents": batch.aleatory_latents.detach().to(device=cache_device),
             "canonical_mean_features": (
                 None
-                if batch.canonical_mean_features is None
+                if use_canonical_sidecar or batch.canonical_mean_features is None
                 else batch.canonical_mean_features.detach().to(
                     device=cache_device, dtype=cache_dtype
                 )
             ),
-            "canonical_latent_hash": batch.canonical_latent_hash,
+            "canonical_latent_hash": (
+                None if use_canonical_sidecar else batch.canonical_latent_hash
+            ),
             "device": str(batch.features.device),
             "dtype": batch.features.dtype,
         }
@@ -413,18 +496,22 @@ def make_cached_feature_collector(
             if fpath.exists():
                 p = _take_prefetched_or_load(fpath)
                 dev, dt = torch.device(p["device"]), p["dtype"]
+                canonical = p.get("canonical_mean_features")
+                canonical_hash = p.get("canonical_latent_hash")
+                if canonical is None and canonical_loader is not None:
+                    canonical, canonical_hash = canonical_loader(family)
                 return FrozenFGNOFeatureBatch(
                     base_prediction=_move_for_compute(p["base"], device=dev, dtype=dt),
                     features=_move_for_compute(p["features"], device=dev, dtype=dt),
                     aleatory_latents=_move_for_compute(p["latents"], device=dev),
                     canonical_mean_features=(
                         None
-                        if p.get("canonical_mean_features") is None
+                        if canonical is None
                         else _move_for_compute(
-                            p["canonical_mean_features"], device=dev, dtype=dt
+                            canonical, device=dev, dtype=dt
                         )
                     ),
-                    canonical_latent_hash=p.get("canonical_latent_hash"),
+                    canonical_latent_hash=canonical_hash,
                 )
             batch = base_collector(
                 family,
@@ -456,12 +543,16 @@ def make_cached_feature_collector(
             )
             return batch
         base_c, feat_c, lat_c, canonical_c, canonical_hash, dev, dt = hit
+        if canonical_c is None and canonical_loader is not None:
+            canonical_c, canonical_hash = canonical_loader(family)
         return FrozenFGNOFeatureBatch(
             base_prediction=base_c.to(device=dev, dtype=dt),
             features=feat_c.to(device=dev, dtype=dt),
             aleatory_latents=lat_c.to(device=dev),
             canonical_mean_features=(
-                None if canonical_c is None else canonical_c.to(device=dev, dtype=dt)
+                None
+                if canonical_c is None
+                else _move_for_compute(canonical_c, device=dev, dtype=dt)
             ),
             canonical_latent_hash=canonical_hash,
         )
@@ -567,22 +658,16 @@ def run_neon_stage2_training(
     # Wrap for caching before the probe so the probe populates the cache and the
     # frozen rollout for family[0] is not recomputed in epoch 0.
     if cache_features:
-        cache_payload = "|".join(
-            [
-                "neon_feature_cache_v3",
-                str(stage1_checkpoint),
-                str(config.feature_source),
-                str(latent_dim),
-                str(getattr(config, "k_train", "")),
-                str(getattr(config, "latent_bank_count", "")),
-                str(n_history),
-                str(any(family.structural_dry_mask is not None for family in train_families + val_families)),
-                str(getattr(config, "deterministic_head_canonical_k", 0) if canonical_enabled else 0),
-                str(getattr(config, "deterministic_head_latent_seed", 0) if canonical_enabled else 0),
-                str(canonical_zero_latent),
-            ]
+        cache_key = _frozen_rollout_cache_key(
+            stage1_checkpoint=stage1_checkpoint,
+            config=config,
+            latent_dim=latent_dim,
+            n_history=n_history,
+            structural_dry_enabled=any(
+                family.structural_dry_mask is not None
+                for family in train_families + val_families
+            ),
         )
-        cache_key = hashlib.sha256(cache_payload.encode("utf-8")).hexdigest()[:16]
         collector = make_cached_feature_collector(
             collector,
             cache_device=cache_device,

@@ -341,6 +341,38 @@ def test_canonical_feature_rollout_is_computed_once_per_family_across_latent_ban
     assert model.forward_calls == calls_after_first + 2 * T
 
 
+def test_canonical_sidecar_loader_does_not_collect_runtime_aleatory_bank(tmp_path):
+    model = _DummyStage1()
+    model.forward_calls = 0
+    original_forward = model.forward
+
+    def counted_forward(**kwargs):
+        model.forward_calls += 1
+        return original_forward(**kwargs)
+
+    model.forward = counted_forward
+    collector = runner.make_feature_collector_from_frozen_model(
+        model,
+        feature_source="decoder_pre_projection",
+        n_history=n_hist,
+        latent_dim=8,
+        canonical_k=4,
+        canonical_seed=19,
+        canonical_cache_dir=tmp_path,
+    )
+    family = _family("family-a", 0.0)
+
+    first, first_hash = collector.load_canonical_features(family)
+    calls_after_first = model.forward_calls
+    second, second_hash = collector.load_canonical_features(family)
+
+    assert calls_after_first == 4 * T
+    assert model.forward_calls == calls_after_first
+    torch.testing.assert_close(first, second)
+    assert first_hash == second_hash
+    assert len(list(tmp_path.glob("*.pt"))) == 1
+
+
 def test_target_normalizer_scale_converts_normalized_spread_to_meters():
     class Normalizer:
         std = torch.tensor([2.5])
@@ -483,6 +515,127 @@ def test_disk_cache_round_trips_canonical_mean_features_and_bank_hash(tmp_path):
     assert second.canonical_latent_hash == "canonical-sha256"
 
 
+def test_disk_cache_attaches_canonical_sidecar_to_legacy_base_entry(tmp_path):
+    base_calls = {"n": 0}
+
+    def legacy_base(family, *, num_aleatory, generator=None, latent_bank_id=None):
+        base_calls["n"] += 1
+        return train_neon.FrozenFGNOFeatureBatch(
+            base_prediction=torch.full((1, num_aleatory, T, Nv, C), 0.25),
+            features=torch.full((1, num_aleatory, T, Nv, Cphi), 0.5),
+            aleatory_latents=torch.zeros(num_aleatory, 2),
+        )
+
+    family = NEONFamilySample(
+        family_id="TR000001",
+        reference=torch.zeros(R, T, Nv, C),
+    )
+    writer = runner.make_cached_feature_collector(
+        legacy_base,
+        cache_dir=tmp_path,
+        cache_key="shared",
+    )
+    writer(family, num_aleatory=4, latent_bank_id=2)
+    writer.close()
+    assert base_calls["n"] == 1
+
+    canonical_calls = {"n": 0}
+    expected_canonical = torch.full((1, T, Nv, Cphi), 0.75)
+
+    def must_not_recollect(*args, **kwargs):
+        raise AssertionError("the frozen Stage-1 rollout cache must be reused")
+
+    def load_canonical_features(family):
+        canonical_calls["n"] += 1
+        return expected_canonical, "canonical-sidecar-sha256"
+
+    must_not_recollect.load_canonical_features = load_canonical_features
+    reader = runner.make_cached_feature_collector(
+        must_not_recollect,
+        cache_dir=tmp_path,
+        cache_key="shared",
+    )
+    actual = reader(family, num_aleatory=4, latent_bank_id=2)
+    reader.close()
+
+    assert canonical_calls["n"] == 1
+    torch.testing.assert_close(actual.canonical_mean_features, expected_canonical)
+    assert actual.canonical_latent_hash == "canonical-sidecar-sha256"
+
+
+def test_disk_cache_does_not_duplicate_canonical_sidecar_in_each_bank_file(tmp_path):
+    canonical = torch.full((1, T, Nv, Cphi), 0.75)
+
+    def base(family, *, num_aleatory, generator=None, latent_bank_id=None):
+        return train_neon.FrozenFGNOFeatureBatch(
+            base_prediction=torch.zeros(1, num_aleatory, T, Nv, C),
+            features=torch.zeros(1, num_aleatory, T, Nv, Cphi),
+            aleatory_latents=torch.zeros(num_aleatory, 2),
+            canonical_mean_features=canonical,
+            canonical_latent_hash="canonical-sidecar-sha256",
+        )
+
+    def load_canonical_features(family):
+        return canonical, "canonical-sidecar-sha256"
+
+    base.load_canonical_features = load_canonical_features
+    family = NEONFamilySample(
+        family_id="TR000001",
+        reference=torch.zeros(R, T, Nv, C),
+    )
+    collector = runner.make_cached_feature_collector(
+        base,
+        cache_dir=tmp_path,
+        cache_key="shared",
+    )
+    first = collector(family, num_aleatory=4, latent_bank_id=2)
+    payload = torch.load(
+        tmp_path / "shared_TR000001_bank2_k4.pt",
+        map_location="cpu",
+    )
+    second = collector(family, num_aleatory=4, latent_bank_id=2)
+    collector.close()
+
+    assert payload["canonical_mean_features"] is None
+    assert payload["canonical_latent_hash"] is None
+    torch.testing.assert_close(first.canonical_mean_features, canonical)
+    torch.testing.assert_close(second.canonical_mean_features, canonical)
+    assert second.canonical_latent_hash == "canonical-sidecar-sha256"
+
+
+def test_memory_cache_reattaches_canonical_sidecar_on_hit():
+    calls = {"base": 0, "canonical": 0}
+    canonical = torch.full((1, T, Nv, Cphi), 0.75)
+
+    def base(family, *, num_aleatory, generator=None, latent_bank_id=None):
+        calls["base"] += 1
+        return train_neon.FrozenFGNOFeatureBatch(
+            base_prediction=torch.zeros(1, num_aleatory, T, Nv, C),
+            features=torch.zeros(1, num_aleatory, T, Nv, Cphi),
+            aleatory_latents=torch.zeros(num_aleatory, 2),
+            canonical_mean_features=canonical,
+            canonical_latent_hash="canonical-sidecar-sha256",
+        )
+
+    def load_canonical_features(family):
+        calls["canonical"] += 1
+        return canonical, "canonical-sidecar-sha256"
+
+    base.load_canonical_features = load_canonical_features
+    family = NEONFamilySample(
+        family_id="TR000001",
+        reference=torch.zeros(R, T, Nv, C),
+    )
+    collector = runner.make_cached_feature_collector(base)
+    first = collector(family, num_aleatory=4, latent_bank_id=2)
+    second = collector(family, num_aleatory=4, latent_bank_id=2)
+
+    assert calls["base"] == 1
+    torch.testing.assert_close(first.canonical_mean_features, canonical)
+    torch.testing.assert_close(second.canonical_mean_features, canonical)
+    assert second.canonical_latent_hash == "canonical-sidecar-sha256"
+
+
 def test_disk_cache_key_separates_incompatible_feature_entries(tmp_path):
     calls = {"n": 0}
 
@@ -531,6 +684,45 @@ def test_disk_cache_key_separates_latent_banks(tmp_path):
     assert (tmp_path / "TR000001_bank1_k4.pt").exists()
     assert not torch.allclose(bank0.features, bank1.features)
     torch.testing.assert_close(bank1.features, bank1_again.features)
+
+
+def test_frozen_rollout_cache_key_ignores_stage2_canonical_head_settings():
+    common = dict(
+        feature_source="decoder_pre_projection",
+        k_train=8,
+        latent_bank_count=4,
+    )
+    without_head = types.SimpleNamespace(
+        **common,
+        deterministic_head=False,
+        deterministic_head_feature="canonical_aleatory_mean",
+        deterministic_head_canonical_k=0,
+        deterministic_head_latent_seed=0,
+    )
+    with_head = types.SimpleNamespace(
+        **common,
+        deterministic_head=True,
+        deterministic_head_feature="canonical_aleatory_mean",
+        deterministic_head_canonical_k=32,
+        deterministic_head_latent_seed=123,
+    )
+
+    key_without_head = runner._frozen_rollout_cache_key(
+        stage1_checkpoint="stage1.json",
+        config=without_head,
+        latent_dim=16,
+        n_history=3,
+        structural_dry_enabled=True,
+    )
+    key_with_head = runner._frozen_rollout_cache_key(
+        stage1_checkpoint="stage1.json",
+        config=with_head,
+        latent_dim=16,
+        n_history=3,
+        structural_dry_enabled=True,
+    )
+
+    assert key_with_head == key_without_head
 
 
 def test_runner_rejects_large_in_memory_feature_cache(tmp_path):
