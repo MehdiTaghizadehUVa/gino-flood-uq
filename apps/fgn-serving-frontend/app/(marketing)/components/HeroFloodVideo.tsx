@@ -4,6 +4,8 @@ import Image from "next/image";
 import { Pause, Play } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 
+const HERO_PLAYBACK_RATE = 0.65;
+
 export function HeroFloodVideo({
   posterSrc,
   mp4Src,
@@ -24,6 +26,10 @@ export function HeroFloodVideo({
     if (!root || !video) return;
 
     let visible = true;
+    const applyPlaybackRate = () => {
+      video.defaultPlaybackRate = HERO_PLAYBACK_RATE;
+      video.playbackRate = HERO_PLAYBACK_RATE;
+    };
 
     const syncPlayback = () => {
       const playbackRequested = manualPreferenceRef.current !== "pause";
@@ -46,11 +52,14 @@ export function HeroFloodVideo({
       : null;
     observer?.observe(root);
     document.addEventListener("visibilitychange", syncPlayback);
+    video.addEventListener("loadedmetadata", applyPlaybackRate);
+    applyPlaybackRate();
     syncPlayback();
 
     return () => {
       observer?.disconnect();
       document.removeEventListener("visibilitychange", syncPlayback);
+      video.removeEventListener("loadedmetadata", applyPlaybackRate);
       video.pause();
     };
   }, []);
