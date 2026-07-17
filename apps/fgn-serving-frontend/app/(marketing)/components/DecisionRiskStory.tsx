@@ -1,6 +1,7 @@
 "use client";
 
 import Image from "next/image";
+import { caseStudyAsset } from "../caseStudyAsset";
 import type { NumberedContentItem } from "../content";
 import { useScrollScene } from "./useScrollScene";
 
@@ -53,7 +54,7 @@ export function DecisionRiskStory({ questions }: { questions: readonly NumberedC
             <Image
               key={visual.src + index}
               className={index === activeStep ? "active" : ""}
-              src={visual.src}
+              src={caseStudyAsset(visual.src)}
               alt={index === activeStep ? visual.alt : ""}
               aria-hidden={index !== activeStep}
               width={1115}
@@ -84,7 +85,7 @@ export function DecisionRiskStory({ questions }: { questions: readonly NumberedC
             <p>{question.body}</p>
             <div className="scroll-step-visual">
               <Image
-                src={VISUALS[index]?.src ?? VISUALS[0].src}
+                src={caseStudyAsset(VISUALS[index]?.src ?? VISUALS[0].src)}
                 alt={VISUALS[index]?.alt ?? VISUALS[0].alt}
                 width={1115}
                 height={929}

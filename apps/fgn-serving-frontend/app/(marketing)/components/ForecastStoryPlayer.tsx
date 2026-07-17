@@ -2,6 +2,7 @@
 
 import { Pause, Play, RotateCcw, SkipBack, SkipForward } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
+import { caseStudyAsset } from "../caseStudyAsset";
 import type { CaseStudyProduct } from "./caseStudyTypes";
 import { EvidenceCaption } from "./EvidenceCaption";
 import { depthStoryMilestoneFrames, milestoneIndexFromFrame } from "./scrollSceneMath.mjs";
@@ -134,7 +135,7 @@ export function ForecastStoryPlayer({
             loop
             playsInline
             preload="auto"
-            poster={product.animation.posterSrc || posterSrc}
+            poster={caseStudyAsset(product.animation.posterSrc || posterSrc)}
             aria-label={`${eventLabel} ${product.label} forecast animation`}
             width={1400}
             height={1080}
@@ -151,7 +152,7 @@ export function ForecastStoryPlayer({
               setFrameIndex((current) => (current === nextFrame ? current : nextFrame));
             }}
           >
-            <source src={product.animation.mp4Src} type="video/mp4" />
+            <source src={caseStudyAsset(product.animation.mp4Src)} type="video/mp4" />
           </video>
             <div className="forecast-scroll-caption" aria-live="polite">
               <span>{String(activeStep + 1).padStart(2, "0")} / {String(milestones.length).padStart(2, "0")}</span>

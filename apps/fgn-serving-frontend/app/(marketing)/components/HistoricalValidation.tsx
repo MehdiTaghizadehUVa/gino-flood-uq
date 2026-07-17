@@ -1,4 +1,5 @@
 import type { CaseStudyManifest } from "./caseStudyTypes";
+import { caseStudyAsset } from "../caseStudyAsset";
 import { EvidenceCaption } from "./EvidenceCaption";
 
 type Historical = CaseStudyManifest["historicalValidation"];
@@ -18,7 +19,7 @@ export function HistoricalValidation({ historical }: { historical: Historical })
           </header>
           <figure className="case-study-figure">
             {/* eslint-disable-next-line @next/next/no-img-element */}
-            <img src={event.probabilitySrc} alt={`${event.label} probability of maximum depth exceeding 0.10 meters`} width={1400} height={1080} loading="lazy" />
+            <img src={caseStudyAsset(event.probabilitySrc)} alt={`${event.label} probability of maximum depth exceeding 0.10 meters`} width={1400} height={1080} loading="lazy" />
             <EvidenceCaption
               title="Maximum-event exceedance probability"
               insight="Shows where ensemble members consistently indicate event-level flooding and how that footprint aligns with HEC-RAS."
@@ -27,7 +28,7 @@ export function HistoricalValidation({ historical }: { historical: Historical })
           </figure>
           <figure className="case-study-figure">
             {/* eslint-disable-next-line @next/next/no-img-element */}
-            <img src={event.intervalWidthSrc} alt={`${event.label} maximum 90 percent interval-width map`} width={1400} height={1080} loading="lazy" />
+            <img src={caseStudyAsset(event.intervalWidthSrc)} alt={`${event.label} maximum 90 percent interval-width map`} width={1400} height={1080} loading="lazy" />
             <EvidenceCaption
               title="Maximum-event 90% interval width"
               insight="Highlights where peak depth remains least consistent across ensemble members during the event."
@@ -36,7 +37,7 @@ export function HistoricalValidation({ historical }: { historical: Historical })
           </figure>
           <figure className="case-study-figure historical-trajectory">
             {/* eslint-disable-next-line @next/next/no-img-element */}
-            <img src={event.trajectorySrc} alt={`${event.label} predicted and HEC-RAS wettable-domain inundated-area trajectories`} width={900} height={520} loading="lazy" />
+            <img src={caseStudyAsset(event.trajectorySrc)} alt={`${event.label} predicted and HEC-RAS wettable-domain inundated-area trajectories`} width={900} height={520} loading="lazy" />
             <EvidenceCaption
               title="Wettable-domain extent through time"
               insight="Shows whether the predicted range follows the timing and scale of the HEC-RAS flood footprint throughout the event."

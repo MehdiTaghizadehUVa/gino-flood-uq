@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { caseStudyAsset } from "../caseStudyAsset";
 import type { CaseStudyManifest } from "./caseStudyTypes";
 import { EvidenceCaption } from "./EvidenceCaption";
 
@@ -30,7 +31,7 @@ export function LocationEvidence({ locations }: { locations: Location[] }) {
       <div className="location-evidence-layout">
         <figure className="case-study-figure location-map">
           {/* eslint-disable-next-line @next/next/no-img-element */}
-          <img src={selected.mapSrc} alt={`${selected.label} selected on the Irene probability map`} width={1400} height={1080} loading="lazy" />
+          <img src={caseStudyAsset(selected.mapSrc)} alt={`${selected.label} selected on the Irene probability map`} width={1400} height={1080} loading="lazy" />
           <EvidenceCaption
             title={`${selected.label} / ${selected.interpretation}`}
             insight="The marker connects a regional flood pattern to a representative local forecast."
@@ -39,7 +40,7 @@ export function LocationEvidence({ locations }: { locations: Location[] }) {
         </figure>
         <figure className="case-study-figure location-chart">
           {/* eslint-disable-next-line @next/next/no-img-element */}
-          <img src={selected.panelSrc} alt={`${selected.label} depth ensemble, exceedance probability, and arrival-time distribution`} width={1700} height={520} loading="lazy" />
+          <img src={caseStudyAsset(selected.panelSrc)} alt={`${selected.label} depth ensemble, exceedance probability, and arrival-time distribution`} width={1700} height={520} loading="lazy" />
           <EvidenceCaption
             title="Depth range, exceedance probability, and arrival timing"
             insight="Depth range, calibrated exceedance probability, and arrival timing reveal what a central map cannot show at one location."

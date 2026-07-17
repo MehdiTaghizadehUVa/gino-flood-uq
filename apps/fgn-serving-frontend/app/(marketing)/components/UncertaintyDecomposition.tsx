@@ -1,4 +1,5 @@
 import type { CaseStudyManifest } from "./caseStudyTypes";
+import { caseStudyAsset } from "../caseStudyAsset";
 import { EvidenceCaption } from "./EvidenceCaption";
 
 type Decomposition = CaseStudyManifest["flagship"]["decomposition"];
@@ -24,7 +25,7 @@ export function UncertaintyDecomposition({ decomposition }: { decomposition: Dec
         {decomposition.maps.map((map) => (
           <figure key={map.id} className="case-study-figure">
             {/* eslint-disable-next-line @next/next/no-img-element */}
-            <img src={map.src} alt={`${map.label} over the Portsmouth terrain`} width={1400} height={1080} loading="lazy" />
+            <img src={caseStudyAsset(map.src)} alt={`${map.label} over the Portsmouth terrain`} width={1400} height={1080} loading="lazy" />
             <EvidenceCaption
               title={map.label}
               insight={

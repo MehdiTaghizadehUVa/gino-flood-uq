@@ -6,11 +6,12 @@ import path from "node:path";
 const frontendRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const marketingRoot = path.join(frontendRoot, "app", "(marketing)");
 const caseStudyManifestPath = path.join(frontendRoot, "public", "marketing", "portsmouth", "manifest.json");
-const [contentSource, pageSource, evidenceSource, caseStudyManifestSource] = await Promise.all([
+const [contentSource, pageSource, evidenceSource, caseStudyManifestSource, caseStudyAssetSource] = await Promise.all([
   readFile(path.join(marketingRoot, "content.ts"), "utf8"),
   readFile(path.join(marketingRoot, "page.tsx"), "utf8"),
   readFile(path.join(marketingRoot, "evidence.json"), "utf8"),
-  readFile(caseStudyManifestPath, "utf8")
+  readFile(caseStudyManifestPath, "utf8"),
+  readFile(path.join(marketingRoot, "caseStudyAsset.ts"), "utf8")
 ]);
 
 const marketingFiles = await readdir(marketingRoot, { recursive: true, withFileTypes: true });
@@ -59,6 +60,11 @@ for (const retiredPhrase of [
 const evidence = JSON.parse(evidenceSource);
 assert.equal(evidence.caseStudy, "Portsmouth, Virginia", "Evidence must identify the Portsmouth case study.");
 assert.ok(Array.isArray(evidence.claims) && evidence.claims.length >= 3, "Evidence must contain benchmark claims.");
+assert.ok(
+  evidence.benchmark.figure.endsWith("-title-free.png"),
+  "The public benchmark must use the title-free export."
+);
+await stat(path.join(frontendRoot, "public", evidence.benchmark.figure));
 
 for (const claim of evidence.claims) {
   for (const field of ["id", "value", "label", "scope", "sample", "hardware", "measurement", "sourceArtifact"]) {
@@ -268,6 +274,23 @@ for (const product of manifest.flagship.products) {
 
 assert.ok(!allMarketingSource.includes("/api/"), "The public marketing route must not call runtime APIs.");
 assert.ok(pageSource.includes("<HeroFloodVideo"), "The marketing hero must use the managed video component.");
+assert.match(
+  caseStudyAssetSource,
+  /CASE_STUDY_ASSET_RELEASE\s*=\s*"[^"]+"/,
+  "Case-study media must use an explicit release key so regenerated assets cannot reuse stale browser entries."
+);
+for (const consumer of [
+  "page.tsx",
+  "components/DecisionRiskStory.tsx",
+  "components/DecisionSnapshot.tsx",
+  "components/ForecastStoryPlayer.tsx",
+  "components/HistoricalValidation.tsx",
+  "components/LocationEvidence.tsx",
+  "components/UncertaintyDecomposition.tsx"
+]) {
+  const source = await readFile(path.join(marketingRoot, consumer), "utf8");
+  assert.ok(source.includes("caseStudyAsset("), `${consumer} must version Portsmouth media URLs.`);
+}
 for (const legacyTerm of ["between-model", "within-model", "between model", "within model"]) {
   assert.ok(
     !allMarketingSource.toLowerCase().includes(legacyTerm),
@@ -296,7 +319,9 @@ for (const legacyMapPath of [
   "/marketing/mean-depth.webp",
   "/marketing/exceedance-probability.webp",
   "/marketing/uncertainty-width.webp",
-  "/marketing/arrival-time.webp"
+  "/marketing/arrival-time.webp",
+  "/marketing/historical-hindcasts.webp",
+  "/marketing/skill-cost-pareto.png"
 ]) {
   assert.ok(!allMarketingSource.includes(legacyMapPath), `Legacy spatial asset is still public: ${legacyMapPath}`);
 }

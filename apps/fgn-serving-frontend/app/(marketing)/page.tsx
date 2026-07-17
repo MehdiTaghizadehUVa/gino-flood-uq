@@ -1,5 +1,6 @@
 import Image from "next/image";
 import caseStudyManifest from "../../public/marketing/portsmouth/manifest.json";
+import { caseStudyAsset } from "./caseStudyAsset";
 import { ArrowDown, ArrowRight, ArrowUpRight, Check, Play, ShieldCheck } from "lucide-react";
 import { CalibrationStory } from "./components/CalibrationStory";
 import { ComparisonMatrix } from "./components/ComparisonMatrix";
@@ -89,9 +90,9 @@ export default function MarketingPage() {
       <main id="main-content">
         <section id="top" className="marketing-hero" aria-labelledby="hero-title">
           <HeroFloodVideo
-            posterSrc={caseStudyManifest.flagship.hero.posterSrc}
-            mp4Src={caseStudyManifest.flagship.hero.mp4Src}
-            webmSrc={caseStudyManifest.flagship.hero.webmSrc}
+            posterSrc={caseStudyAsset(caseStudyManifest.flagship.hero.posterSrc)}
+            mp4Src={caseStudyAsset(caseStudyManifest.flagship.hero.mp4Src)}
+            webmSrc={caseStudyAsset(caseStudyManifest.flagship.hero.webmSrc)}
           />
           <div className="hero-scrim" aria-hidden="true" />
           <div className="hero-content">
@@ -167,7 +168,7 @@ export default function MarketingPage() {
             {serviceOutcomes.map((outcome) => (
               <figure key={outcome.label}>
                 <Image
-                  src={outcome.src}
+                  src={caseStudyAsset(outcome.src)}
                   alt={outcome.alt}
                   width={outcome.width}
                   height={outcome.height}

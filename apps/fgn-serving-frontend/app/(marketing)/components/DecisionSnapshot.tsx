@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { caseStudyAsset } from "../caseStudyAsset";
 import { EvidenceCaption } from "./EvidenceCaption";
 
 export function DecisionSnapshot({ products }: { products: { id: string; label: string; src: string }[] }) {
@@ -18,7 +19,7 @@ export function DecisionSnapshot({ products }: { products: { id: string; label: 
         {products.map((product) => (
           <figure key={product.id} className={`case-study-figure ${selected === product.id ? "selected" : ""}`}>
             {/* eslint-disable-next-line @next/next/no-img-element */}
-            <img src={product.src} alt={`${product.label} at the peak expected 0.30 meter footprint`} width={1400} height={1080} loading="lazy" />
+            <img src={caseStudyAsset(product.src)} alt={`${product.label} at the peak expected 0.30 meter footprint`} width={1400} height={1080} loading="lazy" />
             <EvidenceCaption
               title={product.label}
               insight={

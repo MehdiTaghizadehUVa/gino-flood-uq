@@ -1,6 +1,13 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
+  images: {
+    localPatterns: [
+      {
+        pathname: "/marketing/portsmouth/**"
+      }
+    ]
+  },
   async redirects() {
     return [
       {

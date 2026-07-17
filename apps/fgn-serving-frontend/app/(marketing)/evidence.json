@@ -7,7 +7,7 @@
     "hardware": "NVIDIA A100",
     "timingScope": "Forward-only inference per event",
     "skillMetrics": "Fair CRPS in meters and Brier error for WD > 0.30 m",
-    "figure": "/marketing/skill-cost-pareto.png"
+    "figure": "/marketing/skill-cost-pareto-title-free.png"
   },
   "claims": [
     {

@@ -81,16 +81,6 @@ export function CaseStudyEvidence({
         />
       </div>
 
-      <figure className="evidence-figure historical-evidence">
-        <Image
-          src="/marketing/historical-hindcasts.webp"
-          alt="Historical Portsmouth FloodUQ probabilistic hindcasts for Ophelia 2023, Isabel 2003, and Irene 2011 alongside HEC-RAS reference trajectories"
-          width={1800}
-          height={948}
-          sizes="100vw"
-        />
-        <figcaption>{caseStudy.historicalNote}</figcaption>
-      </figure>
     </div>
   );
 }
