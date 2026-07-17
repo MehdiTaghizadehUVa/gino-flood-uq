@@ -10,7 +10,7 @@ const jetbrainsMono = JetBrains_Mono({ subsets: ["latin"], variable: "--font-mar
 export const metadata: Metadata = {
   metadataBase: new URL("https://flooduq.app"),
   title: "FloodUQ | Managed probabilistic coastal flood modeling",
-  description: "A managed research service for rapid coastal scenario studies with calibrated probabilities, explainable uncertainty, and monitored model behavior.",
+  description: "A managed coastal flood intelligence service for rapid scenario evaluation with calibrated probabilities, explainable uncertainty, and monitored model behavior.",
   alternates: { canonical: "/" },
   openGraph: {
     title: "FloodUQ | Know where flooding may go, and how certain the model is",
@@ -23,7 +23,7 @@ export const metadata: Metadata = {
   twitter: {
     card: "summary_large_image",
     title: "FloodUQ | Managed probabilistic coastal flood modeling",
-    description: "Rapid, calibrated, and monitored coastal flood uncertainty for research studies.",
+    description: "Rapid, calibrated, and monitored coastal flood uncertainty for planning and scenario evaluation.",
     images: ["/marketing/og.jpg"]
   }
 };

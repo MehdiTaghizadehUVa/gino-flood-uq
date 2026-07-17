@@ -127,7 +127,7 @@ export default function MonitoringDashboard() {
       <PageHeader
         kicker="Monitoring"
         title="Drift and review dashboard"
-        subtitle="Population signals, selection trends, and HEC-RAS comparison records for research review."
+        subtitle="Population signals, selection trends, and HEC-RAS comparison records for expert review."
         actions={<a className="button secondary" href="/admin">Admin dashboard</a>}
       />
       <section className="metric-grid">

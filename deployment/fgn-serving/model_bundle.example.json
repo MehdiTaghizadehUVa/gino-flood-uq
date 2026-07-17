@@ -38,5 +38,5 @@
   "crs": "EPSG:32618",
   "mesh_hash": "REPLACE_WITH_DOMAIN_HASH",
   "expected_mesh_hash": "REPLACE_WITH_DOMAIN_HASH",
-  "research_disclaimer": "Research only; not for emergency or operational decision use."
+  "research_disclaimer": "Model outputs include documented validation scope, provenance, and governance requirements."
 }

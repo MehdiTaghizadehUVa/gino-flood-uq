@@ -115,11 +115,12 @@ def masked_triangle_face_values(
     triangles: np.ndarray,
     display_floor: float,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Return flat-shaded face values and a transparent-face mask.
+    """Return diagnostic face values and the mesh-support visibility mask.
 
     A triangle is visible when at least one finite vertex reaches the display
-    floor, matching the publication renderer while leaving negligible signal
-    fully transparent over the terrain background.
+    floor. Rendering still uses the original node values with Gouraud shading;
+    these face values are retained for diagnostics and backwards-compatible
+    tests of the threshold mask.
     """
     arr = np.asarray(values, dtype=np.float64).reshape(-1)
     faces = np.asarray(triangles, dtype=np.int64)
@@ -128,13 +129,41 @@ def masked_triangle_face_values(
     if faces.size and (faces.min() < 0 or faces.max() >= arr.shape[0]):
         raise ValueError("triangle index is outside the values array.")
     tri_values = arr[faces]
-    with np.errstate(invalid="ignore"):
-        face_values = np.nanmean(tri_values, axis=1)
-        face_max = np.nanmax(tri_values, axis=1)
+    finite_vertices = np.isfinite(tri_values)
+    finite_count = np.sum(finite_vertices, axis=1)
+    face_values = np.full(tri_values.shape[0], np.nan, dtype=np.float64)
+    has_finite = finite_count > 0
+    face_values[has_finite] = (
+        np.sum(np.where(finite_vertices[has_finite], tri_values[has_finite], 0.0), axis=1)
+        / finite_count[has_finite]
+    )
+    face_max = np.max(np.where(finite_vertices, tri_values, -np.inf), axis=1)
+    face_max[~has_finite] = np.nan
     face_mask = (~np.isfinite(face_values)) | (~np.isfinite(face_max)) | (face_max < float(display_floor))
     face_values = face_values.astype(np.float64, copy=False)
     face_values[face_mask] = np.nan
     return face_values, face_mask
+
+
+def arrival_time_from_depth(
+    *,
+    depth_by_time: np.ndarray,
+    lead_time_hours: np.ndarray,
+    threshold_m: float,
+) -> np.ndarray:
+    """Return first-exceedance lead time per cell, with NaN for no arrival."""
+    depth = np.asarray(depth_by_time, dtype=np.float64)
+    lead = np.asarray(lead_time_hours, dtype=np.float64).reshape(-1)
+    if depth.ndim != 2:
+        raise ValueError("depth_by_time must have shape [n_time,n_cells].")
+    if depth.shape[0] != lead.shape[0]:
+        raise ValueError("lead_time_hours must match the depth time dimension.")
+    exceeds = np.isfinite(depth) & (depth > float(threshold_m))
+    has_arrival = np.any(exceeds, axis=0)
+    first_index = np.argmax(exceeds, axis=0)
+    arrival = np.full(depth.shape[1], np.nan, dtype=np.float64)
+    arrival[has_arrival] = lead[first_index[has_arrival]]
+    return arrival
 
 
 def terrain_viewport_contains_mesh(
@@ -423,6 +452,7 @@ def _render_flagship(
     calibration_adapter,
 ) -> dict[str, Any]:
     from neuralop.flood.serving.case_study_rendering import (
+        arrival_cmap,
         depth_cmap,
         probability_cmap,
         render_location_panel_svg,
@@ -442,7 +472,20 @@ def _render_flagship(
     )
     mean_depth = members.mean(axis=0)
     interval_width = np.quantile(members, 0.95, axis=0) - np.quantile(members, 0.05, axis=0)
+    arrival_time = arrival_time_from_depth(
+        depth_by_time=mean_depth,
+        lead_time_hours=lead,
+        threshold_m=0.30,
+    )
+    finite_arrival = arrival_time[np.isfinite(arrival_time)]
+    arrival_vmin = float(np.min(finite_arrival)) if finite_arrival.size else float(lead[0])
+    arrival_vmax = float(np.max(finite_arrival)) if finite_arrival.size else float(lead[-1])
     wettable_area = float(np.sum(area_m2[wettable]))
+    area_weighted_mean_depth = (
+        np.nansum(mean_depth[:, wettable] * area_m2[wettable][None, :], axis=1)
+        / max(wettable_area, 1.0e-12)
+    )
+    peak_mean_depth_idx = int(np.nanargmax(area_weighted_mean_depth))
     expected_area_m2 = np.nansum(probability[:, wettable] * area_m2[wettable][None, :], axis=1)
     expected_fraction = expected_area_m2 / max(wettable_area, 1.0e-12)
     peak_area_idx = int(np.nanargmax(expected_area_m2))
@@ -457,23 +500,15 @@ def _render_flagship(
     within_var = np.mean(np.var(grouped, axis=1, ddof=0), axis=0)
     weighted_between = np.nansum(between_var[:, wettable] * area_m2[wettable][None, :], axis=1) / wettable_area
     disagreement_idx = int(np.nanargmax(weighted_between))
-    frame_indices = select_showcase_frames(
+    story_frame_indices = select_showcase_frames(
         n_time=members.shape[1],
         frame_count=32,
-        required_indices=(onset_idx, disagreement_idx, peak_area_idx, members.shape[1] - 1),
+        required_indices=(onset_idx, disagreement_idx, peak_area_idx, peak_mean_depth_idx, members.shape[1] - 1),
     )
+    product_frame_indices = list(range(members.shape[1]))
     depth_vmax = _safe_visible_vmax(mean_depth, floor=0.05, quantile=0.995, cap=3.0, minimum=0.5)
     width_vmax = _safe_visible_vmax(interval_width, floor=0.08, quantile=0.985, cap=1.0, minimum=0.20)
     product_specs = {
-        "probability": {
-            "label": "P(WD > 0.30 m)",
-            "values": probability,
-            "cmap": probability_cmap(),
-            "vmin": 0.10,
-            "vmax": 1.0,
-            "floor": 0.10,
-            "colorbar": "Calibrated probability",
-        },
         "meanDepth": {
             "label": "Calibrated mean depth",
             "values": mean_depth,
@@ -482,6 +517,15 @@ def _render_flagship(
             "vmax": depth_vmax,
             "floor": 0.05,
             "colorbar": "Mean WD (m)",
+        },
+        "probability": {
+            "label": "P(WD > 0.30 m)",
+            "values": probability,
+            "cmap": probability_cmap(),
+            "vmin": 0.10,
+            "vmax": 1.0,
+            "floor": 0.10,
+            "colorbar": "Calibrated probability",
         },
         "intervalWidth": {
             "label": "90% interval width",
@@ -496,7 +540,7 @@ def _render_flagship(
     products: list[dict[str, Any]] = []
     for product_id, spec in product_specs.items():
         frames: list[dict[str, Any]] = []
-        for time_idx in frame_indices:
+        for time_idx in product_frame_indices:
             frame_path = output_dir / "frames" / product_id / f"irene_t{time_idx + 1:03d}.webp"
             render_spatial_webp(
                 values=spec["values"][time_idx],
@@ -518,6 +562,17 @@ def _render_flagship(
                     "src": _relative_asset(config.public_prefix, output_dir, frame_path),
                 }
             )
+        animation_name = {
+            "probability": "irene_probability",
+            "meanDepth": "irene_mean_depth",
+            "intervalWidth": "irene_interval_width",
+        }[product_id]
+        animation_mp4_path = output_dir / "animations" / f"{animation_name}.mp4"
+        animation_webm_path = output_dir / "animations" / f"{animation_name}.webm"
+        animation_mp4_path.unlink(missing_ok=True)
+        animation_webm_path.unlink(missing_ok=True)
+        source_frame_rate = 6
+        playback_frame_rate = 24
         products.append(
             {
                 "id": product_id,
@@ -526,7 +581,79 @@ def _render_flagship(
                 "vmin": float(spec["vmin"]),
                 "vmax": round(float(spec["vmax"]), 4),
                 "frames": frames,
+                "animation": {
+                    "mp4Src": _relative_asset(config.public_prefix, output_dir, animation_mp4_path),
+                    "posterSrc": frames[0]["src"],
+                    "frameCount": len(frames),
+                    "sourceFrameRate": source_frame_rate,
+                    "playbackFrameRate": playback_frame_rate,
+                    "durationSeconds": round(len(frames) / source_frame_rate, 3),
+                    "interpolation": "Adjacent rendered frames blended for playback continuity",
+                },
             }
+        )
+
+    overview_dir = output_dir / "overview"
+    overview_specs = (
+        (
+            "probability",
+            probability[disagreement_idx],
+            f"Calibrated P(WD > 0.30 m) · lead {float(lead[disagreement_idx]):.2f} h",
+            "Calibrated probability",
+            probability_cmap(),
+            0.10,
+            1.0,
+            0.10,
+        ),
+        (
+            "interval_width",
+            interval_width[disagreement_idx],
+            f"90% interval width · lead {float(lead[disagreement_idx]):.2f} h",
+            "p95–p05 width (m)",
+            uncertainty_cmap(),
+            0.08,
+            width_vmax,
+            0.08,
+        ),
+        (
+            "arrival_time",
+            arrival_time,
+            "Arrival time at WD > 0.30 m",
+            "First-exceedance lead (h)",
+            arrival_cmap(),
+            arrival_vmin,
+            arrival_vmax,
+            0.0,
+        ),
+        (
+            "mean_depth",
+            mean_depth[disagreement_idx],
+            f"Calibrated mean depth · lead {float(lead[disagreement_idx]):.2f} h",
+            "Mean WD (m)",
+            depth_cmap(),
+            0.05,
+            depth_vmax,
+            0.05,
+        ),
+    )
+    overview_maps: list[dict[str, Any]] = []
+    for map_id, values, title, colorbar, cmap, vmin, vmax, floor in overview_specs:
+        map_path = overview_dir / f"{map_id}.webp"
+        render_spatial_webp(
+            values=values,
+            geometry_xy=run.geometry_xy,
+            terrain=terrain,
+            output_path=map_path,
+            title=title,
+            colorbar_label=colorbar,
+            cmap=cmap,
+            vmin=float(vmin),
+            vmax=float(vmax),
+            display_floor=float(floor),
+            quality=80,
+        )
+        overview_maps.append(
+            {"id": map_id, "src": _relative_asset(config.public_prefix, output_dir, map_path)}
         )
 
     hero_dir = output_dir / "hero"
@@ -542,7 +669,7 @@ def _render_flagship(
     hero_webm_path.unlink(missing_ok=True)
 
     hero_sequence: list[dict[str, int | float | str]] = []
-    for sequence_index, time_idx in enumerate(frame_indices, start=1):
+    for sequence_index, time_idx in enumerate(story_frame_indices, start=1):
         frame_path = hero_frame_dir / f"irene_{sequence_index:03d}.webp"
         render_spatial_webp(
             values=mean_depth[time_idx],
@@ -714,6 +841,7 @@ def _render_flagship(
         ],
         "peakAreaTimeIndex": peak_area_idx,
         "peakDisagreementTimeIndex": disagreement_idx,
+        "peakMeanDepthTimeIndex": peak_mean_depth_idx,
         "posterSrc": products[0]["frames"][0]["src"],
         "hero": {
             "src": _relative_asset(config.public_prefix, output_dir, hero_path),
@@ -730,6 +858,7 @@ def _render_flagship(
             "selection": "Peak expected footprint above 0.30 m",
         },
         "products": products,
+        "overviewMaps": overview_maps,
         "snapshot": [
             {
                 "id": item["id"],
@@ -1007,7 +1136,7 @@ def export_portsmouth_case_study(config: CaseStudyExportConfig) -> Path:
             "terrainExtendsBeyondMesh": True,
             "viewportPolicy": "mesh_bounds_plus_2p5_percent",
         },
-        "researchDisclaimer": "Research only; not for emergency or operational decision use.",
+        "researchDisclaimer": "Model outputs include documented validation scope, provenance, and governance requirements.",
     }
     manifest_path = output_dir / "manifest.json"
     manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")

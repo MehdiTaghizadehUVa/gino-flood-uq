@@ -72,6 +72,15 @@ def depth_cmap():
     )
 
 
+def arrival_cmap():
+    from matplotlib.colors import LinearSegmentedColormap
+
+    return LinearSegmentedColormap.from_list(
+        "flooduq_arrival",
+        ["#092955", "#2C6E9D", "#73A9B0", "#D7B96C", "#F4D83D"],
+    )
+
+
 def build_spatial_triangulation(x: np.ndarray, y: np.ndarray):
     import matplotlib.tri as mtri
 
@@ -201,7 +210,7 @@ def render_spatial_webp(
     if arr.shape[0] != xy.shape[0]:
         raise ValueError("Map values must match the geometry cell count.")
     tri = build_spatial_triangulation(xy[:, 0], xy[:, 1])
-    face_values, threshold_mask = masked_triangle_face_values(
+    _, threshold_mask = masked_triangle_face_values(
         values=arr,
         triangles=tri.triangles,
         display_floor=display_floor,
@@ -250,16 +259,19 @@ def render_spatial_webp(
                 interpolation="bilinear",
                 zorder=0,
             )
-            overlay_cmap = cmap.with_extremes(bad=(1.0, 1.0, 1.0, 0.0))
+            low_rgba = cmap(0.0)
+            transparent_low = (float(low_rgba[0]), float(low_rgba[1]), float(low_rgba[2]), 0.0)
+            overlay_cmap = cmap.with_extremes(bad=transparent_low, under=transparent_low)
             artist = ax.tripcolor(
                 overlay_tri,
-                facecolors=np.clip(face_values, float(vmin), float(vmax)),
-                shading="flat",
+                np.ma.masked_invalid(arr),
+                shading="gouraud",
                 cmap=overlay_cmap,
                 vmin=float(vmin),
                 vmax=float(vmax),
                 edgecolors="none",
                 linewidth=0.0,
+                antialiaseds=False,
                 alpha=0.90,
                 rasterized=True,
                 zorder=2,

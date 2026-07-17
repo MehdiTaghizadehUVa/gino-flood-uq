@@ -6,12 +6,6 @@ export function ScrollReveal() {
   useEffect(() => {
     const nodes = Array.from(document.querySelectorAll<HTMLElement>("[data-reveal]"));
     document.body.setAttribute("data-reveal-ready", "true");
-    if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
-      document.querySelectorAll<HTMLVideoElement>("video[autoplay]").forEach((video) => video.pause());
-      nodes.forEach((node) => node.setAttribute("data-reveal-visible", "true"));
-      return;
-    }
-
     const observer = new IntersectionObserver(
       (entries) => {
         entries.forEach((entry) => {

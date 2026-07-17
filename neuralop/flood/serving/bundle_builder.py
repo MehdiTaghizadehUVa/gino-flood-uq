@@ -454,7 +454,7 @@ def build_bundle(args: argparse.Namespace) -> Path:
         "geometry_path": domain["geometry_path"],
         "static_tensor_path": domain["static_tensor_path"],
         "query_res": [int(x) for x in (args.query_res or train_data.get("query_res") or [48, 48])],
-        "research_disclaimer": "Research only; not for emergency or operational decision use.",
+        "research_disclaimer": "Model outputs include documented validation scope, provenance, and governance requirements.",
         "metadata": {
             "created_at": datetime.now(timezone.utc).isoformat(),
             "source_config": config_copy,

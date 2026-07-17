@@ -47,13 +47,12 @@ export function EvidenceReceipt({
         </div>
       </div>
       <details className="evidence-receipt">
-        <summary>Open scientific provenance receipt</summary>
+        <summary>Open model provenance receipt</summary>
         <dl>
           {receiptRows.map(([label, value]) => (
             <div key={label}><dt>{label}</dt><dd>{String(value || "Not recorded")}</dd></div>
           ))}
         </dl>
-        <p>{manifest.researchDisclaimer}</p>
       </details>
     </div>
   );

@@ -86,7 +86,7 @@ class FGNModelBundle:
     model_config_path: Optional[Path] = None
     query_res: tuple[int, int] = (48, 48)
     initial_condition: InitialConditionConfig = field(default_factory=InitialConditionConfig)
-    research_disclaimer: str = "Research only; not for emergency or operational decision use."
+    research_disclaimer: str = "Model outputs include documented validation scope, provenance, and governance requirements."
     metadata: Dict[str, Any] = field(default_factory=dict)
 
     @property
@@ -321,7 +321,10 @@ def load_model_bundle(path: str | Path, *, validate_paths: bool = True) -> FGNMo
             query_res=_pair(raw.get("query_res"), (48, 48)),
             initial_condition=_initial_condition_config(raw, base_dir=base_dir),
             research_disclaimer=str(
-                raw.get("research_disclaimer", "Research only; not for emergency or operational decision use.")
+                raw.get(
+                    "research_disclaimer",
+                    "Model outputs include documented validation scope, provenance, and governance requirements.",
+                )
             ),
             metadata=_model_bundle_metadata(raw, base_dir=base_dir),
         )

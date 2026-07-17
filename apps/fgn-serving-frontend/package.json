@@ -5,7 +5,8 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "validate:marketing": "node scripts/validate_marketing_content.mjs"
+    "validate:marketing": "node scripts/validate_marketing_content.mjs",
+    "test:marketing-scroll": "node --test tests/marketing_scroll.test.mjs"
   },
   "dependencies": {
     "@types/node": "25.6.2",

@@ -40,7 +40,7 @@ export function HistoricalValidation({ historical }: { historical: Historical })
             <EvidenceCaption
               title="Wettable-domain extent through time"
               insight="Compares the production ensemble's extent range with the HEC-RAS reference trajectory rather than only one peak value."
-              method="The band is the 5th-95th percentile across production members; the solid line is the median and the dashed line is the HEC-RAS reference. This is held-out research evidence, not an operational guarantee."
+              method="The band is the 5th-95th percentile across production members; the solid line is the median and the dashed line is the aligned HEC-RAS reference. Interpret the comparison within the documented validation scope."
             />
           </figure>
         </article>

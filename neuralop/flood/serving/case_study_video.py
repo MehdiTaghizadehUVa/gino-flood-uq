@@ -1,4 +1,4 @@
-"""Encode the Portsmouth hero sequence without adding FFmpeg to serving images."""
+"""Encode Portsmouth marketing videos without adding FFmpeg to serving images."""
 
 from __future__ import annotations
 
@@ -40,6 +40,8 @@ def _run_encode(
     input_pattern: Path,
     destination: Path,
     frame_rate: int,
+    frame_count: int | None,
+    playback_frame_rate: int | None,
     codec_args: Sequence[str],
 ) -> None:
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -69,6 +71,21 @@ def _run_encode(
     else:
         process_temporary = local_temporary
     process_temporary.unlink(missing_ok=True)
+    filters = ["scale=1280:-2:flags=lanczos"]
+    if playback_frame_rate is not None and playback_frame_rate > frame_rate:
+        if frame_count is None or frame_count < 2:
+            raise ValueError("Interpolated video encoding requires a valid source frame count.")
+        # Source states remain exact. Blended display frames prevent browser
+        # decode gaps without inventing additional model output timesteps.
+        filters.extend(
+            (
+                f"tpad=stop_mode=clone:stop_duration={2.0 / frame_rate:.6f}",
+                f"minterpolate=fps={playback_frame_rate}:mi_mode=blend",
+                f"trim=duration={frame_count / frame_rate:.6f}",
+                "setpts=PTS-STARTPTS",
+            )
+        )
+    filters.append("format=yuv420p")
     command = [
         ffmpeg,
         "-hide_banner",
@@ -82,7 +99,7 @@ def _run_encode(
         "-i",
         _path_for_process(input_pattern, executable=ffmpeg),
         "-vf",
-        "scale=1280:-2:flags=lanczos,format=yuv420p",
+        ",".join(filters),
         "-an",
         "-map_metadata",
         "-1",
@@ -139,6 +156,8 @@ def encode_case_study_hero(
         input_pattern=pattern,
         destination=mp4,
         frame_rate=frame_rate,
+        frame_count=frame_count,
+        playback_frame_rate=None,
         codec_args=("-c:v", "libx264", "-preset", "slow", "-crf", "24", "-movflags", "+faststart"),
     )
     _run_encode(
@@ -146,6 +165,8 @@ def encode_case_study_hero(
         input_pattern=pattern,
         destination=webm,
         frame_rate=frame_rate,
+        frame_count=frame_count,
+        playback_frame_rate=None,
         codec_args=(
             "-c:v",
             "libvpx-vp9",
@@ -168,18 +189,92 @@ def encode_case_study_hero(
     return mp4, webm
 
 
+def encode_case_study_products(
+    *,
+    manifest_path: str | Path,
+    ffmpeg_path: str | None = None,
+) -> dict[str, Path]:
+    """Encode the complete product sequences declared in the case-study manifest."""
+    manifest_file = Path(manifest_path).expanduser().resolve()
+    manifest = json.loads(manifest_file.read_text(encoding="utf-8"))
+    products = manifest.get("flagship", {}).get("products", [])
+    if not products:
+        raise ValueError("Case-study manifest does not define product animation sequences.")
+
+    validated: list[tuple[str, Path, dict[str, object]]] = []
+    for product in products:
+        product_id = str(product.get("id", ""))
+        animation = product.get("animation", {})
+        if not isinstance(animation, dict):
+            raise ValueError(f"{product_id or 'unknown'} product animation metadata is malformed.")
+        frame_count = int(animation.get("frameCount", 0))
+        source_frame_rate = int(animation.get("sourceFrameRate", 0))
+        playback_frame_rate = int(animation.get("playbackFrameRate", 0))
+        if not product_id or frame_count < 2 or source_frame_rate < 1 or playback_frame_rate < source_frame_rate:
+            raise ValueError(f"{product_id or 'unknown'} product animation metadata is incomplete.")
+
+        frame_dir = manifest_file.parent / "frames" / product_id
+        frames = sorted(frame_dir.glob("irene_t*.webp"))
+        if len(frames) != frame_count:
+            raise ValueError(
+                f"{product_id} frame count mismatch: manifest expects {frame_count}, "
+                f"found {len(frames)} in {frame_dir}."
+            )
+        expected_names = [f"irene_t{index:03d}.webp" for index in range(1, frame_count + 1)]
+        if [path.name for path in frames] != expected_names:
+            raise ValueError(f"{product_id} frame sequence must be contiguous and deterministically numbered.")
+        validated.append((product_id, frame_dir, animation))
+
+    ffmpeg = _resolve_ffmpeg(ffmpeg_path)
+    outputs: dict[str, Path] = {}
+    for product_id, frame_dir, animation in validated:
+        source_frame_rate = int(animation["sourceFrameRate"])
+        playback_frame_rate = int(animation["playbackFrameRate"])
+        animation_dir = manifest_file.parent / "animations"
+        mp4 = animation_dir / Path(str(animation["mp4Src"])).name
+        pattern = frame_dir / "irene_t%03d.webp"
+        _run_encode(
+            ffmpeg=ffmpeg,
+            input_pattern=pattern,
+            destination=mp4,
+            frame_rate=source_frame_rate,
+            frame_count=int(animation["frameCount"]),
+            playback_frame_rate=playback_frame_rate,
+            codec_args=("-c:v", "libx264", "-preset", "slow", "-crf", "25", "-movflags", "+faststart"),
+        )
+        outputs[product_id] = mp4
+    return outputs
+
+
 def main(argv: Sequence[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Encode the deterministic Portsmouth hero animation.")
+    parser = argparse.ArgumentParser(description="Encode deterministic Portsmouth marketing animations.")
     parser.add_argument("--manifest", required=True, help="Path to the exported Portsmouth manifest.json.")
     parser.add_argument("--ffmpeg", help="Optional FFmpeg executable path.")
     parser.add_argument("--keep-frames", action="store_true", help="Retain map-only frame intermediates.")
-    args = parser.parse_args(argv)
-    mp4, webm = encode_case_study_hero(
-        manifest_path=args.manifest,
-        ffmpeg_path=args.ffmpeg,
-        keep_frames=args.keep_frames,
+    parser.add_argument(
+        "--scope",
+        choices=("all", "hero", "products"),
+        default="all",
+        help="Video family to encode (default: all).",
     )
-    print(json.dumps({"mp4": str(mp4), "webm": str(webm)}, indent=2))
+    args = parser.parse_args(argv)
+    payload: dict[str, object] = {}
+    if args.scope in {"all", "hero"}:
+        mp4, webm = encode_case_study_hero(
+            manifest_path=args.manifest,
+            ffmpeg_path=args.ffmpeg,
+            keep_frames=args.keep_frames,
+        )
+        payload["hero"] = {"mp4": str(mp4), "webm": str(webm)}
+    if args.scope in {"all", "products"}:
+        payload["products"] = {
+            product_id: {"mp4": str(path)}
+            for product_id, path in encode_case_study_products(
+                manifest_path=args.manifest,
+                ffmpeg_path=args.ffmpeg,
+            ).items()
+        }
+    print(json.dumps(payload, indent=2))
     return 0
 
 

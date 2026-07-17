@@ -101,9 +101,9 @@ log "checking internal API health payload."
 api_json_check "/api/health" 12 5
 log "checking internal model-bundle health payload."
 api_json_check "/api/model-bundle-health" 8 5
-log "checking public product site and compliance marker."
+log "checking public product site and brand marker."
 http_expect "https://${FGN_SITE_HOSTNAME}/" "200" \
-  "Research only; not for emergency or operational decision use." "" 8 5 15
+  "Know where flooding may go." "" 8 5 15
 log "checking public marketing media."
 http_expect "https://${FGN_SITE_HOSTNAME}/marketing/hero-poster.jpg" "200" "" "" 8 5 15
 log "checking protected demo and administration routes."

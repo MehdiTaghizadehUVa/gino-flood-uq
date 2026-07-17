@@ -112,7 +112,7 @@ export default function AdminPage() {
     <div className="admin-shell">
       <PageHeader
         kicker="Administration"
-        title="Research server dashboard"
+        title="Service administration dashboard"
         subtitle="Manage collaborators, retraining-review items, and active run operations from one place."
         actions={<a className="button secondary" href="/admin/monitoring">Monitoring dashboard</a>}
       />
@@ -132,7 +132,7 @@ export default function AdminPage() {
           </div>
         </div>
         <div className="add-row">
-          <input value={email} onChange={(e) => setEmail(e.target.value)} placeholder="researcher@example.edu" />
+          <input value={email} onChange={(e) => setEmail(e.target.value)} placeholder="user@example.com" />
           <label><input type="checkbox" checked={admin} onChange={(e) => setAdmin(e.target.checked)} /> admin</label>
           <button className="primary" onClick={addUser} disabled={!email.trim()}><UserPlus size={15} /> Save</button>
         </div>

@@ -87,33 +87,33 @@
     },
     {
       "sequence": 17,
-      "timeIndex": 48,
-      "leadHours": 12.25
-    },
-    {
-      "sequence": 18,
       "timeIndex": 51,
       "leadHours": 13.0
     },
     {
-      "sequence": 19,
+      "sequence": 18,
       "timeIndex": 54,
       "leadHours": 13.75
     },
     {
-      "sequence": 20,
+      "sequence": 19,
       "timeIndex": 57,
       "leadHours": 14.5
     },
     {
-      "sequence": 21,
+      "sequence": 20,
       "timeIndex": 60,
       "leadHours": 15.25
     },
     {
-      "sequence": 22,
+      "sequence": 21,
       "timeIndex": 63,
       "leadHours": 16.0
+    },
+    {
+      "sequence": 22,
+      "timeIndex": 65,
+      "leadHours": 16.5
     },
     {
       "sequence": 23,

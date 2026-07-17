@@ -2010,7 +2010,7 @@ export default function RunDetails() {
             </article>
           </div>
           <p className="muted">
-            Monitoring is a research guardrail for future HEC-RAS labeling and retraining review. It is not proof of model error or decision guidance.
+            Monitoring prioritizes scenarios for future HEC-RAS labeling and retraining review. A signal indicates that additional evidence may be valuable; it does not by itself establish model error.
           </p>
         </section>
       )}

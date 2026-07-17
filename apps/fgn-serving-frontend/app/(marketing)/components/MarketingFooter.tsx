@@ -1,5 +1,5 @@
 import { ArrowUpRight } from "lucide-react";
-import { PILOT_MAILTO, RESEARCH_DISCLAIMER } from "../content";
+import { PILOT_MAILTO } from "../content";
 
 export function MarketingFooter() {
   return (
@@ -18,7 +18,7 @@ export function MarketingFooter() {
         </div>
       </div>
       <div className="footer-legal">
-        <span>{RESEARCH_DISCLAIMER}</span>
+        <span>Domain-specific coastal flood intelligence with documented validation and provenance.</span>
         <span>© 2026 FloodUQ</span>
       </div>
     </footer>

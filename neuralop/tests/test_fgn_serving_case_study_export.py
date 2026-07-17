@@ -8,6 +8,7 @@ from PIL import Image
 
 from neuralop.flood.serving.case_study_export import (
     CaseStudyRunProvenance,
+    arrival_time_from_depth,
     masked_triangle_face_values,
     paper_domain_viewport,
     select_showcase_frames,
@@ -20,7 +21,7 @@ from neuralop.flood.serving.case_study_rendering import (
     render_spatial_webp,
     render_validation_trajectory_svg,
 )
-from neuralop.flood.serving.case_study_video import encode_case_study_hero
+from neuralop.flood.serving.case_study_video import encode_case_study_hero, encode_case_study_products
 
 
 def test_showcase_frames_span_horizon_and_keep_scientific_milestones():
@@ -33,6 +34,29 @@ def test_showcase_frames_span_horizon_and_keep_scientific_milestones():
     assert len(selected) == 32
     assert selected == sorted(set(selected))
     assert {0, 19, 46, 66, 93}.issubset(selected)
+
+
+def test_arrival_time_map_uses_first_physical_threshold_exceedance():
+    lead_hours = np.asarray([0.25, 0.50, 0.75, 1.00], dtype=np.float64)
+    depth_by_time = np.asarray(
+        [
+            [0.00, 0.00, 0.31],
+            [0.35, 0.05, 0.40],
+            [0.20, 0.30, 0.45],
+            [0.10, 0.20, 0.50],
+        ],
+        dtype=np.float64,
+    )
+
+    arrival = arrival_time_from_depth(
+        depth_by_time=depth_by_time,
+        lead_time_hours=lead_hours,
+        threshold_m=0.30,
+    )
+
+    assert arrival[0] == pytest.approx(0.50)
+    assert np.isnan(arrival[1])
+    assert arrival[2] == pytest.approx(0.25)
 
 
 def test_hero_encoder_rejects_an_incomplete_scientific_sequence(tmp_path):
@@ -59,6 +83,37 @@ def test_hero_encoder_rejects_an_incomplete_scientific_sequence(tmp_path):
 
     with pytest.raises(ValueError, match="frame count mismatch"):
         encode_case_study_hero(manifest_path=manifest_path, ffmpeg_path="unused")
+
+
+def test_product_video_encoder_rejects_an_incomplete_scientific_sequence(tmp_path):
+    frame_dir = tmp_path / "frames" / "probability"
+    frame_dir.mkdir(parents=True)
+    (frame_dir / "irene_t001.webp").write_bytes(b"one-frame")
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "flagship": {
+                    "products": [
+                        {
+                            "id": "probability",
+                            "frames": [{"timeIndex": 0}, {"timeIndex": 1}],
+                            "animation": {
+                                "frameCount": 2,
+                                "sourceFrameRate": 6,
+                                "playbackFrameRate": 24,
+                                "mp4Src": "/marketing/portsmouth/animations/probability.mp4",
+                            },
+                        }
+                    ]
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="probability frame count mismatch"):
+        encode_case_study_products(manifest_path=manifest_path, ffmpeg_path="unused")
 
 
 def test_map_faces_below_display_floor_remain_transparent():
@@ -164,6 +219,85 @@ def test_rendered_subthreshold_forecast_leaves_dem_pixels_unchanged(tmp_path):
 
     assert np.array_equal(below_zero, below_small)
     assert not np.array_equal(below_zero, visible)
+
+
+def test_rendered_spatial_gradient_interpolates_node_values(tmp_path):
+    terrain = TerrainContext(
+        image=np.zeros((80, 80), dtype=np.float32),
+        extent=(0.0, 10.0, 0.0, 10.0),
+        source_crs="EPSG:32618",
+        target_crs="EPSG:32618",
+        source_path="synthetic-dem.tif",
+        viewport=(0.0, 10.0, 0.0, 10.0),
+    )
+    geometry = np.asarray(
+        [[0.0, 0.0], [10.0, 0.0], [0.0, 10.0], [10.0, 10.0]],
+        dtype=np.float64,
+    )
+    output = tmp_path / "smooth-gradient.webp"
+
+    render_spatial_webp(
+        values=np.asarray([0.10, 1.0, 0.10, 1.0], dtype=np.float64),
+        geometry_xy=geometry,
+        terrain=terrain,
+        output_path=output,
+        title="",
+        colorbar_label="",
+        cmap=probability_cmap(),
+        vmin=0.10,
+        vmax=1.0,
+        display_floor=0.10,
+        quality=100,
+        show_title=False,
+        show_colorbar=False,
+    )
+
+    with Image.open(output) as image:
+        rgb = np.asarray(image.convert("RGB"), dtype=np.int16)
+    center_row = rgb[rgb.shape[0] // 2, rgb.shape[1] // 8 : -(rgb.shape[1] // 8)]
+    color_steps = np.linalg.norm(np.diff(center_row, axis=0), axis=1)
+
+    # A flat-shaded mesh produces one or two large face-color blocks. The
+    # publication renderer should instead preserve a continuous node-valued
+    # gradient across the same triangles.
+    assert np.count_nonzero(color_steps > 0.5) > center_row.shape[0] // 8
+    assert np.linalg.norm(center_row[-1] - center_row[0]) > 80.0
+
+
+def test_rendered_threshold_boundary_does_not_create_white_halo(tmp_path):
+    terrain = TerrainContext(
+        image=np.zeros((80, 80), dtype=np.float32),
+        extent=(0.0, 10.0, 0.0, 10.0),
+        source_crs="EPSG:32618",
+        target_crs="EPSG:32618",
+        source_path="synthetic-dem.tif",
+        viewport=(0.0, 10.0, 0.0, 10.0),
+    )
+    output = tmp_path / "threshold-boundary.webp"
+
+    render_spatial_webp(
+        values=np.asarray([0.0, 0.80, 0.0, 0.80], dtype=np.float64),
+        geometry_xy=np.asarray(
+            [[0.0, 0.0], [10.0, 0.0], [0.0, 10.0], [10.0, 10.0]],
+            dtype=np.float64,
+        ),
+        terrain=terrain,
+        output_path=output,
+        title="",
+        colorbar_label="",
+        cmap=probability_cmap(),
+        vmin=0.10,
+        vmax=1.0,
+        display_floor=0.10,
+        quality=100,
+        show_title=False,
+        show_colorbar=False,
+    )
+
+    with Image.open(output) as image:
+        rgb = np.asarray(image.convert("RGB"), dtype=np.uint8)
+    near_white = np.all(rgb > 245, axis=2)
+    assert not np.any(near_white)
 
 
 def test_generated_svg_has_no_trailing_whitespace(tmp_path):

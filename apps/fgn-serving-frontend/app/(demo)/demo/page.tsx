@@ -1611,7 +1611,7 @@ export default function Page() {
       const res = await fetch("/api/me/disclaimer", { method: "POST" });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       setUser(await res.json());
-      setMessage("Research-use boundary acknowledged.");
+      setMessage("Model-use notice acknowledged.");
     } catch (exc) {
       setMessage(`Could not acknowledge disclaimer: ${String(exc)}`);
     } finally {
@@ -1635,7 +1635,7 @@ export default function Page() {
       return;
     }
     if (!user?.disclaimer_acknowledged) {
-      setMessage("Acknowledge the research-only disclaimer before submitting.");
+      setMessage("Acknowledge the model-use notice before submitting.");
       return;
     }
     if (validation && !validation.valid) {
@@ -1775,7 +1775,7 @@ export default function Page() {
     <AppShell active={workspaceMode === "runs" ? "runs" : "home"} userEmail={user?.email}>
       <div className="shell">
         <PageHeader
-          kicker="FloodUQ research platform"
+          kicker="FloodUQ modeling platform"
           title="Coastal flood uncertainty, calibrated and reproducible."
           subtitle={
             bundle ? (
@@ -1796,7 +1796,7 @@ export default function Page() {
                 ) : null}
               </>
             ) : (
-              "Loading the model bundle, queue state, and research safeguards."
+              "Loading the model bundle, queue state, and governance controls."
             )
           }
           actions={
@@ -1812,7 +1812,7 @@ export default function Page() {
             <p className="eyebrow">Physics-informed coastal UQ</p>
             <h2 id="home-hero-title">From forcing scenario to audit-ready flood uncertainty products.</h2>
             <p>
-              FloodUQ packages the trained coastal FGN benchmark into a controlled research workflow:
+              FloodUQ packages the trained coastal FGN benchmark into a controlled, auditable workflow:
               validate a forcing file, launch a calibrated ensemble run, inspect uncertainty products, and
               preserve the artifacts needed for review or downstream analysis.
             </p>
@@ -1828,12 +1828,12 @@ export default function Page() {
               <span><Waves size={14} aria-hidden="true" /> Coastal FGN benchmark</span>
               <span><Activity size={14} aria-hidden="true" /> Calibrated UQ products</span>
               <span><Database size={14} aria-hidden="true" /> Reproducible artifacts</span>
-              <span><ShieldCheck size={14} aria-hidden="true" /> Governed research access</span>
+              <span><ShieldCheck size={14} aria-hidden="true" /> Governed service access</span>
             </div>
           </div>
-          <aside className="workflow-card" aria-label="Research workflow">
+          <aside className="workflow-card" aria-label="Analysis workflow">
             <div className="workflow-card-head">
-              <span>Research workflow</span>
+              <span>Analysis workflow</span>
               <strong>{bundle ? `${bundle.total_members}-member ensemble` : "Model bundle loading"}</strong>
             </div>
             <ol className="workflow-steps">
@@ -1862,9 +1862,9 @@ export default function Page() {
           </aside>
         </section>
 
-        <ResearchNotice title="Research-use boundary.">
-          This system supports scientific review and model evaluation. Outputs are not emergency guidance,
-          operational flood forecasts, or public safety decision products.
+        <ResearchNotice title="Model use and governance.">
+          Review outputs within the documented domain, calibration, validation, and data-quality context.
+          Preserve expert review and local governance when using results for planning or asset evaluation.
           {!user?.disclaimer_acknowledged && (
             <button type="button" onClick={acknowledgeDisclaimer} disabled={busy}>
               Acknowledge
@@ -1873,7 +1873,7 @@ export default function Page() {
         </ResearchNotice>
 
         <section className="metric-grid home-metrics">
-          <MetricCard label="Analyses" value={runs.length} detail="Runs in your research history" icon={<ListChecks size={17} />} />
+          <MetricCard label="Analyses" value={runs.length} detail="Runs in your analysis history" icon={<ListChecks size={17} />} />
           <MetricCard label="Queue" value={queuedCount} detail="Validated work waiting to start" icon={<RefreshCw size={17} />} />
           <MetricCard label="Active inference" value={runningCount} detail="One GPU job runs at a time" icon={<Cpu size={17} />} />
           <MetricCard

@@ -1,16 +1,20 @@
 import Image from "next/image";
 import caseStudyManifest from "../../public/marketing/portsmouth/manifest.json";
 import { ArrowDown, ArrowRight, ArrowUpRight, Check, Play, ShieldCheck } from "lucide-react";
-import { CalibrationGraphic } from "./components/CalibrationGraphic";
+import { CalibrationStory } from "./components/CalibrationStory";
 import { ComparisonMatrix } from "./components/ComparisonMatrix";
+import { DecisionRiskStory } from "./components/DecisionRiskStory";
 import { HeroFloodVideo } from "./components/HeroFloodVideo";
 import { MarketingFooter } from "./components/MarketingFooter";
 import { MarketingNav } from "./components/MarketingNav";
+import { MonitoringStory } from "./components/MonitoringStory";
 import { NumberedGrid } from "./components/NumberedGrid";
 import { PortsmouthCaseStudy } from "./components/PortsmouthCaseStudy";
 import { MicroLabel, Section } from "./components/Primitives";
+import { ScrollChapterProgress } from "./components/ScrollChapterProgress";
 import { ScrollReveal } from "./components/ScrollReveal";
 import { ServiceLifecycle } from "./components/ServiceLifecycle";
+import { UncertaintyStory } from "./components/UncertaintyStory";
 import {
   calibrationNotes,
   comparisonMethods,
@@ -21,7 +25,6 @@ import {
   monitoringLoop,
   PILOT_MAILTO,
   portsmouthCaseStudy,
-  RESEARCH_DISCLAIMER,
   serviceOutcomes,
   servicePillars,
   speedPrinciples,
@@ -35,7 +38,7 @@ const structuredData = {
   name: "FloodUQ managed probabilistic coastal flood modeling",
   serviceType: "Domain-specific coastal flood uncertainty modeling",
   description:
-    "A managed research service for rapid coastal scenario studies with calibrated probabilities, explainable uncertainty, and monitored model behavior.",
+    "A managed coastal flood intelligence service for rapid scenario evaluation with calibrated probabilities, explainable uncertainty, and monitored model behavior.",
   url: "https://flooduq.app",
   provider: {
     "@type": "Organization",
@@ -47,7 +50,7 @@ const varianceDecompositionMath = String.raw`
   <math display="block" aria-label="Total variance equals epistemic uncertainty plus aleatoric uncertainty">
     <mrow>
       <mi mathvariant="normal">Var</mi><mo stretchy="false">(</mo><mi>H</mi><mo stretchy="false">)</mo><mo>=</mo>
-      <munder>
+      <munder class="variance-term epistemic-term">
         <munder accentunder="true">
           <mrow>
             <msub><mi mathvariant="normal">Var</mi><mi>Θ</mi></msub>
@@ -61,7 +64,7 @@ const varianceDecompositionMath = String.raw`
         <mtext>epistemic uncertainty</mtext>
       </munder>
       <mo>+</mo>
-      <munder>
+      <munder class="variance-term aleatoric-term">
         <munder accentunder="true">
           <mrow>
             <msub><mi mathvariant="normal">E</mi><mi>Θ</mi></msub>
@@ -101,7 +104,7 @@ export default function MarketingPage() {
             </p>
             <p className="hero-copy">
               FloodUQ turns a domain-specific coastal model into rapid probability, timing, extent, and uncertainty
-              products, delivered through a monitored research service.
+              products, delivered through a monitored coastal flood intelligence service.
             </p>
             <div className="hero-actions">
               <a className="primary-cta" href={PILOT_MAILTO}>
@@ -137,39 +140,7 @@ export default function MarketingPage() {
           )}
           className="problem-section"
         >
-          <div className="comparison-grid">
-            <figure className="comparison-figure">
-              <Image
-                src="/marketing/mean-depth.webp"
-                alt="Ensemble-mean coastal water-depth map from the Portsmouth deployment"
-                width={1400}
-                height={1180}
-                sizes="(max-width: 900px) 100vw, 50vw"
-              />
-              <figcaption>
-                <MicroLabel>Central estimate</MicroLabel>
-                <strong>Where the ensemble expects water</strong>
-                <p>Useful for orientation, but unable to show how often a threshold is exceeded or where members disagree.</p>
-              </figcaption>
-            </figure>
-            <figure className="comparison-figure featured">
-              <Image
-                src="/marketing/exceedance-probability.webp"
-                alt="Calibrated coastal water-depth exceedance probability map from the Portsmouth deployment"
-                width={1400}
-                height={1180}
-                sizes="(max-width: 900px) 100vw, 50vw"
-              />
-              <figcaption>
-                <MicroLabel>Probability view</MicroLabel>
-                <strong>Where a study threshold may be exceeded</strong>
-                <p>Calibrated probabilities add frequency and confidence context while preserving the raw ensemble evidence.</p>
-              </figcaption>
-            </figure>
-          </div>
-          <div className="decision-questions">
-            <NumberedGrid items={decisionQuestions} columns={3} />
-          </div>
+          <DecisionRiskStory questions={decisionQuestions} />
         </Section>
 
         <Section
@@ -177,7 +148,7 @@ export default function MarketingPage() {
           title={<>Answers organized around<br /><span>the questions you ask.</span></>}
           intro={(
             <p>
-              Compare forcing scenarios, inspect individual locations, and retain the scientific evidence behind every
+              Compare forcing scenarios, inspect individual locations, and retain the auditable evidence behind every
               map and summary.
             </p>
           )}
@@ -227,6 +198,7 @@ export default function MarketingPage() {
         </Section>
 
         <Section
+          id="calibration"
           eyebrow="Calibrated confidence"
           title={<>Probability is corrected<br /><span>against held-out evidence.</span></>}
           intro={(
@@ -237,21 +209,11 @@ export default function MarketingPage() {
           )}
           className="calibration-section"
         >
-          <div className="calibration-layout">
-            <CalibrationGraphic />
-            <div className="calibration-notes">
-              {calibrationNotes.map((note) => (
-                <article key={note.number}>
-                  <span>{note.number}</span>
-                  <h3>{note.title}</h3>
-                  <p>{note.body}</p>
-                </article>
-              ))}
-            </div>
-          </div>
+          <CalibrationStory notes={calibrationNotes} />
         </Section>
 
         <Section
+          id="uncertainty"
           eyebrow="Explainable uncertainty"
           title={<>See the spread.<br /><span>Know what is driving it.</span></>}
           intro={(
@@ -262,20 +224,7 @@ export default function MarketingPage() {
           )}
           className="method-section"
         >
-          <NumberedGrid items={uncertaintySources} columns={2} />
-          <div className="math-band">
-            <div>
-              <MicroLabel>Variance decomposition</MicroLabel>
-              <p>
-                High epistemic uncertainty can motivate additional model review or reference evidence. High
-                aleatoric uncertainty indicates a broad retained range of plausible forecast members.
-              </p>
-            </div>
-            <div
-              className="math-expression"
-              dangerouslySetInnerHTML={{ __html: varianceDecompositionMath }}
-            />
-          </div>
+          <UncertaintyStory sources={uncertaintySources} equationHtml={varianceDecompositionMath} />
         </Section>
 
         <Section
@@ -294,6 +243,7 @@ export default function MarketingPage() {
         </Section>
 
         <Section
+          id="monitoring"
           eyebrow="Model governance"
           title={<>The service knows when a scenario<br /><span>deserves more evidence.</span></>}
           intro={(
@@ -304,7 +254,7 @@ export default function MarketingPage() {
           )}
           className="monitoring-section"
         >
-          <ServiceLifecycle items={monitoringLoop} ariaLabel="FloodUQ monitoring and evidence-review lifecycle" />
+          <MonitoringStory items={monitoringLoop} />
         </Section>
 
         <Section
@@ -320,7 +270,7 @@ export default function MarketingPage() {
         <Section
           id="deployment"
           eyebrow="Managed deployment"
-          title={<>A repeatable path from your domain<br /><span>to a monitored research service.</span></>}
+          title={<>A repeatable path from your domain<br /><span>to a monitored decision platform.</span></>}
           intro={(
             <p>
               FloodUQ is not a universal pretrained map. Each coastline is onboarded through a defined data, training,
@@ -350,7 +300,7 @@ export default function MarketingPage() {
         <section className="demo-section" data-reveal>
           <div className="demo-section-inner">
             <div className="demo-copy">
-              <p className="marketing-eyebrow">Portsmouth research demo</p>
+              <p className="marketing-eyebrow">Portsmouth product demo</p>
               <h2>Inspect the workflow.<br /><span>Then scope your domain.</span></h2>
               <p>
                 The gated demo presents the Portsmouth deployment: submit coastal stage and precipitation forcing,
@@ -366,11 +316,11 @@ export default function MarketingPage() {
               </div>
               <div className="demo-safety">
                 <ShieldCheck size={18} aria-hidden="true" />
-                <span>Google sign-in and an approved research account are required to submit GPU work.</span>
+                <span>Google sign-in and an approved user account are required to submit GPU work.</span>
               </div>
             </div>
             <div className="terminal" aria-label="FloodUQ managed service workflow">
-              <div className="terminal-bar"><span /><span /><span /><strong>flooduq | managed research service</strong></div>
+              <div className="terminal-bar"><span /><span /><span /><strong>flooduq | managed coastal intelligence</strong></div>
               <div className="terminal-body">
                 <p><span className="terminal-prompt">01</span> validate domain forcing</p>
                 <p className="terminal-output"><Check size={14} /> contract and reference screening complete</p>
@@ -388,15 +338,15 @@ export default function MarketingPage() {
           <div>
             <p className="marketing-eyebrow">Start with a domain-specific pilot</p>
             <h2 id="final-cta-title">Bring your coastline, reference evidence, and study questions.</h2>
-            <p>We will define the deployment contract, validation evidence, uncertainty products, and research limits together.</p>
+            <p>We will define the deployment contract, validation evidence, uncertainty products, and governance requirements together.</p>
           </div>
           <a className="primary-cta" href={PILOT_MAILTO}>
             Request a pilot <ArrowUpRight size={17} aria-hidden="true" />
           </a>
         </section>
 
-        <p className="research-status"><strong>Research status.</strong> {RESEARCH_DISCLAIMER}</p>
       </main>
+      <ScrollChapterProgress />
       <MarketingFooter />
       <ScrollReveal />
       <script type="application/ld+json" dangerouslySetInnerHTML={{ __html: JSON.stringify(structuredData) }} />

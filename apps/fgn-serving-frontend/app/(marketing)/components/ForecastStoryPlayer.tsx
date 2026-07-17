@@ -4,71 +4,110 @@ import { Pause, Play, RotateCcw, SkipBack, SkipForward } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { CaseStudyProduct } from "./caseStudyTypes";
 import { EvidenceCaption } from "./EvidenceCaption";
+import { depthStoryMilestoneFrames, milestoneIndexFromFrame } from "./scrollSceneMath.mjs";
 
 const SPEEDS = [
-  { label: "0.5×", delay: 800 },
-  { label: "1×", delay: 450 },
-  { label: "2×", delay: 240 }
+  { label: "0.5×", rate: 0.5 },
+  { label: "1×", rate: 1 },
+  { label: "1.5×", rate: 1.5 }
 ] as const;
 
 export function ForecastStoryPlayer({
   eventLabel,
   products,
-  posterSrc
+  posterSrc,
+  peakMeanDepthTimeIndex
 }: {
   eventLabel: string;
   products: CaseStudyProduct[];
   posterSrc: string;
+  peakMeanDepthTimeIndex: number;
 }) {
   const rootRef = useRef<HTMLDivElement>(null);
-  const [productId, setProductId] = useState(products[0]?.id ?? "probability");
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const [productId, setProductId] = useState(
+    () => products.find((item) => item.id === "meanDepth")?.id ?? products[0]?.id ?? "meanDepth"
+  );
   const [frameIndex, setFrameIndex] = useState(0);
   const [speedIndex, setSpeedIndex] = useState(1);
-  const [playing, setPlaying] = useState(false);
-  const [visible, setVisible] = useState(true);
+  const [playing, setPlaying] = useState(true);
+  const [visible, setVisible] = useState(false);
   const product = useMemo(
     () => products.find((item) => item.id === productId) ?? products[0],
     [productId, products]
   );
   const frame = product?.frames[frameIndex] ?? product?.frames[0];
+  const milestones = useMemo(() => {
+    const frames = products.find((item) => item.id === "meanDepth")?.frames ?? products[0]?.frames ?? [];
+    const lastIndex = Math.max(0, frames.length - 1);
+    const indexForTime = (timeIndex: number) => {
+      const index = frames.findIndex((item) => item.timeIndex === timeIndex);
+      return index >= 0 ? index : 0;
+    };
+    const [initial, earlyResponse, inlandExpansion, peakDepth, recession] = depthStoryMilestoneFrames(
+      lastIndex,
+      indexForTime(peakMeanDepthTimeIndex)
+    );
+    return [
+      { label: "Initial mean-depth field", body: "The forecast opens from its forcing-conditioned water-depth history.", frameIndex: initial },
+      { label: "Coastal depth response", body: "Mean water depth begins increasing along the connected coastal response pathways.", frameIndex: earlyResponse },
+      { label: "Depth field expands inland", body: "The ensemble-mean depth pattern develops across a broader part of the modeled domain.", frameIndex: inlandExpansion },
+      { label: "Peak mean depth", body: "The wettable-domain, area-weighted mean water depth reaches its event maximum.", frameIndex: peakDepth },
+      { label: "Depth recession", body: "Mean water depth recedes across the retained forecast horizon.", frameIndex: recession }
+    ];
+  }, [peakMeanDepthTimeIndex, products]);
+  const activeStep = milestoneIndexFromFrame(
+    frameIndex,
+    milestones.map((milestone) => milestone.frameIndex)
+  );
+  const activeMilestone = milestones[activeStep] ?? milestones[0];
 
   useEffect(() => {
-    const query = window.matchMedia("(prefers-reduced-motion: reduce)");
-    if (!query.matches) setPlaying(true);
     const node = rootRef.current;
-    if (!node || !("IntersectionObserver" in window)) return;
+    if (!node) return;
+    if (!("IntersectionObserver" in window)) {
+      setVisible(true);
+      return;
+    }
     const observer = new IntersectionObserver(([entry]) => setVisible(entry.isIntersecting), { threshold: 0.18 });
     observer.observe(node);
     return () => observer.disconnect();
   }, []);
 
   useEffect(() => {
-    if (!playing || !visible || !product?.frames.length) return;
-    const timer = window.setInterval(
-      () => setFrameIndex((current) => (current + 1) % product.frames.length),
-      SPEEDS[speedIndex].delay
-    );
-    return () => window.clearInterval(timer);
-  }, [playing, product, speedIndex, visible]);
-
-  useEffect(() => {
-    if (!product?.frames.length) return;
-    for (const offset of [1, 2]) {
-      const next = product.frames[(frameIndex + offset) % product.frames.length];
-      const image = new window.Image();
-      image.src = next.src;
+    const video = videoRef.current;
+    if (!video) return;
+    video.playbackRate = SPEEDS[speedIndex].rate;
+    if (!playing || !visible) {
+      video.pause();
+      return;
     }
-  }, [frameIndex, product]);
+    void video.play().catch(() => setPlaying(false));
+  }, [playing, productId, speedIndex, visible]);
 
   if (!product || !frame) return null;
+  const seekToFrame = (nextFrameIndex: number) => {
+    const boundedIndex = Math.min(product.frames.length - 1, Math.max(0, nextFrameIndex));
+    setFrameIndex(boundedIndex);
+    const video = videoRef.current;
+    if (video) video.currentTime = boundedIndex / product.animation.sourceFrameRate;
+  };
   const step = (delta: number) => {
     setPlaying(false);
-    setFrameIndex((current) => (current + delta + product.frames.length) % product.frames.length);
+    seekToFrame((frameIndex + delta + product.frames.length) % product.frames.length);
   };
 
   return (
-    <div ref={rootRef} className="forecast-story-player">
-      <div className="forecast-player-toolbar">
+    <div
+      ref={rootRef}
+      className="forecast-story-player"
+      data-scroll-scene="portsmouth-forecast"
+      data-playback-mode="autoplay-on-visible"
+      data-playing={playing && visible}
+      data-frame-index={frameIndex}
+    >
+      <div className="forecast-scroll-sticky">
+        <div className="forecast-player-toolbar">
         <div className="case-study-segmented" aria-label="Forecast product">
           {products.map((item) => (
             <button
@@ -76,30 +115,51 @@ export function ForecastStoryPlayer({
               key={item.id}
               className={item.id === product.id ? "active" : ""}
               aria-pressed={item.id === product.id}
-              onClick={() => {
-                setProductId(item.id);
-                setFrameIndex(0);
-              }}
+              onClick={() => setProductId(item.id)}
             >
               {item.label}
             </button>
           ))}
         </div>
         <span className="forecast-lead" aria-live="polite">Lead +{frame.leadHours.toFixed(2)} h</span>
-      </div>
+        </div>
 
-      <figure className="case-study-figure forecast-player-figure">
-        <div className="forecast-player-canvas">
-          {/* eslint-disable-next-line @next/next/no-img-element */}
-          <img
-            src={frame.src || posterSrc}
-            alt={`${eventLabel} ${product.label} at ${frame.leadHours.toFixed(2)} forecast hours`}
+        <figure className="case-study-figure forecast-player-figure">
+          <div className="forecast-player-canvas">
+          <video
+            key={product.id}
+            ref={videoRef}
+            data-testid="forecast-product-video"
+            muted
+            loop
+            playsInline
+            preload="auto"
+            poster={product.animation.posterSrc || posterSrc}
+            aria-label={`${eventLabel} ${product.label} forecast animation`}
             width={1400}
             height={1080}
-            loading="lazy"
-          />
-        </div>
-        <div className="forecast-transport" aria-label="Forecast animation controls">
+            onLoadedMetadata={(event) => {
+              event.currentTarget.currentTime = frameIndex / product.animation.sourceFrameRate;
+              event.currentTarget.playbackRate = SPEEDS[speedIndex].rate;
+              if (playing && visible) void event.currentTarget.play().catch(() => setPlaying(false));
+            }}
+            onTimeUpdate={(event) => {
+              const nextFrame = Math.min(
+                product.frames.length - 1,
+                Math.max(0, Math.round(event.currentTarget.currentTime * product.animation.sourceFrameRate))
+              );
+              setFrameIndex((current) => (current === nextFrame ? current : nextFrame));
+            }}
+          >
+            <source src={product.animation.mp4Src} type="video/mp4" />
+          </video>
+            <div className="forecast-scroll-caption" aria-live="polite">
+              <span>{String(activeStep + 1).padStart(2, "0")} / {String(milestones.length).padStart(2, "0")}</span>
+              <strong>{activeMilestone.label}</strong>
+              <p>{activeMilestone.body}</p>
+            </div>
+          </div>
+          <div className="forecast-transport" aria-label="Forecast animation controls">
           <button type="button" onClick={() => step(-1)} title="Previous frame" aria-label="Previous frame"><SkipBack size={17} /></button>
           <button
             type="button"
@@ -120,13 +180,13 @@ export function ForecastStoryPlayer({
             aria-label={`Forecast lead time, ${frame.leadHours.toFixed(2)} hours`}
             onChange={(event) => {
               setPlaying(false);
-              setFrameIndex(Number(event.target.value));
+              seekToFrame(Number(event.target.value));
             }}
           />
           <button
             type="button"
             onClick={() => {
-              setFrameIndex(0);
+              seekToFrame(0);
               setPlaying(true);
             }}
             title="Replay"
@@ -138,13 +198,14 @@ export function ForecastStoryPlayer({
               {SPEEDS.map((speed, index) => <option key={speed.label} value={index}>{speed.label}</option>)}
             </select>
           </label>
-        </div>
-        <EvidenceCaption
-          title="A forecast through time, not a single peak map"
-          insight="Track where the selected product emerges, concentrates, and recedes across the full Irene 2011 horizon."
-          method="Frames are sampled from the complete production rollout while preserving onset, peak footprint, peak disagreement, and recession."
-        />
-      </figure>
+          </div>
+          <EvidenceCaption
+            title="A forecast through time, not a single peak map"
+            insight="Track where the selected product emerges, concentrates, and recedes across the full Irene 2011 horizon."
+            method="Source states are exact 15-minute production leads. The MP4/WebM stream blends adjacent rendered states only for visual continuity; the timeline and controls remain anchored to source leads."
+          />
+        </figure>
+      </div>
     </div>
   );
 }

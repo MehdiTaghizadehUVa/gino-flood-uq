@@ -20,8 +20,13 @@ export function PortsmouthCaseStudy({ evidence }: { evidence: EvidenceRegistry }
       </div>
 
       <section className="case-study-chapter" aria-labelledby="forecast-story-title">
-        <header><span>01 / EVENT STORY</span><h3 id="forecast-story-title">Follow the probability field through Irene 2011.</h3><p>A named historical forcing becomes a time-resolved view of probability, depth, and ensemble width.</p></header>
-        <ForecastStoryPlayer eventLabel={manifest.flagship.label} products={manifest.flagship.products} posterSrc={manifest.flagship.posterSrc} />
+        <header><span>01 / EVENT STORY</span><h3 id="forecast-story-title">Follow the mean-depth field through Irene 2011.</h3><p>The central response opens the story, with exceedance probability and ensemble width available as complementary views.</p></header>
+        <ForecastStoryPlayer
+          eventLabel={manifest.flagship.label}
+          products={manifest.flagship.products}
+          posterSrc={manifest.flagship.posterSrc}
+          peakMeanDepthTimeIndex={manifest.flagship.peakMeanDepthTimeIndex}
+        />
       </section>
 
       <section className="case-study-chapter" aria-labelledby="snapshot-title">

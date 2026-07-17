@@ -43,7 +43,7 @@ export function LocationEvidence({ locations }: { locations: Location[] }) {
           <EvidenceCaption
             title="One cell, the full ensemble story"
             insight="The depth fan, calibrated exceedance trace, and arrival distribution provide context that a central map alone cannot convey."
-            method="The chart is rendered from the 60 production members. Member traces are shown only as a static scientific figure; the public page does not ship HDF5 files or numerical member arrays."
+            method="The chart is rendered from the 60 production members. Member traces are presented as a static evidence figure; the public page does not ship HDF5 files or numerical member arrays."
           />
         </figure>
       </div>

@@ -1,0 +1,45 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+
+import {
+  calibrationLayerState,
+  depthStoryMilestoneFrames,
+  milestoneIndexFromFrame,
+  sceneProgressFromBounds,
+  stepIndexFromProgress
+} from "../app/(marketing)/components/scrollSceneMath.mjs";
+
+test("scene progress spans the sticky scroll range and clamps outside it", () => {
+  assert.equal(sceneProgressFromBounds({ top: 200, height: 2700, viewportHeight: 900 }), 0);
+  assert.equal(sceneProgressFromBounds({ top: -900, height: 2700, viewportHeight: 900 }), 0.5);
+  assert.equal(sceneProgressFromBounds({ top: -1800, height: 2700, viewportHeight: 900 }), 1);
+  assert.equal(sceneProgressFromBounds({ top: -2400, height: 2700, viewportHeight: 900 }), 1);
+});
+
+test("scroll progress selects every narrative step including both endpoints", () => {
+  assert.equal(stepIndexFromProgress(0, 5), 0);
+  assert.equal(stepIndexFromProgress(0.2, 5), 1);
+  assert.equal(stepIndexFromProgress(0.799, 5), 3);
+  assert.equal(stepIndexFromProgress(1, 5), 4);
+});
+
+test("timed forecast playback selects evidence captions from physical frame milestones", () => {
+  const milestones = [0, 22, 46, 66, 93];
+  assert.equal(milestoneIndexFromFrame(0, milestones), 0);
+  assert.equal(milestoneIndexFromFrame(21, milestones), 0);
+  assert.equal(milestoneIndexFromFrame(22, milestones), 1);
+  assert.equal(milestoneIndexFromFrame(65, milestones), 2);
+  assert.equal(milestoneIndexFromFrame(93, milestones), 4);
+  assert.equal(milestoneIndexFromFrame(10, []), 0);
+});
+
+test("mean-depth story advances through buildup, peak depth, and recession", () => {
+  assert.deepEqual(depthStoryMilestoneFrames(93, 66), [0, 22, 44, 66, 93]);
+  assert.deepEqual(depthStoryMilestoneFrames(7, 6), [0, 2, 4, 6, 7]);
+});
+
+test("calibration evidence points appear before the fitted mapping line", () => {
+  assert.deepEqual(calibrationLayerState(0), { pointsVisible: true, curveVisible: false });
+  assert.deepEqual(calibrationLayerState(1), { pointsVisible: true, curveVisible: true });
+  assert.deepEqual(calibrationLayerState(2), { pointsVisible: true, curveVisible: true });
+});

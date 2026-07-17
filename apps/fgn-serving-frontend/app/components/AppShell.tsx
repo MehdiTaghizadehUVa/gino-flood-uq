@@ -48,7 +48,7 @@ export function AppShell({ active = "home", children, userEmail }: AppShellProps
           </div>
           <div>
             <p className="app-brand-title">Coastal Flood-UQ Console</p>
-            <p className="app-brand-subtitle">Fixed-domain FGN research server</p>
+            <p className="app-brand-subtitle">Fixed-domain probabilistic service</p>
           </div>
         </div>
         <nav className="app-nav">
@@ -60,9 +60,9 @@ export function AppShell({ active = "home", children, userEmail }: AppShellProps
           ))}
         </nav>
         <div className="app-sidebar-foot">
-          <strong>Research access.</strong>
+          <strong>Managed access.</strong>
           <br />
-          Calibrated uncertainty products for scientific review and model evaluation.
+          Calibrated uncertainty products for scenario evaluation, asset review, and planning.
           {userEmail ? (
             <>
               <br />
@@ -83,11 +83,11 @@ export function AppShell({ active = "home", children, userEmail }: AppShellProps
             </span>
             <div className="command-title">
               <strong>Coastal Flood-UQ Console</strong>
-              <span>Fixed-domain FGN research workspace</span>
+              <span>Fixed-domain probabilistic workspace</span>
             </div>
           </div>
           <div className="command-right">
-            <span className="command-chip research">Research workspace</span>
+            <span className="command-chip research">Managed workspace</span>
             <span className="command-chip">
               <Activity size={12} aria-hidden="true" />
               {userEmail ?? "Authentication required"}

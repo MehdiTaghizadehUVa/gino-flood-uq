@@ -24,8 +24,12 @@ docker run --rm \
   --config /case_study_sources/portsmouth_export_config.json
 ```
 
-The export invalidates prior hero videos and writes a numbered, map-only Irene
-sequence. Encode that sequence immediately after the scientific export:
+The interactive evidence player exports every physical forecast timestep. The
+homepage overview maps, interactive frames, location evidence, decomposition,
+and historical validation maps all use the same node-interpolated spatial
+renderer. The export also invalidates prior videos, writes a separate numbered
+hero sequence, and registers complete probability, mean-depth, and interval-width
+animations. Encode all video assets immediately after the scientific export:
 
 ```bash
 python3 neuralop/flood/serving/case_study_video.py \
@@ -35,8 +39,11 @@ python3 neuralop/flood/serving/case_study_video.py \
 
 `--ffmpeg` may also point to a Windows FFmpeg executable under `/mnt/c`; the
 encoder stages output on the Windows filesystem and publishes it atomically
-back into WSL. Intermediate hero frames are removed only after both MP4 and
-WebM outputs succeed. Pass `--keep-frames` only for rendering diagnostics.
+back into WSL. The interactive product animations retain every 15-minute source
+state and use adjacent-frame blending for continuous 24 fps presentation. Their
+timeline and downloadable scientific frames remain anchored to the source leads.
+Intermediate hero frames are removed only after both MP4 and WebM outputs
+succeed. Pass `--keep-frames` only for rendering diagnostics.
 
 ## Validate
 

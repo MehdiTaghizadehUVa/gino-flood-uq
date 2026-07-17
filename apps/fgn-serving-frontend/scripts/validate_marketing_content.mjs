@@ -13,6 +13,46 @@ const [contentSource, pageSource, evidenceSource, caseStudyManifestSource] = awa
   readFile(caseStudyManifestPath, "utf8")
 ]);
 
+const visibleToneSource = (
+  await Promise.all(
+    [
+      "app/(marketing)/layout.tsx",
+      "app/(marketing)/page.tsx",
+      "app/(marketing)/components/MarketingFooter.tsx",
+      "app/(marketing)/components/HistoricalValidation.tsx",
+      "app/(marketing)/components/EvidenceReceipt.tsx",
+      "app/components/AppShell.tsx",
+      "app/components/ResearchNotice.tsx",
+      "app/(demo)/layout.tsx",
+      "app/(demo)/demo/page.tsx",
+      "app/(demo)/demo/runs/[runId]/page.tsx",
+      "app/(demo)/admin/page.tsx",
+      "app/(demo)/admin/monitoring/page.tsx"
+    ].map((relativePath) => readFile(path.join(frontendRoot, relativePath), "utf8"))
+  )
+).join("\n").toLowerCase();
+
+for (const retiredPhrase of [
+  "research only",
+  "research status",
+  "not for emergency",
+  "operational flood forecast",
+  "research service",
+  "research demo",
+  "research account",
+  "research workspace",
+  "research access",
+  "research platform",
+  "research workflow",
+  "research safeguard",
+  "research history",
+  "research guardrail",
+  "research server",
+  "scientific review"
+]) {
+  assert.ok(!visibleToneSource.includes(retiredPhrase), `Retired research-only tone found: ${retiredPhrase}`);
+}
+
 const evidence = JSON.parse(evidenceSource);
 assert.equal(evidence.caseStudy, "Portsmouth, Virginia", "Evidence must identify the Portsmouth case study.");
 assert.ok(Array.isArray(evidence.claims) && evidence.claims.length >= 3, "Evidence must contain benchmark claims.");
@@ -53,6 +93,11 @@ assert.equal(manifest.provenance.dtSeconds, 900);
 assert.equal(manifest.provenance.forecastSteps, 94);
 assert.equal(manifest.flagship.eventId, "2011_IRENE");
 assert.equal(manifest.flagship.thresholdM, 0.3);
+assert.equal(manifest.flagship.products[0].id, "meanDepth", "Mean depth must be the first Portsmouth animation product.");
+assert.ok(
+  Number.isInteger(manifest.flagship.peakMeanDepthTimeIndex) && manifest.flagship.peakMeanDepthTimeIndex >= 0,
+  "The depth story requires a physical peak area-weighted mean-depth lead."
+);
 assert.equal(manifest.flagship.hero.product, "Calibrated mean water depth");
 assert.equal(manifest.flagship.hero.displayFloorM, 0.05);
 assert.equal(manifest.flagship.hero.selection, "Peak expected footprint above 0.30 m");
@@ -67,10 +112,15 @@ const heroSequence = JSON.parse(
 assert.equal(heroSequence.frameCount, manifest.flagship.hero.frameCount);
 assert.equal(heroSequence.frameRate, manifest.flagship.hero.frameRate);
 assert.equal(heroSequence.frames.length, manifest.flagship.hero.frameCount);
+const heroTimeIndices = heroSequence.frames.map((frame) => frame.timeIndex);
+const heroTimeIndexSet = new Set(heroTimeIndices);
 assert.deepEqual(
-  heroSequence.frames.map((frame) => frame.timeIndex),
-  manifest.flagship.products.find((product) => product.id === "meanDepth").frames.map((frame) => frame.timeIndex),
-  "Hero animation must preserve the same lead-time milestones as the public mean-depth evidence."
+  heroTimeIndices,
+  manifest.flagship.products
+    .find((product) => product.id === "meanDepth")
+    .frames.filter((frame) => heroTimeIndexSet.has(frame.timeIndex))
+    .map((frame) => frame.timeIndex),
+  "Hero animation milestones must remain aligned with exact public mean-depth evidence frames."
 );
 assert.deepEqual(
   manifest.flagship.decomposition.maps.map((item) => item.label),
@@ -89,7 +139,12 @@ assert.deepEqual(
 assert.equal(new Set(manifest.historicalValidation.events.map((event) => event.runId)).size, 3);
 assert.deepEqual(
   Object.fromEntries(manifest.flagship.products.map((product) => [product.id, product.displayFloor])),
-  { probability: 0.1, meanDepth: 0.05, intervalWidth: 0.08 }
+  { meanDepth: 0.05, probability: 0.1, intervalWidth: 0.08 }
+);
+assert.deepEqual(
+  manifest.flagship.overviewMaps.map((item) => item.id),
+  ["probability", "interval_width", "arrival_time", "mean_depth"],
+  "All public overview maps must come from the canonical spatial renderer."
 );
 assert.equal(manifest.displayPolicy.terrainExtendsBeyondMesh, true);
 assert.equal(manifest.displayPolicy.viewportPolicy, "mesh_bounds_plus_2p5_percent");
@@ -109,7 +164,23 @@ const [sourceLeft, sourceRight, sourceBottom, sourceTop] = manifest.displayPolic
 assert.ok(sourceLeft <= terrainLeft && sourceRight >= terrainRight && sourceBottom <= terrainBottom && sourceTop >= terrainTop);
 
 for (const product of manifest.flagship.products) {
-  assert.equal(product.frames.length, 32, `${product.id} must contain the deterministic 32-frame story.`);
+  assert.equal(product.frames.length, 94, `${product.id} must contain every physical forecast step.`);
+  assert.equal(product.animation.frameCount, product.frames.length, `${product.id} video must cover every source frame.`);
+  assert.equal(product.animation.sourceFrameRate, 6, `${product.id} source playback rate changed unexpectedly.`);
+  assert.equal(product.animation.playbackFrameRate, 24, `${product.id} display video must be encoded at 24 fps.`);
+  assert.ok(
+    Math.abs(product.animation.durationSeconds - product.animation.frameCount / product.animation.sourceFrameRate) < 0.001,
+    `${product.id} video duration must preserve the complete source horizon.`
+  );
+  assert.ok(
+    product.animation.interpolation.includes("blended"),
+    `${product.id} video must disclose presentation-only frame blending.`
+  );
+  assert.deepEqual(
+    product.frames.map((frame) => frame.timeIndex),
+    Array.from({ length: 94 }, (_, index) => index),
+    `${product.id} must preserve the complete ordered rollout without temporal interpolation.`
+  );
   assert.ok(
     product.frames.some((frame) => frame.timeIndex === manifest.flagship.peakAreaTimeIndex),
     `${product.id} must include the peak-footprint lead.`
@@ -130,6 +201,11 @@ const assetPaths = [
   manifest.flagship.hero.webmSrc,
   manifest.flagship.hero.sequenceSrc,
   ...manifest.flagship.products.flatMap((product) => product.frames.map((frame) => frame.src)),
+  ...manifest.flagship.products.flatMap((product) => [
+    product.animation.mp4Src,
+    product.animation.posterSrc
+  ]),
+  ...manifest.flagship.overviewMaps.map((item) => item.src),
   ...manifest.flagship.snapshot.map((item) => item.src),
   ...manifest.flagship.locations.flatMap((item) => [item.mapSrc, item.panelSrc]),
   ...manifest.flagship.decomposition.maps.map((item) => item.src),
@@ -159,6 +235,13 @@ for (const videoSrc of [manifest.flagship.hero.mp4Src, manifest.flagship.hero.we
   assert.ok(
     videoStats.size <= 4 * 1024 * 1024,
     `Hero video ${videoSrc} is ${(videoStats.size / 1024 / 1024).toFixed(2)} MB; limit is 4 MB.`
+  );
+}
+for (const product of manifest.flagship.products) {
+  const videoStats = await stat(path.join(frontendRoot, "public", product.animation.mp4Src));
+  assert.ok(
+    videoStats.size <= 8 * 1024 * 1024,
+    `Product video ${product.animation.mp4Src} is ${(videoStats.size / 1024 / 1024).toFixed(2)} MB; limit is 8 MB.`
   );
 }
 
@@ -193,5 +276,15 @@ for (const maskingPhrase of [
 assert.ok(pageSource.includes('<math display="block"'), "The variance decomposition must use semantic MathML.");
 assert.ok(pageSource.includes("epistemic uncertainty"));
 assert.ok(pageSource.includes("aleatoric uncertainty"));
+assert.ok(!allMarketingSource.includes("MotionPreferenceToggle"), "Marketing motion must not require a visitor control.");
+assert.ok(!allMarketingSource.includes("hero-motion-toggle"), "Hero playback must not expose a pause/play control.");
+for (const legacyMapPath of [
+  "/marketing/mean-depth.webp",
+  "/marketing/exceedance-probability.webp",
+  "/marketing/uncertainty-width.webp",
+  "/marketing/arrival-time.webp"
+]) {
+  assert.ok(!allMarketingSource.includes(legacyMapPath), `Legacy spatial asset is still public: ${legacyMapPath}`);
+}
 
 console.log("Marketing content validation passed.");

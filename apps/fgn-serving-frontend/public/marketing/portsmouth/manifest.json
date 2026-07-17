@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "caseStudyId": "portsmouth-irene-2011",
-  "generatedAt": "2026-07-16T17:47:10.660517+00:00",
+  "generatedAt": "2026-07-17T01:33:21.996491+00:00",
   "title": "From historical forcing to calibrated flood probabilities.",
   "eyebrow": "PORTSMOUTH, VIRGINIA / DEPLOYMENT PROOF",
   "intro": "A named historical event shows how a domain-specific FloodUQ deployment turns coastal forcing into probability, timing, extent, and uncertainty evidence. Portsmouth is the proof case; the service pattern is repeated through a new domain's own terrain and reference simulations.",
@@ -29,7 +29,8 @@
     ],
     "peakAreaTimeIndex": 66,
     "peakDisagreementTimeIndex": 46,
-    "posterSrc": "/marketing/portsmouth/frames/probability/irene_t001.webp",
+    "peakMeanDepthTimeIndex": 65,
+    "posterSrc": "/marketing/portsmouth/frames/meanDepth/irene_t001.webp",
     "hero": {
       "src": "/marketing/portsmouth/hero/irene_mean_depth_poster.webp",
       "posterSrc": "/marketing/portsmouth/hero/irene_mean_depth_poster.webp",
@@ -46,175 +47,6 @@
     },
     "products": [
       {
-        "id": "probability",
-        "label": "P(WD > 0.30 m)",
-        "displayFloor": 0.1,
-        "vmin": 0.1,
-        "vmax": 1.0,
-        "frames": [
-          {
-            "timeIndex": 0,
-            "leadHours": 0.25,
-            "src": "/marketing/portsmouth/frames/probability/irene_t001.webp"
-          },
-          {
-            "timeIndex": 3,
-            "leadHours": 1.0,
-            "src": "/marketing/portsmouth/frames/probability/irene_t004.webp"
-          },
-          {
-            "timeIndex": 6,
-            "leadHours": 1.75,
-            "src": "/marketing/portsmouth/frames/probability/irene_t007.webp"
-          },
-          {
-            "timeIndex": 9,
-            "leadHours": 2.5,
-            "src": "/marketing/portsmouth/frames/probability/irene_t010.webp"
-          },
-          {
-            "timeIndex": 12,
-            "leadHours": 3.25,
-            "src": "/marketing/portsmouth/frames/probability/irene_t013.webp"
-          },
-          {
-            "timeIndex": 15,
-            "leadHours": 4.0,
-            "src": "/marketing/portsmouth/frames/probability/irene_t016.webp"
-          },
-          {
-            "timeIndex": 18,
-            "leadHours": 4.75,
-            "src": "/marketing/portsmouth/frames/probability/irene_t019.webp"
-          },
-          {
-            "timeIndex": 21,
-            "leadHours": 5.5,
-            "src": "/marketing/portsmouth/frames/probability/irene_t022.webp"
-          },
-          {
-            "timeIndex": 24,
-            "leadHours": 6.25,
-            "src": "/marketing/portsmouth/frames/probability/irene_t025.webp"
-          },
-          {
-            "timeIndex": 27,
-            "leadHours": 7.0,
-            "src": "/marketing/portsmouth/frames/probability/irene_t028.webp"
-          },
-          {
-            "timeIndex": 30,
-            "leadHours": 7.75,
-            "src": "/marketing/portsmouth/frames/probability/irene_t031.webp"
-          },
-          {
-            "timeIndex": 33,
-            "leadHours": 8.5,
-            "src": "/marketing/portsmouth/frames/probability/irene_t034.webp"
-          },
-          {
-            "timeIndex": 36,
-            "leadHours": 9.25,
-            "src": "/marketing/portsmouth/frames/probability/irene_t037.webp"
-          },
-          {
-            "timeIndex": 39,
-            "leadHours": 10.0,
-            "src": "/marketing/portsmouth/frames/probability/irene_t040.webp"
-          },
-          {
-            "timeIndex": 42,
-            "leadHours": 10.75,
-            "src": "/marketing/portsmouth/frames/probability/irene_t043.webp"
-          },
-          {
-            "timeIndex": 46,
-            "leadHours": 11.75,
-            "src": "/marketing/portsmouth/frames/probability/irene_t047.webp"
-          },
-          {
-            "timeIndex": 48,
-            "leadHours": 12.25,
-            "src": "/marketing/portsmouth/frames/probability/irene_t049.webp"
-          },
-          {
-            "timeIndex": 51,
-            "leadHours": 13.0,
-            "src": "/marketing/portsmouth/frames/probability/irene_t052.webp"
-          },
-          {
-            "timeIndex": 54,
-            "leadHours": 13.75,
-            "src": "/marketing/portsmouth/frames/probability/irene_t055.webp"
-          },
-          {
-            "timeIndex": 57,
-            "leadHours": 14.5,
-            "src": "/marketing/portsmouth/frames/probability/irene_t058.webp"
-          },
-          {
-            "timeIndex": 60,
-            "leadHours": 15.25,
-            "src": "/marketing/portsmouth/frames/probability/irene_t061.webp"
-          },
-          {
-            "timeIndex": 63,
-            "leadHours": 16.0,
-            "src": "/marketing/portsmouth/frames/probability/irene_t064.webp"
-          },
-          {
-            "timeIndex": 66,
-            "leadHours": 16.75,
-            "src": "/marketing/portsmouth/frames/probability/irene_t067.webp"
-          },
-          {
-            "timeIndex": 69,
-            "leadHours": 17.5,
-            "src": "/marketing/portsmouth/frames/probability/irene_t070.webp"
-          },
-          {
-            "timeIndex": 72,
-            "leadHours": 18.25,
-            "src": "/marketing/portsmouth/frames/probability/irene_t073.webp"
-          },
-          {
-            "timeIndex": 75,
-            "leadHours": 19.0,
-            "src": "/marketing/portsmouth/frames/probability/irene_t076.webp"
-          },
-          {
-            "timeIndex": 78,
-            "leadHours": 19.75,
-            "src": "/marketing/portsmouth/frames/probability/irene_t079.webp"
-          },
-          {
-            "timeIndex": 81,
-            "leadHours": 20.5,
-            "src": "/marketing/portsmouth/frames/probability/irene_t082.webp"
-          },
-          {
-            "timeIndex": 84,
-            "leadHours": 21.25,
-            "src": "/marketing/portsmouth/frames/probability/irene_t085.webp"
-          },
-          {
-            "timeIndex": 87,
-            "leadHours": 22.0,
-            "src": "/marketing/portsmouth/frames/probability/irene_t088.webp"
-          },
-          {
-            "timeIndex": 90,
-            "leadHours": 22.75,
-            "src": "/marketing/portsmouth/frames/probability/irene_t091.webp"
-          },
-          {
-            "timeIndex": 93,
-            "leadHours": 23.5,
-            "src": "/marketing/portsmouth/frames/probability/irene_t094.webp"
-          }
-        ]
-      },
-      {
         "id": "meanDepth",
         "label": "Calibrated mean depth",
         "displayFloor": 0.05,
@@ -227,9 +59,29 @@
             "src": "/marketing/portsmouth/frames/meanDepth/irene_t001.webp"
           },
           {
+            "timeIndex": 1,
+            "leadHours": 0.5,
+            "src": "/marketing/portsmouth/frames/meanDepth/irene_t002.webp"
+          },
+          {
+            "timeIndex": 2,
+            "leadHours": 0.75,
+            "src": "/marketing/portsmouth/frames/meanDepth/irene_t003.webp"
+          },
+          {
             "timeIndex": 3,
             "leadHours": 1.0,
             "src": "/marketing/portsmouth/frames/meanDepth/irene_t004.webp"
+          },
+          {
+            "timeIndex": 4,
+            "leadHours": 1.25,
+            "src": "/marketing/portsmouth/frames/meanDepth/irene_t005.webp"
+          },
+          {
+            "timeIndex": 5,
+            "leadHours": 1.5,
+            "src": "/marketing/portsmouth/frames/meanDepth/irene_t006.webp"
           },
           {
             "timeIndex": 6,
@@ -237,9 +89,29 @@
             "src": "/marketing/portsmouth/frames/meanDepth/irene_t007.webp"
           },
           {
+            "timeIndex": 7,
+            "leadHours": 2.0,
+            "src": "/marketing/portsmouth/frames/meanDepth/irene_t008.webp"
+          },
+          {
+            "timeIndex": 8,
+            "leadHours": 2.25,
+            "src": "/marketing/portsmouth/frames/meanDepth/irene_t009.webp"
+          },
+          {
             "timeIndex": 9,
             "leadHours": 2.5,
             "src": "/marketing/portsmouth/frames/meanDepth/irene_t010.webp"
+          },
+          {
+            "timeIndex": 10,
+            "leadHours": 2.75,
+            "src": "/marketing/portsmouth/frames/meanDepth/irene_t011.webp"
+          },
+          {
+            "timeIndex": 11,
+            "leadHours": 3.0,
+            "src": "/marketing/portsmouth/frames/meanDepth/irene_t012.webp"
           },
           {
             "timeIndex": 12,
@@ -247,9 +119,29 @@
             "src": "/marketing/portsmouth/frames/meanDepth/irene_t013.webp"
           },
           {
+            "timeIndex": 13,
+            "leadHours": 3.5,
+            "src": "/marketing/portsmouth/frames/meanDepth/irene_t014.webp"
+          },
+          {
+            "timeIndex": 14,
+            "leadHours": 3.75,
+            "src": "/marketing/portsmouth/frames/meanDepth/irene_t015.webp"
+          },
+          {
             "timeIndex": 15,
             "leadHours": 4.0,
             "src": "/marketing/portsmouth/frames/meanDepth/irene_t016.webp"
+          },
+          {
+            "timeIndex": 16,
+            "leadHours": 4.25,
+            "src": "/marketing/portsmouth/frames/meanDepth/irene_t017.webp"
+          },
+          {
+            "timeIndex": 17,
+            "leadHours": 4.5,
+            "src": "/marketing/portsmouth/frames/meanDepth/irene_t018.webp"
           },
           {
             "timeIndex": 18,
@@ -257,9 +149,29 @@
             "src": "/marketing/portsmouth/frames/meanDepth/irene_t019.webp"
           },
           {
+            "timeIndex": 19,
+            "leadHours": 5.0,
+            "src": "/marketing/portsmouth/frames/meanDepth/irene_t020.webp"
+          },
+          {
+            "timeIndex": 20,
+            "leadHours": 5.25,
+            "src": "/marketing/portsmouth/frames/meanDepth/irene_t021.webp"
+          },
+          {
             "timeIndex": 21,
             "leadHours": 5.5,
             "src": "/marketing/portsmouth/frames/meanDepth/irene_t022.webp"
+          },
+          {
+            "timeIndex": 22,
+            "leadHours": 5.75,
+            "src": "/marketing/portsmouth/frames/meanDepth/irene_t023.webp"
+          },
+          {
+            "timeIndex": 23,
+            "leadHours": 6.0,
+            "src": "/marketing/portsmouth/frames/meanDepth/irene_t024.webp"
           },
           {
             "timeIndex": 24,
@@ -267,9 +179,29 @@
             "src": "/marketing/portsmouth/frames/meanDepth/irene_t025.webp"
           },
           {
+            "timeIndex": 25,
+            "leadHours": 6.5,
+            "src": "/marketing/portsmouth/frames/meanDepth/irene_t026.webp"
+          },
+          {
+            "timeIndex": 26,
+            "leadHours": 6.75,
+            "src": "/marketing/portsmouth/frames/meanDepth/irene_t027.webp"
+          },
+          {
             "timeIndex": 27,
             "leadHours": 7.0,
             "src": "/marketing/portsmouth/frames/meanDepth/irene_t028.webp"
+          },
+          {
+            "timeIndex": 28,
+            "leadHours": 7.25,
+            "src": "/marketing/portsmouth/frames/meanDepth/irene_t029.webp"
+          },
+          {
+            "timeIndex": 29,
+            "leadHours": 7.5,
+            "src": "/marketing/portsmouth/frames/meanDepth/irene_t030.webp"
           },
           {
             "timeIndex": 30,
@@ -277,9 +209,29 @@
             "src": "/marketing/portsmouth/frames/meanDepth/irene_t031.webp"
           },
           {
+            "timeIndex": 31,
+            "leadHours": 8.0,
+            "src": "/marketing/portsmouth/frames/meanDepth/irene_t032.webp"
+          },
+          {
+            "timeIndex": 32,
+            "leadHours": 8.25,
+            "src": "/marketing/portsmouth/frames/meanDepth/irene_t033.webp"
+          },
+          {
             "timeIndex": 33,
             "leadHours": 8.5,
             "src": "/marketing/portsmouth/frames/meanDepth/irene_t034.webp"
+          },
+          {
+            "timeIndex": 34,
+            "leadHours": 8.75,
+            "src": "/marketing/portsmouth/frames/meanDepth/irene_t035.webp"
+          },
+          {
+            "timeIndex": 35,
+            "leadHours": 9.0,
+            "src": "/marketing/portsmouth/frames/meanDepth/irene_t036.webp"
           },
           {
             "timeIndex": 36,
@@ -287,9 +239,29 @@
             "src": "/marketing/portsmouth/frames/meanDepth/irene_t037.webp"
           },
           {
+            "timeIndex": 37,
+            "leadHours": 9.5,
+            "src": "/marketing/portsmouth/frames/meanDepth/irene_t038.webp"
+          },
+          {
+            "timeIndex": 38,
+            "leadHours": 9.75,
+            "src": "/marketing/portsmouth/frames/meanDepth/irene_t039.webp"
+          },
+          {
             "timeIndex": 39,
             "leadHours": 10.0,
             "src": "/marketing/portsmouth/frames/meanDepth/irene_t040.webp"
+          },
+          {
+            "timeIndex": 40,
+            "leadHours": 10.25,
+            "src": "/marketing/portsmouth/frames/meanDepth/irene_t041.webp"
+          },
+          {
+            "timeIndex": 41,
+            "leadHours": 10.5,
+            "src": "/marketing/portsmouth/frames/meanDepth/irene_t042.webp"
           },
           {
             "timeIndex": 42,
@@ -297,9 +269,29 @@
             "src": "/marketing/portsmouth/frames/meanDepth/irene_t043.webp"
           },
           {
+            "timeIndex": 43,
+            "leadHours": 11.0,
+            "src": "/marketing/portsmouth/frames/meanDepth/irene_t044.webp"
+          },
+          {
+            "timeIndex": 44,
+            "leadHours": 11.25,
+            "src": "/marketing/portsmouth/frames/meanDepth/irene_t045.webp"
+          },
+          {
+            "timeIndex": 45,
+            "leadHours": 11.5,
+            "src": "/marketing/portsmouth/frames/meanDepth/irene_t046.webp"
+          },
+          {
             "timeIndex": 46,
             "leadHours": 11.75,
             "src": "/marketing/portsmouth/frames/meanDepth/irene_t047.webp"
+          },
+          {
+            "timeIndex": 47,
+            "leadHours": 12.0,
+            "src": "/marketing/portsmouth/frames/meanDepth/irene_t048.webp"
           },
           {
             "timeIndex": 48,
@@ -307,9 +299,29 @@
             "src": "/marketing/portsmouth/frames/meanDepth/irene_t049.webp"
           },
           {
+            "timeIndex": 49,
+            "leadHours": 12.5,
+            "src": "/marketing/portsmouth/frames/meanDepth/irene_t050.webp"
+          },
+          {
+            "timeIndex": 50,
+            "leadHours": 12.75,
+            "src": "/marketing/portsmouth/frames/meanDepth/irene_t051.webp"
+          },
+          {
             "timeIndex": 51,
             "leadHours": 13.0,
             "src": "/marketing/portsmouth/frames/meanDepth/irene_t052.webp"
+          },
+          {
+            "timeIndex": 52,
+            "leadHours": 13.25,
+            "src": "/marketing/portsmouth/frames/meanDepth/irene_t053.webp"
+          },
+          {
+            "timeIndex": 53,
+            "leadHours": 13.5,
+            "src": "/marketing/portsmouth/frames/meanDepth/irene_t054.webp"
           },
           {
             "timeIndex": 54,
@@ -317,9 +329,29 @@
             "src": "/marketing/portsmouth/frames/meanDepth/irene_t055.webp"
           },
           {
+            "timeIndex": 55,
+            "leadHours": 14.0,
+            "src": "/marketing/portsmouth/frames/meanDepth/irene_t056.webp"
+          },
+          {
+            "timeIndex": 56,
+            "leadHours": 14.25,
+            "src": "/marketing/portsmouth/frames/meanDepth/irene_t057.webp"
+          },
+          {
             "timeIndex": 57,
             "leadHours": 14.5,
             "src": "/marketing/portsmouth/frames/meanDepth/irene_t058.webp"
+          },
+          {
+            "timeIndex": 58,
+            "leadHours": 14.75,
+            "src": "/marketing/portsmouth/frames/meanDepth/irene_t059.webp"
+          },
+          {
+            "timeIndex": 59,
+            "leadHours": 15.0,
+            "src": "/marketing/portsmouth/frames/meanDepth/irene_t060.webp"
           },
           {
             "timeIndex": 60,
@@ -327,9 +359,29 @@
             "src": "/marketing/portsmouth/frames/meanDepth/irene_t061.webp"
           },
           {
+            "timeIndex": 61,
+            "leadHours": 15.5,
+            "src": "/marketing/portsmouth/frames/meanDepth/irene_t062.webp"
+          },
+          {
+            "timeIndex": 62,
+            "leadHours": 15.75,
+            "src": "/marketing/portsmouth/frames/meanDepth/irene_t063.webp"
+          },
+          {
             "timeIndex": 63,
             "leadHours": 16.0,
             "src": "/marketing/portsmouth/frames/meanDepth/irene_t064.webp"
+          },
+          {
+            "timeIndex": 64,
+            "leadHours": 16.25,
+            "src": "/marketing/portsmouth/frames/meanDepth/irene_t065.webp"
+          },
+          {
+            "timeIndex": 65,
+            "leadHours": 16.5,
+            "src": "/marketing/portsmouth/frames/meanDepth/irene_t066.webp"
           },
           {
             "timeIndex": 66,
@@ -337,9 +389,29 @@
             "src": "/marketing/portsmouth/frames/meanDepth/irene_t067.webp"
           },
           {
+            "timeIndex": 67,
+            "leadHours": 17.0,
+            "src": "/marketing/portsmouth/frames/meanDepth/irene_t068.webp"
+          },
+          {
+            "timeIndex": 68,
+            "leadHours": 17.25,
+            "src": "/marketing/portsmouth/frames/meanDepth/irene_t069.webp"
+          },
+          {
             "timeIndex": 69,
             "leadHours": 17.5,
             "src": "/marketing/portsmouth/frames/meanDepth/irene_t070.webp"
+          },
+          {
+            "timeIndex": 70,
+            "leadHours": 17.75,
+            "src": "/marketing/portsmouth/frames/meanDepth/irene_t071.webp"
+          },
+          {
+            "timeIndex": 71,
+            "leadHours": 18.0,
+            "src": "/marketing/portsmouth/frames/meanDepth/irene_t072.webp"
           },
           {
             "timeIndex": 72,
@@ -347,9 +419,29 @@
             "src": "/marketing/portsmouth/frames/meanDepth/irene_t073.webp"
           },
           {
+            "timeIndex": 73,
+            "leadHours": 18.5,
+            "src": "/marketing/portsmouth/frames/meanDepth/irene_t074.webp"
+          },
+          {
+            "timeIndex": 74,
+            "leadHours": 18.75,
+            "src": "/marketing/portsmouth/frames/meanDepth/irene_t075.webp"
+          },
+          {
             "timeIndex": 75,
             "leadHours": 19.0,
             "src": "/marketing/portsmouth/frames/meanDepth/irene_t076.webp"
+          },
+          {
+            "timeIndex": 76,
+            "leadHours": 19.25,
+            "src": "/marketing/portsmouth/frames/meanDepth/irene_t077.webp"
+          },
+          {
+            "timeIndex": 77,
+            "leadHours": 19.5,
+            "src": "/marketing/portsmouth/frames/meanDepth/irene_t078.webp"
           },
           {
             "timeIndex": 78,
@@ -357,9 +449,29 @@
             "src": "/marketing/portsmouth/frames/meanDepth/irene_t079.webp"
           },
           {
+            "timeIndex": 79,
+            "leadHours": 20.0,
+            "src": "/marketing/portsmouth/frames/meanDepth/irene_t080.webp"
+          },
+          {
+            "timeIndex": 80,
+            "leadHours": 20.25,
+            "src": "/marketing/portsmouth/frames/meanDepth/irene_t081.webp"
+          },
+          {
             "timeIndex": 81,
             "leadHours": 20.5,
             "src": "/marketing/portsmouth/frames/meanDepth/irene_t082.webp"
+          },
+          {
+            "timeIndex": 82,
+            "leadHours": 20.75,
+            "src": "/marketing/portsmouth/frames/meanDepth/irene_t083.webp"
+          },
+          {
+            "timeIndex": 83,
+            "leadHours": 21.0,
+            "src": "/marketing/portsmouth/frames/meanDepth/irene_t084.webp"
           },
           {
             "timeIndex": 84,
@@ -367,9 +479,29 @@
             "src": "/marketing/portsmouth/frames/meanDepth/irene_t085.webp"
           },
           {
+            "timeIndex": 85,
+            "leadHours": 21.5,
+            "src": "/marketing/portsmouth/frames/meanDepth/irene_t086.webp"
+          },
+          {
+            "timeIndex": 86,
+            "leadHours": 21.75,
+            "src": "/marketing/portsmouth/frames/meanDepth/irene_t087.webp"
+          },
+          {
             "timeIndex": 87,
             "leadHours": 22.0,
             "src": "/marketing/portsmouth/frames/meanDepth/irene_t088.webp"
+          },
+          {
+            "timeIndex": 88,
+            "leadHours": 22.25,
+            "src": "/marketing/portsmouth/frames/meanDepth/irene_t089.webp"
+          },
+          {
+            "timeIndex": 89,
+            "leadHours": 22.5,
+            "src": "/marketing/portsmouth/frames/meanDepth/irene_t090.webp"
           },
           {
             "timeIndex": 90,
@@ -377,11 +509,518 @@
             "src": "/marketing/portsmouth/frames/meanDepth/irene_t091.webp"
           },
           {
+            "timeIndex": 91,
+            "leadHours": 23.0,
+            "src": "/marketing/portsmouth/frames/meanDepth/irene_t092.webp"
+          },
+          {
+            "timeIndex": 92,
+            "leadHours": 23.25,
+            "src": "/marketing/portsmouth/frames/meanDepth/irene_t093.webp"
+          },
+          {
             "timeIndex": 93,
             "leadHours": 23.5,
             "src": "/marketing/portsmouth/frames/meanDepth/irene_t094.webp"
           }
-        ]
+        ],
+        "animation": {
+          "mp4Src": "/marketing/portsmouth/animations/irene_mean_depth.mp4",
+          "posterSrc": "/marketing/portsmouth/frames/meanDepth/irene_t001.webp",
+          "frameCount": 94,
+          "sourceFrameRate": 6,
+          "playbackFrameRate": 24,
+          "durationSeconds": 15.667,
+          "interpolation": "Adjacent rendered frames blended for playback continuity"
+        }
+      },
+      {
+        "id": "probability",
+        "label": "P(WD > 0.30 m)",
+        "displayFloor": 0.1,
+        "vmin": 0.1,
+        "vmax": 1.0,
+        "frames": [
+          {
+            "timeIndex": 0,
+            "leadHours": 0.25,
+            "src": "/marketing/portsmouth/frames/probability/irene_t001.webp"
+          },
+          {
+            "timeIndex": 1,
+            "leadHours": 0.5,
+            "src": "/marketing/portsmouth/frames/probability/irene_t002.webp"
+          },
+          {
+            "timeIndex": 2,
+            "leadHours": 0.75,
+            "src": "/marketing/portsmouth/frames/probability/irene_t003.webp"
+          },
+          {
+            "timeIndex": 3,
+            "leadHours": 1.0,
+            "src": "/marketing/portsmouth/frames/probability/irene_t004.webp"
+          },
+          {
+            "timeIndex": 4,
+            "leadHours": 1.25,
+            "src": "/marketing/portsmouth/frames/probability/irene_t005.webp"
+          },
+          {
+            "timeIndex": 5,
+            "leadHours": 1.5,
+            "src": "/marketing/portsmouth/frames/probability/irene_t006.webp"
+          },
+          {
+            "timeIndex": 6,
+            "leadHours": 1.75,
+            "src": "/marketing/portsmouth/frames/probability/irene_t007.webp"
+          },
+          {
+            "timeIndex": 7,
+            "leadHours": 2.0,
+            "src": "/marketing/portsmouth/frames/probability/irene_t008.webp"
+          },
+          {
+            "timeIndex": 8,
+            "leadHours": 2.25,
+            "src": "/marketing/portsmouth/frames/probability/irene_t009.webp"
+          },
+          {
+            "timeIndex": 9,
+            "leadHours": 2.5,
+            "src": "/marketing/portsmouth/frames/probability/irene_t010.webp"
+          },
+          {
+            "timeIndex": 10,
+            "leadHours": 2.75,
+            "src": "/marketing/portsmouth/frames/probability/irene_t011.webp"
+          },
+          {
+            "timeIndex": 11,
+            "leadHours": 3.0,
+            "src": "/marketing/portsmouth/frames/probability/irene_t012.webp"
+          },
+          {
+            "timeIndex": 12,
+            "leadHours": 3.25,
+            "src": "/marketing/portsmouth/frames/probability/irene_t013.webp"
+          },
+          {
+            "timeIndex": 13,
+            "leadHours": 3.5,
+            "src": "/marketing/portsmouth/frames/probability/irene_t014.webp"
+          },
+          {
+            "timeIndex": 14,
+            "leadHours": 3.75,
+            "src": "/marketing/portsmouth/frames/probability/irene_t015.webp"
+          },
+          {
+            "timeIndex": 15,
+            "leadHours": 4.0,
+            "src": "/marketing/portsmouth/frames/probability/irene_t016.webp"
+          },
+          {
+            "timeIndex": 16,
+            "leadHours": 4.25,
+            "src": "/marketing/portsmouth/frames/probability/irene_t017.webp"
+          },
+          {
+            "timeIndex": 17,
+            "leadHours": 4.5,
+            "src": "/marketing/portsmouth/frames/probability/irene_t018.webp"
+          },
+          {
+            "timeIndex": 18,
+            "leadHours": 4.75,
+            "src": "/marketing/portsmouth/frames/probability/irene_t019.webp"
+          },
+          {
+            "timeIndex": 19,
+            "leadHours": 5.0,
+            "src": "/marketing/portsmouth/frames/probability/irene_t020.webp"
+          },
+          {
+            "timeIndex": 20,
+            "leadHours": 5.25,
+            "src": "/marketing/portsmouth/frames/probability/irene_t021.webp"
+          },
+          {
+            "timeIndex": 21,
+            "leadHours": 5.5,
+            "src": "/marketing/portsmouth/frames/probability/irene_t022.webp"
+          },
+          {
+            "timeIndex": 22,
+            "leadHours": 5.75,
+            "src": "/marketing/portsmouth/frames/probability/irene_t023.webp"
+          },
+          {
+            "timeIndex": 23,
+            "leadHours": 6.0,
+            "src": "/marketing/portsmouth/frames/probability/irene_t024.webp"
+          },
+          {
+            "timeIndex": 24,
+            "leadHours": 6.25,
+            "src": "/marketing/portsmouth/frames/probability/irene_t025.webp"
+          },
+          {
+            "timeIndex": 25,
+            "leadHours": 6.5,
+            "src": "/marketing/portsmouth/frames/probability/irene_t026.webp"
+          },
+          {
+            "timeIndex": 26,
+            "leadHours": 6.75,
+            "src": "/marketing/portsmouth/frames/probability/irene_t027.webp"
+          },
+          {
+            "timeIndex": 27,
+            "leadHours": 7.0,
+            "src": "/marketing/portsmouth/frames/probability/irene_t028.webp"
+          },
+          {
+            "timeIndex": 28,
+            "leadHours": 7.25,
+            "src": "/marketing/portsmouth/frames/probability/irene_t029.webp"
+          },
+          {
+            "timeIndex": 29,
+            "leadHours": 7.5,
+            "src": "/marketing/portsmouth/frames/probability/irene_t030.webp"
+          },
+          {
+            "timeIndex": 30,
+            "leadHours": 7.75,
+            "src": "/marketing/portsmouth/frames/probability/irene_t031.webp"
+          },
+          {
+            "timeIndex": 31,
+            "leadHours": 8.0,
+            "src": "/marketing/portsmouth/frames/probability/irene_t032.webp"
+          },
+          {
+            "timeIndex": 32,
+            "leadHours": 8.25,
+            "src": "/marketing/portsmouth/frames/probability/irene_t033.webp"
+          },
+          {
+            "timeIndex": 33,
+            "leadHours": 8.5,
+            "src": "/marketing/portsmouth/frames/probability/irene_t034.webp"
+          },
+          {
+            "timeIndex": 34,
+            "leadHours": 8.75,
+            "src": "/marketing/portsmouth/frames/probability/irene_t035.webp"
+          },
+          {
+            "timeIndex": 35,
+            "leadHours": 9.0,
+            "src": "/marketing/portsmouth/frames/probability/irene_t036.webp"
+          },
+          {
+            "timeIndex": 36,
+            "leadHours": 9.25,
+            "src": "/marketing/portsmouth/frames/probability/irene_t037.webp"
+          },
+          {
+            "timeIndex": 37,
+            "leadHours": 9.5,
+            "src": "/marketing/portsmouth/frames/probability/irene_t038.webp"
+          },
+          {
+            "timeIndex": 38,
+            "leadHours": 9.75,
+            "src": "/marketing/portsmouth/frames/probability/irene_t039.webp"
+          },
+          {
+            "timeIndex": 39,
+            "leadHours": 10.0,
+            "src": "/marketing/portsmouth/frames/probability/irene_t040.webp"
+          },
+          {
+            "timeIndex": 40,
+            "leadHours": 10.25,
+            "src": "/marketing/portsmouth/frames/probability/irene_t041.webp"
+          },
+          {
+            "timeIndex": 41,
+            "leadHours": 10.5,
+            "src": "/marketing/portsmouth/frames/probability/irene_t042.webp"
+          },
+          {
+            "timeIndex": 42,
+            "leadHours": 10.75,
+            "src": "/marketing/portsmouth/frames/probability/irene_t043.webp"
+          },
+          {
+            "timeIndex": 43,
+            "leadHours": 11.0,
+            "src": "/marketing/portsmouth/frames/probability/irene_t044.webp"
+          },
+          {
+            "timeIndex": 44,
+            "leadHours": 11.25,
+            "src": "/marketing/portsmouth/frames/probability/irene_t045.webp"
+          },
+          {
+            "timeIndex": 45,
+            "leadHours": 11.5,
+            "src": "/marketing/portsmouth/frames/probability/irene_t046.webp"
+          },
+          {
+            "timeIndex": 46,
+            "leadHours": 11.75,
+            "src": "/marketing/portsmouth/frames/probability/irene_t047.webp"
+          },
+          {
+            "timeIndex": 47,
+            "leadHours": 12.0,
+            "src": "/marketing/portsmouth/frames/probability/irene_t048.webp"
+          },
+          {
+            "timeIndex": 48,
+            "leadHours": 12.25,
+            "src": "/marketing/portsmouth/frames/probability/irene_t049.webp"
+          },
+          {
+            "timeIndex": 49,
+            "leadHours": 12.5,
+            "src": "/marketing/portsmouth/frames/probability/irene_t050.webp"
+          },
+          {
+            "timeIndex": 50,
+            "leadHours": 12.75,
+            "src": "/marketing/portsmouth/frames/probability/irene_t051.webp"
+          },
+          {
+            "timeIndex": 51,
+            "leadHours": 13.0,
+            "src": "/marketing/portsmouth/frames/probability/irene_t052.webp"
+          },
+          {
+            "timeIndex": 52,
+            "leadHours": 13.25,
+            "src": "/marketing/portsmouth/frames/probability/irene_t053.webp"
+          },
+          {
+            "timeIndex": 53,
+            "leadHours": 13.5,
+            "src": "/marketing/portsmouth/frames/probability/irene_t054.webp"
+          },
+          {
+            "timeIndex": 54,
+            "leadHours": 13.75,
+            "src": "/marketing/portsmouth/frames/probability/irene_t055.webp"
+          },
+          {
+            "timeIndex": 55,
+            "leadHours": 14.0,
+            "src": "/marketing/portsmouth/frames/probability/irene_t056.webp"
+          },
+          {
+            "timeIndex": 56,
+            "leadHours": 14.25,
+            "src": "/marketing/portsmouth/frames/probability/irene_t057.webp"
+          },
+          {
+            "timeIndex": 57,
+            "leadHours": 14.5,
+            "src": "/marketing/portsmouth/frames/probability/irene_t058.webp"
+          },
+          {
+            "timeIndex": 58,
+            "leadHours": 14.75,
+            "src": "/marketing/portsmouth/frames/probability/irene_t059.webp"
+          },
+          {
+            "timeIndex": 59,
+            "leadHours": 15.0,
+            "src": "/marketing/portsmouth/frames/probability/irene_t060.webp"
+          },
+          {
+            "timeIndex": 60,
+            "leadHours": 15.25,
+            "src": "/marketing/portsmouth/frames/probability/irene_t061.webp"
+          },
+          {
+            "timeIndex": 61,
+            "leadHours": 15.5,
+            "src": "/marketing/portsmouth/frames/probability/irene_t062.webp"
+          },
+          {
+            "timeIndex": 62,
+            "leadHours": 15.75,
+            "src": "/marketing/portsmouth/frames/probability/irene_t063.webp"
+          },
+          {
+            "timeIndex": 63,
+            "leadHours": 16.0,
+            "src": "/marketing/portsmouth/frames/probability/irene_t064.webp"
+          },
+          {
+            "timeIndex": 64,
+            "leadHours": 16.25,
+            "src": "/marketing/portsmouth/frames/probability/irene_t065.webp"
+          },
+          {
+            "timeIndex": 65,
+            "leadHours": 16.5,
+            "src": "/marketing/portsmouth/frames/probability/irene_t066.webp"
+          },
+          {
+            "timeIndex": 66,
+            "leadHours": 16.75,
+            "src": "/marketing/portsmouth/frames/probability/irene_t067.webp"
+          },
+          {
+            "timeIndex": 67,
+            "leadHours": 17.0,
+            "src": "/marketing/portsmouth/frames/probability/irene_t068.webp"
+          },
+          {
+            "timeIndex": 68,
+            "leadHours": 17.25,
+            "src": "/marketing/portsmouth/frames/probability/irene_t069.webp"
+          },
+          {
+            "timeIndex": 69,
+            "leadHours": 17.5,
+            "src": "/marketing/portsmouth/frames/probability/irene_t070.webp"
+          },
+          {
+            "timeIndex": 70,
+            "leadHours": 17.75,
+            "src": "/marketing/portsmouth/frames/probability/irene_t071.webp"
+          },
+          {
+            "timeIndex": 71,
+            "leadHours": 18.0,
+            "src": "/marketing/portsmouth/frames/probability/irene_t072.webp"
+          },
+          {
+            "timeIndex": 72,
+            "leadHours": 18.25,
+            "src": "/marketing/portsmouth/frames/probability/irene_t073.webp"
+          },
+          {
+            "timeIndex": 73,
+            "leadHours": 18.5,
+            "src": "/marketing/portsmouth/frames/probability/irene_t074.webp"
+          },
+          {
+            "timeIndex": 74,
+            "leadHours": 18.75,
+            "src": "/marketing/portsmouth/frames/probability/irene_t075.webp"
+          },
+          {
+            "timeIndex": 75,
+            "leadHours": 19.0,
+            "src": "/marketing/portsmouth/frames/probability/irene_t076.webp"
+          },
+          {
+            "timeIndex": 76,
+            "leadHours": 19.25,
+            "src": "/marketing/portsmouth/frames/probability/irene_t077.webp"
+          },
+          {
+            "timeIndex": 77,
+            "leadHours": 19.5,
+            "src": "/marketing/portsmouth/frames/probability/irene_t078.webp"
+          },
+          {
+            "timeIndex": 78,
+            "leadHours": 19.75,
+            "src": "/marketing/portsmouth/frames/probability/irene_t079.webp"
+          },
+          {
+            "timeIndex": 79,
+            "leadHours": 20.0,
+            "src": "/marketing/portsmouth/frames/probability/irene_t080.webp"
+          },
+          {
+            "timeIndex": 80,
+            "leadHours": 20.25,
+            "src": "/marketing/portsmouth/frames/probability/irene_t081.webp"
+          },
+          {
+            "timeIndex": 81,
+            "leadHours": 20.5,
+            "src": "/marketing/portsmouth/frames/probability/irene_t082.webp"
+          },
+          {
+            "timeIndex": 82,
+            "leadHours": 20.75,
+            "src": "/marketing/portsmouth/frames/probability/irene_t083.webp"
+          },
+          {
+            "timeIndex": 83,
+            "leadHours": 21.0,
+            "src": "/marketing/portsmouth/frames/probability/irene_t084.webp"
+          },
+          {
+            "timeIndex": 84,
+            "leadHours": 21.25,
+            "src": "/marketing/portsmouth/frames/probability/irene_t085.webp"
+          },
+          {
+            "timeIndex": 85,
+            "leadHours": 21.5,
+            "src": "/marketing/portsmouth/frames/probability/irene_t086.webp"
+          },
+          {
+            "timeIndex": 86,
+            "leadHours": 21.75,
+            "src": "/marketing/portsmouth/frames/probability/irene_t087.webp"
+          },
+          {
+            "timeIndex": 87,
+            "leadHours": 22.0,
+            "src": "/marketing/portsmouth/frames/probability/irene_t088.webp"
+          },
+          {
+            "timeIndex": 88,
+            "leadHours": 22.25,
+            "src": "/marketing/portsmouth/frames/probability/irene_t089.webp"
+          },
+          {
+            "timeIndex": 89,
+            "leadHours": 22.5,
+            "src": "/marketing/portsmouth/frames/probability/irene_t090.webp"
+          },
+          {
+            "timeIndex": 90,
+            "leadHours": 22.75,
+            "src": "/marketing/portsmouth/frames/probability/irene_t091.webp"
+          },
+          {
+            "timeIndex": 91,
+            "leadHours": 23.0,
+            "src": "/marketing/portsmouth/frames/probability/irene_t092.webp"
+          },
+          {
+            "timeIndex": 92,
+            "leadHours": 23.25,
+            "src": "/marketing/portsmouth/frames/probability/irene_t093.webp"
+          },
+          {
+            "timeIndex": 93,
+            "leadHours": 23.5,
+            "src": "/marketing/portsmouth/frames/probability/irene_t094.webp"
+          }
+        ],
+        "animation": {
+          "mp4Src": "/marketing/portsmouth/animations/irene_probability.mp4",
+          "posterSrc": "/marketing/portsmouth/frames/probability/irene_t001.webp",
+          "frameCount": 94,
+          "sourceFrameRate": 6,
+          "playbackFrameRate": 24,
+          "durationSeconds": 15.667,
+          "interpolation": "Adjacent rendered frames blended for playback continuity"
+        }
       },
       {
         "id": "intervalWidth",
@@ -396,9 +1035,29 @@
             "src": "/marketing/portsmouth/frames/intervalWidth/irene_t001.webp"
           },
           {
+            "timeIndex": 1,
+            "leadHours": 0.5,
+            "src": "/marketing/portsmouth/frames/intervalWidth/irene_t002.webp"
+          },
+          {
+            "timeIndex": 2,
+            "leadHours": 0.75,
+            "src": "/marketing/portsmouth/frames/intervalWidth/irene_t003.webp"
+          },
+          {
             "timeIndex": 3,
             "leadHours": 1.0,
             "src": "/marketing/portsmouth/frames/intervalWidth/irene_t004.webp"
+          },
+          {
+            "timeIndex": 4,
+            "leadHours": 1.25,
+            "src": "/marketing/portsmouth/frames/intervalWidth/irene_t005.webp"
+          },
+          {
+            "timeIndex": 5,
+            "leadHours": 1.5,
+            "src": "/marketing/portsmouth/frames/intervalWidth/irene_t006.webp"
           },
           {
             "timeIndex": 6,
@@ -406,9 +1065,29 @@
             "src": "/marketing/portsmouth/frames/intervalWidth/irene_t007.webp"
           },
           {
+            "timeIndex": 7,
+            "leadHours": 2.0,
+            "src": "/marketing/portsmouth/frames/intervalWidth/irene_t008.webp"
+          },
+          {
+            "timeIndex": 8,
+            "leadHours": 2.25,
+            "src": "/marketing/portsmouth/frames/intervalWidth/irene_t009.webp"
+          },
+          {
             "timeIndex": 9,
             "leadHours": 2.5,
             "src": "/marketing/portsmouth/frames/intervalWidth/irene_t010.webp"
+          },
+          {
+            "timeIndex": 10,
+            "leadHours": 2.75,
+            "src": "/marketing/portsmouth/frames/intervalWidth/irene_t011.webp"
+          },
+          {
+            "timeIndex": 11,
+            "leadHours": 3.0,
+            "src": "/marketing/portsmouth/frames/intervalWidth/irene_t012.webp"
           },
           {
             "timeIndex": 12,
@@ -416,9 +1095,29 @@
             "src": "/marketing/portsmouth/frames/intervalWidth/irene_t013.webp"
           },
           {
+            "timeIndex": 13,
+            "leadHours": 3.5,
+            "src": "/marketing/portsmouth/frames/intervalWidth/irene_t014.webp"
+          },
+          {
+            "timeIndex": 14,
+            "leadHours": 3.75,
+            "src": "/marketing/portsmouth/frames/intervalWidth/irene_t015.webp"
+          },
+          {
             "timeIndex": 15,
             "leadHours": 4.0,
             "src": "/marketing/portsmouth/frames/intervalWidth/irene_t016.webp"
+          },
+          {
+            "timeIndex": 16,
+            "leadHours": 4.25,
+            "src": "/marketing/portsmouth/frames/intervalWidth/irene_t017.webp"
+          },
+          {
+            "timeIndex": 17,
+            "leadHours": 4.5,
+            "src": "/marketing/portsmouth/frames/intervalWidth/irene_t018.webp"
           },
           {
             "timeIndex": 18,
@@ -426,9 +1125,29 @@
             "src": "/marketing/portsmouth/frames/intervalWidth/irene_t019.webp"
           },
           {
+            "timeIndex": 19,
+            "leadHours": 5.0,
+            "src": "/marketing/portsmouth/frames/intervalWidth/irene_t020.webp"
+          },
+          {
+            "timeIndex": 20,
+            "leadHours": 5.25,
+            "src": "/marketing/portsmouth/frames/intervalWidth/irene_t021.webp"
+          },
+          {
             "timeIndex": 21,
             "leadHours": 5.5,
             "src": "/marketing/portsmouth/frames/intervalWidth/irene_t022.webp"
+          },
+          {
+            "timeIndex": 22,
+            "leadHours": 5.75,
+            "src": "/marketing/portsmouth/frames/intervalWidth/irene_t023.webp"
+          },
+          {
+            "timeIndex": 23,
+            "leadHours": 6.0,
+            "src": "/marketing/portsmouth/frames/intervalWidth/irene_t024.webp"
           },
           {
             "timeIndex": 24,
@@ -436,9 +1155,29 @@
             "src": "/marketing/portsmouth/frames/intervalWidth/irene_t025.webp"
           },
           {
+            "timeIndex": 25,
+            "leadHours": 6.5,
+            "src": "/marketing/portsmouth/frames/intervalWidth/irene_t026.webp"
+          },
+          {
+            "timeIndex": 26,
+            "leadHours": 6.75,
+            "src": "/marketing/portsmouth/frames/intervalWidth/irene_t027.webp"
+          },
+          {
             "timeIndex": 27,
             "leadHours": 7.0,
             "src": "/marketing/portsmouth/frames/intervalWidth/irene_t028.webp"
+          },
+          {
+            "timeIndex": 28,
+            "leadHours": 7.25,
+            "src": "/marketing/portsmouth/frames/intervalWidth/irene_t029.webp"
+          },
+          {
+            "timeIndex": 29,
+            "leadHours": 7.5,
+            "src": "/marketing/portsmouth/frames/intervalWidth/irene_t030.webp"
           },
           {
             "timeIndex": 30,
@@ -446,9 +1185,29 @@
             "src": "/marketing/portsmouth/frames/intervalWidth/irene_t031.webp"
           },
           {
+            "timeIndex": 31,
+            "leadHours": 8.0,
+            "src": "/marketing/portsmouth/frames/intervalWidth/irene_t032.webp"
+          },
+          {
+            "timeIndex": 32,
+            "leadHours": 8.25,
+            "src": "/marketing/portsmouth/frames/intervalWidth/irene_t033.webp"
+          },
+          {
             "timeIndex": 33,
             "leadHours": 8.5,
             "src": "/marketing/portsmouth/frames/intervalWidth/irene_t034.webp"
+          },
+          {
+            "timeIndex": 34,
+            "leadHours": 8.75,
+            "src": "/marketing/portsmouth/frames/intervalWidth/irene_t035.webp"
+          },
+          {
+            "timeIndex": 35,
+            "leadHours": 9.0,
+            "src": "/marketing/portsmouth/frames/intervalWidth/irene_t036.webp"
           },
           {
             "timeIndex": 36,
@@ -456,9 +1215,29 @@
             "src": "/marketing/portsmouth/frames/intervalWidth/irene_t037.webp"
           },
           {
+            "timeIndex": 37,
+            "leadHours": 9.5,
+            "src": "/marketing/portsmouth/frames/intervalWidth/irene_t038.webp"
+          },
+          {
+            "timeIndex": 38,
+            "leadHours": 9.75,
+            "src": "/marketing/portsmouth/frames/intervalWidth/irene_t039.webp"
+          },
+          {
             "timeIndex": 39,
             "leadHours": 10.0,
             "src": "/marketing/portsmouth/frames/intervalWidth/irene_t040.webp"
+          },
+          {
+            "timeIndex": 40,
+            "leadHours": 10.25,
+            "src": "/marketing/portsmouth/frames/intervalWidth/irene_t041.webp"
+          },
+          {
+            "timeIndex": 41,
+            "leadHours": 10.5,
+            "src": "/marketing/portsmouth/frames/intervalWidth/irene_t042.webp"
           },
           {
             "timeIndex": 42,
@@ -466,9 +1245,29 @@
             "src": "/marketing/portsmouth/frames/intervalWidth/irene_t043.webp"
           },
           {
+            "timeIndex": 43,
+            "leadHours": 11.0,
+            "src": "/marketing/portsmouth/frames/intervalWidth/irene_t044.webp"
+          },
+          {
+            "timeIndex": 44,
+            "leadHours": 11.25,
+            "src": "/marketing/portsmouth/frames/intervalWidth/irene_t045.webp"
+          },
+          {
+            "timeIndex": 45,
+            "leadHours": 11.5,
+            "src": "/marketing/portsmouth/frames/intervalWidth/irene_t046.webp"
+          },
+          {
             "timeIndex": 46,
             "leadHours": 11.75,
             "src": "/marketing/portsmouth/frames/intervalWidth/irene_t047.webp"
+          },
+          {
+            "timeIndex": 47,
+            "leadHours": 12.0,
+            "src": "/marketing/portsmouth/frames/intervalWidth/irene_t048.webp"
           },
           {
             "timeIndex": 48,
@@ -476,9 +1275,29 @@
             "src": "/marketing/portsmouth/frames/intervalWidth/irene_t049.webp"
           },
           {
+            "timeIndex": 49,
+            "leadHours": 12.5,
+            "src": "/marketing/portsmouth/frames/intervalWidth/irene_t050.webp"
+          },
+          {
+            "timeIndex": 50,
+            "leadHours": 12.75,
+            "src": "/marketing/portsmouth/frames/intervalWidth/irene_t051.webp"
+          },
+          {
             "timeIndex": 51,
             "leadHours": 13.0,
             "src": "/marketing/portsmouth/frames/intervalWidth/irene_t052.webp"
+          },
+          {
+            "timeIndex": 52,
+            "leadHours": 13.25,
+            "src": "/marketing/portsmouth/frames/intervalWidth/irene_t053.webp"
+          },
+          {
+            "timeIndex": 53,
+            "leadHours": 13.5,
+            "src": "/marketing/portsmouth/frames/intervalWidth/irene_t054.webp"
           },
           {
             "timeIndex": 54,
@@ -486,9 +1305,29 @@
             "src": "/marketing/portsmouth/frames/intervalWidth/irene_t055.webp"
           },
           {
+            "timeIndex": 55,
+            "leadHours": 14.0,
+            "src": "/marketing/portsmouth/frames/intervalWidth/irene_t056.webp"
+          },
+          {
+            "timeIndex": 56,
+            "leadHours": 14.25,
+            "src": "/marketing/portsmouth/frames/intervalWidth/irene_t057.webp"
+          },
+          {
             "timeIndex": 57,
             "leadHours": 14.5,
             "src": "/marketing/portsmouth/frames/intervalWidth/irene_t058.webp"
+          },
+          {
+            "timeIndex": 58,
+            "leadHours": 14.75,
+            "src": "/marketing/portsmouth/frames/intervalWidth/irene_t059.webp"
+          },
+          {
+            "timeIndex": 59,
+            "leadHours": 15.0,
+            "src": "/marketing/portsmouth/frames/intervalWidth/irene_t060.webp"
           },
           {
             "timeIndex": 60,
@@ -496,9 +1335,29 @@
             "src": "/marketing/portsmouth/frames/intervalWidth/irene_t061.webp"
           },
           {
+            "timeIndex": 61,
+            "leadHours": 15.5,
+            "src": "/marketing/portsmouth/frames/intervalWidth/irene_t062.webp"
+          },
+          {
+            "timeIndex": 62,
+            "leadHours": 15.75,
+            "src": "/marketing/portsmouth/frames/intervalWidth/irene_t063.webp"
+          },
+          {
             "timeIndex": 63,
             "leadHours": 16.0,
             "src": "/marketing/portsmouth/frames/intervalWidth/irene_t064.webp"
+          },
+          {
+            "timeIndex": 64,
+            "leadHours": 16.25,
+            "src": "/marketing/portsmouth/frames/intervalWidth/irene_t065.webp"
+          },
+          {
+            "timeIndex": 65,
+            "leadHours": 16.5,
+            "src": "/marketing/portsmouth/frames/intervalWidth/irene_t066.webp"
           },
           {
             "timeIndex": 66,
@@ -506,9 +1365,29 @@
             "src": "/marketing/portsmouth/frames/intervalWidth/irene_t067.webp"
           },
           {
+            "timeIndex": 67,
+            "leadHours": 17.0,
+            "src": "/marketing/portsmouth/frames/intervalWidth/irene_t068.webp"
+          },
+          {
+            "timeIndex": 68,
+            "leadHours": 17.25,
+            "src": "/marketing/portsmouth/frames/intervalWidth/irene_t069.webp"
+          },
+          {
             "timeIndex": 69,
             "leadHours": 17.5,
             "src": "/marketing/portsmouth/frames/intervalWidth/irene_t070.webp"
+          },
+          {
+            "timeIndex": 70,
+            "leadHours": 17.75,
+            "src": "/marketing/portsmouth/frames/intervalWidth/irene_t071.webp"
+          },
+          {
+            "timeIndex": 71,
+            "leadHours": 18.0,
+            "src": "/marketing/portsmouth/frames/intervalWidth/irene_t072.webp"
           },
           {
             "timeIndex": 72,
@@ -516,9 +1395,29 @@
             "src": "/marketing/portsmouth/frames/intervalWidth/irene_t073.webp"
           },
           {
+            "timeIndex": 73,
+            "leadHours": 18.5,
+            "src": "/marketing/portsmouth/frames/intervalWidth/irene_t074.webp"
+          },
+          {
+            "timeIndex": 74,
+            "leadHours": 18.75,
+            "src": "/marketing/portsmouth/frames/intervalWidth/irene_t075.webp"
+          },
+          {
             "timeIndex": 75,
             "leadHours": 19.0,
             "src": "/marketing/portsmouth/frames/intervalWidth/irene_t076.webp"
+          },
+          {
+            "timeIndex": 76,
+            "leadHours": 19.25,
+            "src": "/marketing/portsmouth/frames/intervalWidth/irene_t077.webp"
+          },
+          {
+            "timeIndex": 77,
+            "leadHours": 19.5,
+            "src": "/marketing/portsmouth/frames/intervalWidth/irene_t078.webp"
           },
           {
             "timeIndex": 78,
@@ -526,9 +1425,29 @@
             "src": "/marketing/portsmouth/frames/intervalWidth/irene_t079.webp"
           },
           {
+            "timeIndex": 79,
+            "leadHours": 20.0,
+            "src": "/marketing/portsmouth/frames/intervalWidth/irene_t080.webp"
+          },
+          {
+            "timeIndex": 80,
+            "leadHours": 20.25,
+            "src": "/marketing/portsmouth/frames/intervalWidth/irene_t081.webp"
+          },
+          {
             "timeIndex": 81,
             "leadHours": 20.5,
             "src": "/marketing/portsmouth/frames/intervalWidth/irene_t082.webp"
+          },
+          {
+            "timeIndex": 82,
+            "leadHours": 20.75,
+            "src": "/marketing/portsmouth/frames/intervalWidth/irene_t083.webp"
+          },
+          {
+            "timeIndex": 83,
+            "leadHours": 21.0,
+            "src": "/marketing/portsmouth/frames/intervalWidth/irene_t084.webp"
           },
           {
             "timeIndex": 84,
@@ -536,9 +1455,29 @@
             "src": "/marketing/portsmouth/frames/intervalWidth/irene_t085.webp"
           },
           {
+            "timeIndex": 85,
+            "leadHours": 21.5,
+            "src": "/marketing/portsmouth/frames/intervalWidth/irene_t086.webp"
+          },
+          {
+            "timeIndex": 86,
+            "leadHours": 21.75,
+            "src": "/marketing/portsmouth/frames/intervalWidth/irene_t087.webp"
+          },
+          {
             "timeIndex": 87,
             "leadHours": 22.0,
             "src": "/marketing/portsmouth/frames/intervalWidth/irene_t088.webp"
+          },
+          {
+            "timeIndex": 88,
+            "leadHours": 22.25,
+            "src": "/marketing/portsmouth/frames/intervalWidth/irene_t089.webp"
+          },
+          {
+            "timeIndex": 89,
+            "leadHours": 22.5,
+            "src": "/marketing/portsmouth/frames/intervalWidth/irene_t090.webp"
           },
           {
             "timeIndex": 90,
@@ -546,23 +1485,60 @@
             "src": "/marketing/portsmouth/frames/intervalWidth/irene_t091.webp"
           },
           {
+            "timeIndex": 91,
+            "leadHours": 23.0,
+            "src": "/marketing/portsmouth/frames/intervalWidth/irene_t092.webp"
+          },
+          {
+            "timeIndex": 92,
+            "leadHours": 23.25,
+            "src": "/marketing/portsmouth/frames/intervalWidth/irene_t093.webp"
+          },
+          {
             "timeIndex": 93,
             "leadHours": 23.5,
             "src": "/marketing/portsmouth/frames/intervalWidth/irene_t094.webp"
           }
-        ]
+        ],
+        "animation": {
+          "mp4Src": "/marketing/portsmouth/animations/irene_interval_width.mp4",
+          "posterSrc": "/marketing/portsmouth/frames/intervalWidth/irene_t001.webp",
+          "frameCount": 94,
+          "sourceFrameRate": 6,
+          "playbackFrameRate": 24,
+          "durationSeconds": 15.667,
+          "interpolation": "Adjacent rendered frames blended for playback continuity"
+        }
+      }
+    ],
+    "overviewMaps": [
+      {
+        "id": "probability",
+        "src": "/marketing/portsmouth/overview/probability.webp"
+      },
+      {
+        "id": "interval_width",
+        "src": "/marketing/portsmouth/overview/interval_width.webp"
+      },
+      {
+        "id": "arrival_time",
+        "src": "/marketing/portsmouth/overview/arrival_time.webp"
+      },
+      {
+        "id": "mean_depth",
+        "src": "/marketing/portsmouth/overview/mean_depth.webp"
       }
     ],
     "snapshot": [
       {
-        "id": "probability",
-        "label": "P(WD > 0.30 m)",
-        "src": "/marketing/portsmouth/frames/probability/irene_t067.webp"
-      },
-      {
         "id": "meanDepth",
         "label": "Calibrated mean depth",
         "src": "/marketing/portsmouth/frames/meanDepth/irene_t067.webp"
+      },
+      {
+        "id": "probability",
+        "label": "P(WD > 0.30 m)",
+        "src": "/marketing/portsmouth/frames/probability/irene_t067.webp"
       },
       {
         "id": "intervalWidth",
@@ -725,5 +1701,5 @@
     "terrainExtendsBeyondMesh": true,
     "viewportPolicy": "mesh_bounds_plus_2p5_percent"
   },
-  "researchDisclaimer": "Research only; not for emergency or operational decision use."
+  "researchDisclaimer": "Model outputs include documented validation scope, provenance, and governance requirements."
 }

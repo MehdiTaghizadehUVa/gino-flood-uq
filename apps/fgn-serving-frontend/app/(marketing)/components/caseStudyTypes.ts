@@ -10,6 +10,15 @@ export type CaseStudyProduct = {
   displayFloor: number;
   vmin: number;
   vmax: number;
+  animation: {
+    mp4Src: string;
+    posterSrc: string;
+    frameCount: number;
+    sourceFrameRate: number;
+    playbackFrameRate: number;
+    durationSeconds: number;
+    interpolation: string;
+  };
   frames: CaseStudyFrame[];
 };
 
@@ -27,6 +36,7 @@ export type CaseStudyManifest = {
     metrics: { value: string; label: string }[];
     peakAreaTimeIndex: number;
     peakDisagreementTimeIndex: number;
+    peakMeanDepthTimeIndex: number;
     posterSrc: string;
     hero: {
       src: string;

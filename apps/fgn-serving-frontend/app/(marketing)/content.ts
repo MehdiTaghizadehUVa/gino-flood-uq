@@ -1,8 +1,5 @@
 import evidence from "./evidence.json";
 
-export const RESEARCH_DISCLAIMER =
-  "Research only; not for emergency or operational decision use.";
-
 export const PILOT_MAILTO =
   "mailto:jrj6wm@virginia.edu?subject=FloodUQ%20managed%20deployment%20pilot";
 
@@ -90,26 +87,26 @@ export const decisionQuestions: readonly NumberedContentItem[] = [
 
 export const serviceOutcomes = [
   {
-    src: "/marketing/exceedance-probability.webp",
+    src: "/marketing/portsmouth/overview/probability.webp",
     alt: "Calibrated coastal water-depth exceedance probability map from the Portsmouth deployment",
-    width: 1400,
-    height: 1180,
+    width: 1115,
+    height: 929,
     label: "Probability and extent",
     body: "See where a study threshold may be exceeded and how the expected affected area evolves through time."
   },
   {
-    src: "/marketing/uncertainty-width.webp",
+    src: "/marketing/portsmouth/overview/interval_width.webp",
     alt: "Spatial uncertainty-width map from the Portsmouth deployment",
-    width: 1400,
-    height: 1176,
+    width: 1115,
+    height: 929,
     label: "Confidence and disagreement",
     body: "Locate where forecast members agree, where spread concentrates, and which uncertainty source dominates."
   },
   {
-    src: "/marketing/arrival-time.webp",
+    src: "/marketing/portsmouth/overview/arrival_time.webp",
     alt: "Forecast arrival-time map from the Portsmouth deployment",
-    width: 1400,
-    height: 1180,
+    width: 1115,
+    height: 922,
     label: "Timing and persistence",
     body: "Translate spatial forecasts into arrival, peak, and wet-duration products for scenario review."
   }
@@ -218,7 +215,7 @@ export const monitoringLoop: readonly NumberedContentItem[] = [
 ] as const;
 
 export const deploymentSteps: readonly NumberedContentItem[] = [
-  { number: "01", title: "Define the domain", body: "Agree on terrain, mesh, boundary forcings, study thresholds, forecast horizon, and intended research use." },
+  { number: "01", title: "Define the domain", body: "Agree on terrain, mesh, boundary forcings, decision thresholds, forecast horizon, and intended planning workflow." },
   { number: "02", title: "Prepare reference evidence", body: "Assemble historical or designed events and aligned high-fidelity simulations for training and evaluation." },
   { number: "03", title: "Train the ensemble", body: "Fit the domain-specific neural-operator ensemble and a forcing-conditioned initial-state library." },
   { number: "04", title: "Calibrate and validate", body: "Evaluate held-out skill, fit threshold-specific calibration, and document deployment limits." },

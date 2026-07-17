@@ -17,7 +17,7 @@ request() {
 marketing_status="$(request / "${tmp_dir}/marketing.html")"
 test "${marketing_status}" = "200"
 grep -q 'data-flooduq-marketing' "${tmp_dir}/marketing.html"
-grep -q 'Research only; not for emergency or operational decision use.' "${tmp_dir}/marketing.html"
+grep -q 'Know where flooding may go.' "${tmp_dir}/marketing.html"
 
 demo_status="$(request /demo "${tmp_dir}/demo.html")"
 test "${demo_status}" = "200"
