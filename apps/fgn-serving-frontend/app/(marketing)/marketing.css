@@ -2380,14 +2380,14 @@ body[data-reveal-ready="true"] [data-reveal]:not([data-reveal-visible="true"]) {
     opacity: 1;
     transform: translate3d(0, 0, 0);
     transition:
-      opacity 620ms cubic-bezier(0.22, 1, 0.36, 1),
-      transform 720ms cubic-bezier(0.22, 1, 0.36, 1);
+      opacity 760ms cubic-bezier(0.22, 1, 0.36, 1),
+      transform 900ms cubic-bezier(0.22, 1, 0.36, 1);
     transition-delay: var(--mobile-reveal-delay, 0ms);
   }
 
   body[data-reveal-ready="true"] [data-mobile-reveal]:not([data-mobile-reveal-visible="true"]) {
     opacity: 0;
-    transform: translate3d(0, 24px, 0);
+    transform: translate3d(0, 44px, 0) scale(0.985);
   }
 
   body[data-reveal-ready="true"] [data-mobile-reveal-visible="true"] {

@@ -57,6 +57,8 @@ test("calibration evidence points appear before the fitted mapping line", () => 
 test("mobile narrative items reveal as they enter the viewport", () => {
   assert.match(scrollRevealSource, /data-mobile-reveal/);
   assert.match(scrollRevealSource, /max-width:\s*899px/);
+  assert.match(scrollRevealSource, /MOBILE_ITEM_ROOT_MARGIN\s*=\s*"0px 0px -28% 0px"/);
   assert.match(marketingCss, /\[data-mobile-reveal\]/);
   assert.match(marketingCss, /\[data-mobile-reveal-visible="true"\]/);
+  assert.match(marketingCss, /translate3d\(0, 44px, 0\) scale\(0\.985\)/);
 });
