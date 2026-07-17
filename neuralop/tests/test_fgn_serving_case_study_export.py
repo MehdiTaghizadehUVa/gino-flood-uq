@@ -18,6 +18,7 @@ from neuralop.flood.serving.case_study_export import (
 from neuralop.flood.serving.case_study_rendering import (
     TerrainContext,
     probability_cmap,
+    render_location_panel_svg,
     render_spatial_webp,
     render_validation_trajectory_svg,
 )
@@ -315,3 +316,60 @@ def test_generated_svg_has_no_trailing_whitespace(tmp_path):
     )
 
     assert all(line == line.rstrip() for line in output.read_text(encoding="utf-8").splitlines())
+
+
+def test_marketing_renderers_leave_visual_titles_to_the_site(tmp_path, monkeypatch):
+    import matplotlib.axes
+
+    embedded_titles: list[str] = []
+
+    def record_title(_axis, label, *args, **kwargs):
+        embedded_titles.append(str(label))
+
+    monkeypatch.setattr(matplotlib.axes.Axes, "set_title", record_title)
+    terrain = TerrainContext(
+        image=np.zeros((30, 40), dtype=np.float32),
+        extent=(0.0, 10.0, 0.0, 8.0),
+        source_crs="EPSG:32618",
+        target_crs="EPSG:32618",
+        source_path="synthetic-dem.tif",
+        viewport=(0.0, 10.0, 0.0, 8.0),
+    )
+    geometry = np.asarray(
+        [[2.0, 2.0], [8.0, 2.0], [2.0, 6.0], [8.0, 6.0]],
+        dtype=np.float64,
+    )
+    lead = np.asarray([0.0, 0.25, 0.50], dtype=np.float64)
+
+    render_spatial_webp(
+        values=np.asarray([0.2, 0.4, 0.6, 0.8], dtype=np.float64),
+        geometry_xy=geometry,
+        terrain=terrain,
+        output_path=tmp_path / "map.webp",
+        title="This title belongs in HTML",
+        colorbar_label="Probability",
+        cmap=probability_cmap(),
+        vmin=0.10,
+        vmax=1.0,
+        display_floor=0.10,
+    )
+    render_location_panel_svg(
+        lead_time_hours=lead,
+        members_wd=np.asarray([[0.0, 0.2, 0.4], [0.0, 0.3, 0.5]], dtype=np.float64),
+        exceedance_probability=np.asarray([0.0, 0.5, 1.0], dtype=np.float64),
+        threshold_m=0.30,
+        output_path=tmp_path / "location.svg",
+        location_label="A",
+    )
+    render_validation_trajectory_svg(
+        lead_time_hours=lead,
+        p05=np.asarray([0.0, 0.1, 0.2]),
+        p50=np.asarray([0.0, 0.2, 0.3]),
+        p95=np.asarray([0.0, 0.3, 0.4]),
+        reference=np.asarray([0.0, 0.18, 0.28]),
+        threshold_m=0.10,
+        output_path=tmp_path / "trajectory.svg",
+        event_label="Synthetic event",
+    )
+
+    assert embedded_titles == []

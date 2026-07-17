@@ -547,13 +547,14 @@ def _render_flagship(
                 geometry_xy=run.geometry_xy,
                 terrain=terrain,
                 output_path=frame_path,
-                title=f"Irene 2011 · {spec['label']} · lead {float(lead[time_idx]):.2f} h",
+                title="",
                 colorbar_label=spec["colorbar"],
                 cmap=spec["cmap"],
                 vmin=float(spec["vmin"]),
                 vmax=float(spec["vmax"]),
                 display_floor=float(spec["floor"]),
                 quality=76,
+                show_title=False,
             )
             frames.append(
                 {
@@ -598,7 +599,6 @@ def _render_flagship(
         (
             "probability",
             probability[disagreement_idx],
-            f"Calibrated P(WD > 0.30 m) · lead {float(lead[disagreement_idx]):.2f} h",
             "Calibrated probability",
             probability_cmap(),
             0.10,
@@ -608,7 +608,6 @@ def _render_flagship(
         (
             "interval_width",
             interval_width[disagreement_idx],
-            f"90% interval width · lead {float(lead[disagreement_idx]):.2f} h",
             "p95–p05 width (m)",
             uncertainty_cmap(),
             0.08,
@@ -618,7 +617,6 @@ def _render_flagship(
         (
             "arrival_time",
             arrival_time,
-            "Arrival time at WD > 0.30 m",
             "First-exceedance lead (h)",
             arrival_cmap(),
             arrival_vmin,
@@ -628,7 +626,6 @@ def _render_flagship(
         (
             "mean_depth",
             mean_depth[disagreement_idx],
-            f"Calibrated mean depth · lead {float(lead[disagreement_idx]):.2f} h",
             "Mean WD (m)",
             depth_cmap(),
             0.05,
@@ -637,20 +634,21 @@ def _render_flagship(
         ),
     )
     overview_maps: list[dict[str, Any]] = []
-    for map_id, values, title, colorbar, cmap, vmin, vmax, floor in overview_specs:
+    for map_id, values, colorbar, cmap, vmin, vmax, floor in overview_specs:
         map_path = overview_dir / f"{map_id}.webp"
         render_spatial_webp(
             values=values,
             geometry_xy=run.geometry_xy,
             terrain=terrain,
             output_path=map_path,
-            title=title,
+            title="",
             colorbar_label=colorbar,
             cmap=cmap,
             vmin=float(vmin),
             vmax=float(vmax),
             display_floor=float(floor),
             quality=80,
+            show_title=False,
         )
         overview_maps.append(
             {"id": map_id, "src": _relative_asset(config.public_prefix, output_dir, map_path)}
@@ -742,7 +740,7 @@ def _render_flagship(
             geometry_xy=run.geometry_xy,
             terrain=terrain,
             output_path=map_path,
-            title=f"Location {label} · {interpretation}",
+            title="",
             colorbar_label="Calibrated P(WD > 0.30 m)",
             cmap=probability_cmap(),
             vmin=0.10,
@@ -750,6 +748,7 @@ def _render_flagship(
             display_floor=0.10,
             markers=selected_markers,
             quality=78,
+            show_title=False,
         )
         panel_path = output_dir / "locations" / f"location_{label.lower()}_evidence.svg"
         render_location_panel_svg(
@@ -795,13 +794,14 @@ def _render_flagship(
             geometry_xy=run.geometry_xy,
             terrain=terrain,
             output_path=map_path,
-            title=f"{label} · lead {float(lead[disagreement_idx]):.2f} h",
+            title="",
             colorbar_label="Standard deviation (m)",
             cmap=uncertainty_cmap(),
             vmin=0.02,
             vmax=shared_vmax,
             display_floor=0.02,
             quality=80,
+            show_title=False,
         )
         decomposition_maps.append(
             {"id": map_id, "label": label, "src": _relative_asset(config.public_prefix, output_dir, map_path)}
@@ -955,7 +955,7 @@ def _render_historical_validation(
             geometry_xy=run.geometry_xy,
             terrain=terrain,
             output_path=prob_path,
-            title=f"{item['label']} · ensemble P(max WD > 0.10 m)",
+            title="",
             colorbar_label="Probability",
             cmap=probability_cmap(),
             vmin=0.10,
@@ -964,13 +964,14 @@ def _render_historical_validation(
             reference_values=ref_max,
             reference_threshold=0.10,
             quality=80,
+            show_title=False,
         )
         render_spatial_webp(
             values=item["interval_width"],
             geometry_xy=run.geometry_xy,
             terrain=terrain,
             output_path=width_path,
-            title=f"{item['label']} · maximum 90% interval width",
+            title="",
             colorbar_label="p95–p05 width (m)",
             cmap=uncertainty_cmap(),
             vmin=0.08,
@@ -979,6 +980,7 @@ def _render_historical_validation(
             reference_values=ref_max,
             reference_threshold=0.10,
             quality=80,
+            show_title=False,
         )
         reference_fraction = np.asarray(reference["ref_frac"][ref_idx], dtype=np.float64)
         if reference_fraction.shape != run.lead_time_hours.shape:
@@ -1139,7 +1141,7 @@ def export_portsmouth_case_study(config: CaseStudyExportConfig) -> Path:
         "researchDisclaimer": "Model outputs include documented validation scope, provenance, and governance requirements.",
     }
     manifest_path = output_dir / "manifest.json"
-    manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
     return manifest_path
 
 

@@ -27,8 +27,10 @@ docker run --rm \
 The interactive evidence player exports every physical forecast timestep. The
 homepage overview maps, interactive frames, location evidence, decomposition,
 and historical validation maps all use the same node-interpolated spatial
-renderer. The export also invalidates prior videos, writes a separate numbered
-hero sequence, and registers complete probability, mean-depth, and interval-width
+renderer. Exported media contains axes, units, legends, and color scales but no
+embedded titles; the website supplies semantic titles and explanatory captions.
+The export also invalidates prior videos, writes a separate numbered hero
+sequence, and registers complete probability, mean-depth, and interval-width
 animations. Encode all video assets immediately after the scientific export:
 
 ```bash

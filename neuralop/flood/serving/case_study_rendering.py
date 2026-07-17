@@ -190,10 +190,10 @@ def render_spatial_webp(
     reference_threshold: float | None = None,
     markers: Sequence[tuple[float, float, str, bool]] = (),
     quality: int = 72,
-    show_title: bool = True,
+    show_title: bool = False,
     show_colorbar: bool = True,
 ) -> Path:
-    """Render a full-DEM map with a threshold-transparent mesh overlay."""
+    """Render a title-free full-DEM map for an HTML-captioned figure."""
     import matplotlib
 
     matplotlib.use("Agg", force=True)
@@ -228,15 +228,10 @@ def render_spatial_webp(
     aspect = max((viewport[1] - viewport[0]) / max(viewport[3] - viewport[2], 1.0e-12), 0.1)
     fig_width = 8.6
     fig_height = max(5.7, fig_width / aspect + 0.75)
-    with matplotlib.rc_context(
-        {
-            "font.family": "DejaVu Sans",
-            "font.size": 9,
-            "axes.titlesize": 11,
-            "axes.titleweight": "bold",
-        }
-    ):
-        decorated = bool(show_title or show_colorbar)
+    # Keep the legacy arguments compatible, but let the website own all titles.
+    _ = (title, show_title)
+    with matplotlib.rc_context({"font.family": "DejaVu Sans", "font.size": 9}):
+        decorated = bool(show_colorbar)
         if decorated:
             fig, ax = plt.subplots(
                 figsize=(fig_width, fig_height),
@@ -316,8 +311,6 @@ def render_spatial_webp(
             ax.set_ylim(viewport[2], viewport[3])
             ax.set_aspect("equal")
             ax.axis("off")
-            if show_title:
-                ax.set_title(title, loc="left", color="#102027", pad=8)
             if show_colorbar:
                 colorbar = fig.colorbar(artist, ax=ax, fraction=0.034, pad=0.018)
                 colorbar.set_label(colorbar_label, color="#102027", fontsize=8.5)
@@ -354,6 +347,7 @@ def render_location_panel_svg(
 
     output = Path(output_path)
     output.parent.mkdir(parents=True, exist_ok=True)
+    _ = location_label
     with matplotlib.rc_context({"font.family": "DejaVu Sans", "font.size": 8.5}):
         fig, axes = plt.subplots(1, 3, figsize=(11.4, 3.2), dpi=150, facecolor="#FFFFFF")
         try:
@@ -361,7 +355,6 @@ def render_location_panel_svg(
                 axes[0].plot(lead, member, color="#2A7189", alpha=0.055, linewidth=0.55)
             axes[0].fill_between(lead, q05, q95, color="#7FD6FF", alpha=0.34, linewidth=0)
             axes[0].plot(lead, q50, color="#075E75", linewidth=1.65)
-            axes[0].set_title(f"Location {location_label} · 60-member depth fan", loc="left")
             axes[0].set_ylabel("Water depth (m)")
             axes[0].set_xlabel("Lead time (h)")
 
@@ -369,7 +362,6 @@ def render_location_panel_svg(
             axes[1].fill_between(lead, 0.0, probability, color="#7BE4F0", alpha=0.24)
             axes[1].axhline(0.5, color="#6B7280", linewidth=0.8, linestyle="--")
             axes[1].set_ylim(0.0, 1.0)
-            axes[1].set_title(f"P(WD > {threshold_m:.2f} m)", loc="left")
             axes[1].set_ylabel("Calibrated probability")
             axes[1].set_xlabel("Lead time (h)")
 
@@ -378,7 +370,6 @@ def render_location_panel_svg(
                 axes[2].hist(arrivals, bins=bins, color="#7B3FC1", alpha=0.78, edgecolor="#4C168A")
             else:
                 axes[2].text(0.5, 0.5, "No member exceeds\nthe selected threshold", ha="center", va="center", transform=axes[2].transAxes)
-            axes[2].set_title("Member arrival-time distribution", loc="left")
             axes[2].set_ylabel("Members")
             axes[2].set_xlabel("First exceedance lead (h)")
 
@@ -413,6 +404,7 @@ def render_validation_trajectory_svg(
     output = Path(output_path)
     output.parent.mkdir(parents=True, exist_ok=True)
     lead = np.asarray(lead_time_hours, dtype=np.float64)
+    _ = event_label
     with matplotlib.rc_context({"font.family": "DejaVu Sans", "font.size": 9}):
         fig, ax = plt.subplots(figsize=(5.6, 3.25), dpi=150, facecolor="#FFFFFF")
         try:
@@ -423,7 +415,6 @@ def render_validation_trajectory_svg(
             ax.set_xlim(float(lead.min()), float(lead.max()))
             ax.set_ylim(0.0, min(1.0, ymax))
             ax.yaxis.set_major_formatter(mticker.PercentFormatter(1.0))
-            ax.set_title(f"{event_label} · wettable-domain extent", loc="left")
             ax.set_ylabel(f"Area fraction above {threshold_m:.2f} m")
             ax.set_xlabel("Lead time (h)")
             ax.grid(True, color="#E0E7EC", linewidth=0.6, alpha=0.8)

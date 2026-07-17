@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "caseStudyId": "portsmouth-irene-2011",
-  "generatedAt": "2026-07-17T01:33:21.996491+00:00",
+  "generatedAt": "2026-07-17T04:40:07.229308+00:00",
   "title": "From historical forcing to calibrated flood probabilities.",
   "eyebrow": "PORTSMOUTH, VIRGINIA / DEPLOYMENT PROOF",
   "intro": "Portsmouth demonstrates how FloodUQ turns coastal forcing into calibrated probability, timing, extent, and uncertainty products. The evidence is local; the deployment process is designed to be repeated with each coastline's own terrain and reference simulations.",

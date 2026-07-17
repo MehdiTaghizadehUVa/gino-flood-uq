@@ -41,7 +41,7 @@ export function LocationEvidence({ locations }: { locations: Location[] }) {
           {/* eslint-disable-next-line @next/next/no-img-element */}
           <img src={selected.panelSrc} alt={`${selected.label} depth ensemble, exceedance probability, and arrival-time distribution`} width={1700} height={520} loading="lazy" />
           <EvidenceCaption
-            title="A local forecast with uncertainty in view"
+            title="Depth range, exceedance probability, and arrival timing"
             insight="Depth range, calibrated exceedance probability, and arrival timing reveal what a central map cannot show at one location."
             method="The figure summarizes all 60 production members so the central response and forecast range remain visible together."
           />
