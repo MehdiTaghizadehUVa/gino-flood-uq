@@ -21,7 +21,7 @@ export function HistoricalValidation({ historical }: { historical: Historical })
             <img src={event.probabilitySrc} alt={`${event.label} probability of maximum depth exceeding 0.10 meters`} width={1400} height={1080} loading="lazy" />
             <EvidenceCaption
               title="Maximum-event exceedance probability"
-              insight="Shows how consistently production ensemble members place meaningful flooding during the historical event."
+              insight="Shows where ensemble members consistently indicate event-level flooding and how that footprint aligns with HEC-RAS."
               method="Probability is the fraction of calibrated depth members whose cellwise maximum exceeds 0.10 m. The white, dark-haloed line is the HEC-RAS reference contour."
             />
           </figure>
@@ -30,7 +30,7 @@ export function HistoricalValidation({ historical }: { historical: Historical })
             <img src={event.intervalWidthSrc} alt={`${event.label} maximum 90 percent interval-width map`} width={1400} height={1080} loading="lazy" />
             <EvidenceCaption
               title="Maximum-event 90% interval width"
-              insight="Locates where the memberwise maximum response remains more dispersed across the event."
+              insight="Highlights where peak depth remains least consistent across ensemble members during the event."
               method="Width is p95 minus p05 of memberwise maximum depth, and every storm uses the same color scale."
             />
           </figure>
@@ -39,7 +39,7 @@ export function HistoricalValidation({ historical }: { historical: Historical })
             <img src={event.trajectorySrc} alt={`${event.label} predicted and HEC-RAS wettable-domain inundated-area trajectories`} width={900} height={520} loading="lazy" />
             <EvidenceCaption
               title="Wettable-domain extent through time"
-              insight="Compares the production ensemble's extent range with the HEC-RAS reference trajectory rather than only one peak value."
+              insight="Shows whether the predicted range follows the timing and scale of the HEC-RAS flood footprint throughout the event."
               method="The band is the 5th-95th percentile across production members; the solid line is the median and the dashed line is the aligned HEC-RAS reference. Interpret the comparison within the documented validation scope."
             />
           </figure>

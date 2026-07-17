@@ -16,8 +16,8 @@ export function MarketingFooter() {
       </div>
       <div className="footer-grid">
         <div>
-          <strong>Managed coastal flood uncertainty, made inspectable.</strong>
-          <p>A domain-specific modeling service developed at the University of Virginia.</p>
+          <strong>Coastal flood uncertainty you can compare, explain, and improve.</strong>
+          <p>A managed probabilistic modeling service developed at the University of Virginia.</p>
         </div>
         <div className="footer-links">
           <a href={PILOT_MAILTO}>Request a pilot <ArrowUpRight size={14} /></a>
@@ -25,7 +25,7 @@ export function MarketingFooter() {
         </div>
       </div>
       <div className="footer-legal">
-        <span>Domain-specific coastal flood intelligence with documented validation and provenance.</span>
+        <span>Rapid coastal scenario analysis with calibrated uncertainty and traceable evidence.</span>
         <span>© 2026 FloodUQ</span>
       </div>
     </footer>

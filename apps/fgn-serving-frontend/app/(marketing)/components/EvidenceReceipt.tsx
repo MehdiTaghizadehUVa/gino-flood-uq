@@ -9,12 +9,12 @@ export function EvidenceReceipt({
   evidence: EvidenceRegistry;
 }) {
   const receiptRows = [
-    ["Model bundle", manifest.provenance.bundleId],
-    ["Model code commit", manifest.provenance.bundleGitCommit],
-    ["Ensemble policy", manifest.provenance.ensemblePolicy],
-    ["Calibration", manifest.provenance.calibrationMode],
-    ["Initial-condition library", manifest.provenance.initialConditionLibraryId],
-    ["Reference scope", manifest.provenance.initialConditionReferenceScope],
+    ["Model version", manifest.provenance.bundleId],
+    ["Code version", manifest.provenance.bundleGitCommit],
+    ["Ensemble design", manifest.provenance.ensemblePolicy],
+    ["Calibration method", manifest.provenance.calibrationMode],
+    ["Initial-state library", manifest.provenance.initialConditionLibraryId],
+    ["Initial-state evidence", manifest.provenance.initialConditionReferenceScope],
     ["Seed", manifest.provenance.seed],
     ["Forecast timestep", `${Number(manifest.provenance.dtSeconds) / 60} min`],
     ["Terrain hash", manifest.provenance.terrainSha256],
@@ -23,7 +23,7 @@ export function EvidenceReceipt({
   return (
     <div className="case-study-receipt-layout">
       <div className="performance-receipt">
-        <p className="micro-label">Measured comparison</p>
+        <p className="micro-label">Measured speed and skill</p>
         <div className="evidence-claim-grid">
           {evidence.claims.map((claim) => (
             <article key={claim.id}>
@@ -42,12 +42,14 @@ export function EvidenceReceipt({
           <div>
             <strong>Forward-only method comparison</strong>
             <span>{manifest.performance.comparison.hardware}</span>
-            <p>{manifest.performance.comparison.sample}; {manifest.performance.comparison.ensembleBudget.toLowerCase()}.</p>
+            <p>
+              {manifest.performance.comparison.sample}; {manifest.performance.comparison.ensembleBudget.toLowerCase()}; {manifest.performance.comparison.timingScope.toLowerCase()}.
+            </p>
           </div>
         </div>
       </div>
       <details className="evidence-receipt">
-        <summary>Open model provenance receipt</summary>
+        <summary>View technical provenance</summary>
         <dl>
           {receiptRows.map(([label, value]) => (
             <div key={label}><dt>{label}</dt><dd>{String(value || "Not recorded")}</dd></div>

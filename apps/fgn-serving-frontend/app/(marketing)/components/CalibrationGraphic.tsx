@@ -38,7 +38,7 @@ export function CalibrationGraphic({ stage = 2 }: { stage?: number }) {
         <text className="chart-axis-label" transform={`translate(14 ${HEIGHT / 2}) rotate(-90)`} textAnchor="middle">Calibrated probability</text>
       </svg>
       <figcaption>
-        The mapping is explicit and versioned. Raw probabilities remain available beside calibrated products for audit.
+        See how raw ensemble frequencies are converted into calibrated probabilities while both remain available for comparison.
       </figcaption>
     </figure>
   );

@@ -13,14 +13,16 @@ const [contentSource, pageSource, evidenceSource, caseStudyManifestSource] = awa
   readFile(caseStudyManifestPath, "utf8")
 ]);
 
-const visibleToneSource = (
+const marketingFiles = await readdir(marketingRoot, { recursive: true, withFileTypes: true });
+const marketingSources = await Promise.all(
+  marketingFiles
+    .filter((entry) => entry.isFile() && /\.(ts|tsx)$/.test(entry.name))
+    .map((entry) => readFile(path.join(entry.parentPath, entry.name), "utf8"))
+);
+const allMarketingSource = marketingSources.join("\n");
+const demoToneSource = (
   await Promise.all(
     [
-      "app/(marketing)/layout.tsx",
-      "app/(marketing)/page.tsx",
-      "app/(marketing)/components/MarketingFooter.tsx",
-      "app/(marketing)/components/HistoricalValidation.tsx",
-      "app/(marketing)/components/EvidenceReceipt.tsx",
       "app/components/AppShell.tsx",
       "app/components/ResearchNotice.tsx",
       "app/(demo)/layout.tsx",
@@ -30,7 +32,8 @@ const visibleToneSource = (
       "app/(demo)/admin/monitoring/page.tsx"
     ].map((relativePath) => readFile(path.join(frontendRoot, relativePath), "utf8"))
   )
-).join("\n").toLowerCase();
+).join("\n");
+const visibleToneSource = `${allMarketingSource}\n${caseStudyManifestSource}\n${demoToneSource}`.toLowerCase();
 
 for (const retiredPhrase of [
   "research only",
@@ -82,9 +85,27 @@ for (const prohibitedClaim of [
   assert.ok(!universalCopy.toLowerCase().includes(prohibitedClaim), `Prohibited claim found: ${prohibitedClaim}`);
 }
 
+for (const internalPhrase of [
+  "one rendering contract",
+  "production-configuration hindcasts",
+  "input fingerprints",
+  "arrive with its receipt",
+  "the service knows when",
+  "computational location",
+  "scientifically appropriate units",
+  "public page does not ship",
+  "deployment contract"
+]) {
+  assert.ok(!visibleToneSource.includes(internalPhrase), `Internal implementation language found: ${internalPhrase}`);
+}
+
 assert.ok(pageSource.includes("Request a pilot"), "Request a pilot must be the primary conversion action.");
 assert.ok(pageSource.includes("Explore the Portsmouth demo"), "The demo must be identified as the Portsmouth deployment.");
 assert.ok(contentSource.includes("expert-reviewed"), "Monitoring copy must preserve human review.");
+assert.ok(
+  allMarketingSource.includes("Tested consistently across three held-out historical storms."),
+  "Historical validation must lead with buyer-facing evidence."
+);
 
 const manifest = JSON.parse(caseStudyManifestSource);
 assert.equal(manifest.schemaVersion, 1, "Unsupported Portsmouth case-study schema.");
@@ -245,13 +266,6 @@ for (const product of manifest.flagship.products) {
   );
 }
 
-const marketingFiles = await readdir(marketingRoot, { recursive: true, withFileTypes: true });
-const marketingSources = await Promise.all(
-  marketingFiles
-    .filter((entry) => entry.isFile() && /\.(ts|tsx)$/.test(entry.name))
-    .map((entry) => readFile(path.join(entry.parentPath, entry.name), "utf8"))
-);
-const allMarketingSource = marketingSources.join("\n");
 assert.ok(!allMarketingSource.includes("/api/"), "The public marketing route must not call runtime APIs.");
 assert.ok(pageSource.includes("<HeroFloodVideo"), "The marketing hero must use the managed video component.");
 for (const legacyTerm of ["between-model", "within-model", "between model", "within model"]) {

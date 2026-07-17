@@ -33,17 +33,17 @@ export function LocationEvidence({ locations }: { locations: Location[] }) {
           <img src={selected.mapSrc} alt={`${selected.label} selected on the Irene probability map`} width={1400} height={1080} loading="lazy" />
           <EvidenceCaption
             title={`${selected.label} / ${selected.interpretation}`}
-            insight={`The marker identifies computational cell ${selected.cellIndex.toLocaleString()} at a representative wettable-domain response.`}
-            method={`Coordinates are UTM easting ${selected.coordinates.easting.toLocaleString()} m and northing ${selected.coordinates.northing.toLocaleString()} m. Locations are selected deterministically from forecast behavior and are not named assets.`}
+            insight="The marker connects a regional flood pattern to a representative local forecast."
+            method={`Location ${selected.cellIndex.toLocaleString()} is selected reproducibly from forecast behavior at UTM easting ${selected.coordinates.easting.toLocaleString()} m and northing ${selected.coordinates.northing.toLocaleString()} m; it is not a named asset.`}
           />
         </figure>
         <figure className="case-study-figure location-chart">
           {/* eslint-disable-next-line @next/next/no-img-element */}
           <img src={selected.panelSrc} alt={`${selected.label} depth ensemble, exceedance probability, and arrival-time distribution`} width={1700} height={520} loading="lazy" />
           <EvidenceCaption
-            title="One cell, the full ensemble story"
-            insight="The depth fan, calibrated exceedance trace, and arrival distribution provide context that a central map alone cannot convey."
-            method="The chart is rendered from the 60 production members. Member traces are presented as a static evidence figure; the public page does not ship HDF5 files or numerical member arrays."
+            title="A local forecast with uncertainty in view"
+            insight="Depth range, calibrated exceedance probability, and arrival timing reveal what a central map cannot show at one location."
+            method="The figure summarizes all 60 production members so the central response and forecast range remain visible together."
           />
         </figure>
       </div>

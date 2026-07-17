@@ -1072,24 +1072,24 @@ def export_portsmouth_case_study(config: CaseStudyExportConfig) -> Path:
         "title": "From historical forcing to calibrated flood probabilities.",
         "eyebrow": "PORTSMOUTH, VIRGINIA / DEPLOYMENT PROOF",
         "intro": (
-            "A named historical event shows how a domain-specific FloodUQ deployment turns coastal forcing "
-            "into probability, timing, extent, and uncertainty evidence. Portsmouth is the proof case; the "
-            "service pattern is repeated through a new domain's own terrain and reference simulations."
+            "Portsmouth demonstrates how FloodUQ turns coastal forcing into calibrated probability, timing, "
+            "extent, and uncertainty products. The evidence is local; the deployment process is designed to "
+            "be repeated with each coastline's own terrain and reference simulations."
         ),
         "flagship": flagship,
         "historicalValidation": {
             "thresholdM": 0.10,
             "events": historical,
             "note": (
-                "The historical validation threshold is 0.10 m and is not directly compared with the "
-                "0.30 m product view. Maximum-over-horizon maps use ensemble frequencies from calibrated "
-                "depth members; no separate maximum-event isotonic mapping is implied."
+                "The 0.10 m historical-validation threshold is specific to the HEC-RAS comparison and is not "
+                "equivalent to the 0.30 m product view. All three storms use the same event-level definition, "
+                "map bounds, and display scales."
             ),
         },
         "performance": {
             "workflow": {
                 "hardware": "NVIDIA RTX 4090",
-                "scope": "Complete 60-member workflow including HDF5, summaries, maps, animation, and scrub frames",
+                "scope": "Full 60-member run from forcing validation through calibrated maps, summaries, animation, and location-ready outputs",
                 "event": "Irene 2011",
             },
             "comparison": {

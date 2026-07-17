@@ -60,29 +60,29 @@ export const marketingNav = [
 
 export const servicePillars = [
   {
-    title: "Rapid scenario iteration",
-    body: "Explore changing coastal-stage and precipitation assumptions without rebuilding a physics ensemble for every question."
+    title: "Faster scenario exploration",
+    body: "Compare coastal-stage and precipitation scenarios without running a new high-fidelity ensemble for every alternative."
   },
   {
     title: "Calibrated probabilities",
-    body: "Turn raw ensemble frequencies into threshold-specific probabilities evaluated against held-out reference simulations."
+    body: "Evaluate depth-threshold probabilities that are calibrated and tested against held-out reference simulations."
   },
   {
-    title: "Uncertainty source separation",
-    body: "Separate epistemic uncertainty from aleatoric uncertainty instead of collapsing both into one spread map."
+    title: "Diagnosable uncertainty",
+    body: "See whether uncertainty is driven by model disagreement or variability among plausible outcomes."
   },
   {
-    title: "Novelty monitoring",
-    body: "Identify scenarios that are unfamiliar, disagreement-heavy, or suitable for additional high-fidelity evidence."
+    title: "Evidence-aware monitoring",
+    body: "Flag unfamiliar or high-disagreement scenarios for expert review and targeted high-fidelity simulation."
   }
 ] as const;
 
 export const decisionQuestions: readonly NumberedContentItem[] = [
-  { number: "01", title: "Where?", body: "Map expected depth, exceedance footprints, and affected-area extent across the deployed domain." },
-  { number: "02", title: "When?", body: "Inspect arrival, duration, peak timing, and the forcing-response trajectory on one lead-time axis." },
+  { number: "01", title: "Where?", body: "Identify where water may reach, how deep it may become, and how much of the study area may be affected." },
+  { number: "02", title: "When?", body: "Track onset, peak timing, recession, and duration across the forecast horizon." },
   { number: "03", title: "How likely?", body: "Evaluate calibrated probabilities for the depth thresholds that matter to the study." },
-  { number: "04", title: "Why uncertain?", body: "Separate epistemic uncertainty from aleatoric uncertainty within the nested forecast ensemble." },
-  { number: "05", title: "Is it familiar?", body: "Screen the forcing and completed forecast against monitored reference behavior." }
+  { number: "04", title: "Why uncertain?", body: "Distinguish model disagreement from variability among plausible forecast outcomes." },
+  { number: "05", title: "When is more evidence needed?", body: "Identify scenarios that fall outside familiar forcing or forecast behavior before they are treated as routine." }
 ] as const;
 
 export const serviceOutcomes = [
@@ -92,15 +92,15 @@ export const serviceOutcomes = [
     width: 1115,
     height: 929,
     label: "Probability and extent",
-    body: "See where a study threshold may be exceeded and how the expected affected area evolves through time."
+    body: "See where a study threshold may be exceeded and how the expected flood footprint changes through time."
   },
   {
     src: "/marketing/portsmouth/overview/interval_width.webp",
     alt: "Spatial uncertainty-width map from the Portsmouth deployment",
     width: 1115,
     height: 929,
-    label: "Confidence and disagreement",
-    body: "Locate where forecast members agree, where spread concentrates, and which uncertainty source dominates."
+    label: "Uncertainty and disagreement",
+    body: "Find locations where forecasts diverge and determine which source of uncertainty deserves attention."
   },
   {
     src: "/marketing/portsmouth/overview/arrival_time.webp",
@@ -108,7 +108,7 @@ export const serviceOutcomes = [
     width: 1115,
     height: 922,
     label: "Timing and persistence",
-    body: "Translate spatial forecasts into arrival, peak, and wet-duration products for scenario review."
+    body: "See when flooding begins, reaches its peak, and persists at locations across the study area."
   }
 ] as const;
 
@@ -116,35 +116,35 @@ export const speedPrinciples: readonly NumberedContentItem[] = [
   {
     number: "01",
     title: "Direct ensemble inference",
-    body: "FGNO produces spatial forecast members through direct neural-operator inference rather than an iterative denoising chain for every member."
+    body: "FGNO generates spatial forecast members directly, avoiding the iterative sampling required by diffusion-based surrogates."
   },
   {
     number: "02",
-    title: "More scenarios per study",
-    body: "Faster ensemble generation makes it practical to compare forcing alternatives, sensitivity cases, and updated assumptions."
+    title: "More alternatives in one study cycle",
+    body: "Rapid ensemble generation makes it practical to compare forcing alternatives, sensitivity cases, and updated assumptions."
   },
   {
     number: "03",
-    title: "Measured, scoped evidence",
-    body: "Every performance statement is tied to a named deployment, ensemble budget, hardware environment, and held-out benchmark."
+    title: "Performance backed by evidence",
+    body: "Speed and skill claims are tied to a named deployment, equal ensemble budgets, measured hardware, and held-out events."
   }
 ] as const;
 
 export const calibrationNotes: readonly NumberedContentItem[] = [
   {
     number: "01",
-    title: "Raw evidence remains visible",
-    body: "Calibration does not erase the original ensemble signal; raw and corrected products remain available together."
+    title: "Compare before and after calibration",
+    body: "Review raw ensemble frequencies beside calibrated probabilities to see exactly how the evidence changes."
   },
   {
     number: "02",
-    title: "Threshold-specific correction",
-    body: "Each exceedance threshold uses its own held-out calibration mapping rather than one global adjustment."
+    title: "Calibrated for the threshold in question",
+    body: "Each depth threshold uses its own mapping fitted and evaluated on held-out reference simulations."
   },
   {
     number: "03",
-    title: "Versioned and reviewable",
-    body: "The deployed model, calibration bundle, forcing fingerprint, seed policy, and result artifacts remain connected."
+    title: "Traceable from input to result",
+    body: "Each result retains the forcing, model version, calibration version, ensemble settings, and monitoring record used to create it."
   }
 ] as const;
 
@@ -207,44 +207,44 @@ export const comparisonRows: readonly ComparisonRow[] = [
 ] as const;
 
 export const monitoringLoop: readonly NumberedContentItem[] = [
-  { number: "01", title: "Screen", body: "Compare uploaded forcing against the deployed domain's monitored reference behavior before GPU work." },
-  { number: "02", title: "Detect", body: "Evaluate novelty, affected-area uncertainty, calibration shift, and model disagreement after inference." },
-  { number: "03", title: "Review", body: "Place strong signals into an expert-reviewed evidence queue instead of silently treating every forecast as equally familiar." },
-  { number: "04", title: "Simulate", body: "Select high-value candidates for optional HEC-RAS simulation and error analysis." },
-  { number: "05", title: "Stage an update", body: "Use reviewed evidence to prepare future calibration or model updates; activation remains versioned and operator-controlled." }
+  { number: "01", title: "Screen", body: "Assess whether a new forcing scenario resembles the evidence used to build the deployed model." },
+  { number: "02", title: "Detect", body: "Identify unusual inputs, elevated forecast disagreement, and calibration behavior that warrants attention." },
+  { number: "03", title: "Review", body: "Route strong signals into an expert-reviewed queue so attention stays focused on the scenarios with the greatest evidence gap." },
+  { number: "04", title: "Simulate", body: "Prioritize selected scenarios for HEC-RAS simulation and direct error analysis." },
+  { number: "05", title: "Stage an update", body: "Turn reviewed evidence into a controlled, versioned candidate for future model or calibration updates." }
 ] as const;
 
 export const deploymentSteps: readonly NumberedContentItem[] = [
-  { number: "01", title: "Define the domain", body: "Agree on terrain, mesh, boundary forcings, decision thresholds, forecast horizon, and intended planning workflow." },
-  { number: "02", title: "Prepare reference evidence", body: "Assemble historical or designed events and aligned high-fidelity simulations for training and evaluation." },
-  { number: "03", title: "Train the ensemble", body: "Fit the domain-specific neural-operator ensemble and a forcing-conditioned initial-state library." },
-  { number: "04", title: "Calibrate and validate", body: "Evaluate held-out skill, fit threshold-specific calibration, and document deployment limits." },
-  { number: "05", title: "Deploy the service", body: "Provide a gated console or API with reproducible runs, artifacts, provenance, and GPU queue controls." },
-  { number: "06", title: "Monitor and review", body: "Track unfamiliar scenarios and high-disagreement outputs for future high-fidelity evidence collection." }
+  { number: "01", title: "Define the decision need", body: "Align the coastal domain, forcing scenarios, depth thresholds, forecast horizon, and decisions the service must support." },
+  { number: "02", title: "Build the reference evidence", body: "Assemble terrain, historical or designed events, and aligned high-fidelity simulations for training and evaluation." },
+  { number: "03", title: "Train the domain model", body: "Fit the neural-operator ensemble and forcing-conditioned initial-state library to the target coastline." },
+  { number: "04", title: "Calibrate and validate", body: "Measure held-out performance, calibrate threshold probabilities, and document the validated operating range." },
+  { number: "05", title: "Launch the service", body: "Deliver a secure console or API for repeatable scenario runs, comparison, reporting, and review." },
+  { number: "06", title: "Monitor the evidence gap", body: "Track unfamiliar and high-disagreement scenarios so new high-fidelity simulations are directed where they add the most value." }
 ] as const;
 
 export const useCases: readonly NumberedContentItem[] = [
   {
     number: "01",
     title: "Coastal resilience studies",
-    body: "Compare planning scenarios through calibrated depth, probability, timing, extent, and uncertainty products."
+    body: "Compare adaptation and planning scenarios through calibrated depth, probability, timing, extent, and uncertainty products."
   },
   {
     number: "02",
     title: "Infrastructure scenario review",
-    body: "Inspect site- and cell-level trajectories around ports, transportation corridors, utilities, and other exposed assets."
+    body: "Inspect local flood trajectories around ports, transportation corridors, utilities, and other exposed assets."
   },
   {
     number: "03",
     title: "Engineering and risk partnerships",
-    body: "Add fast, calibrated surrogate ensembles and model-governance evidence to established coastal modeling workflows."
+    body: "Extend established coastal modeling programs with rapid probabilistic scenarios, calibrated uncertainty, and traceable evidence."
   }
 ] as const;
 
 export const portsmouthCaseStudy = {
   label: "Portsmouth, Virginia deployment proof",
   title: "From historical forcing to calibrated flood probabilities.",
-  intro: "A named historical event shows how a domain-specific FloodUQ deployment turns coastal forcing into probability, timing, extent, and uncertainty evidence. Portsmouth is the proof case, while the managed workflow is designed to be repeated for other coastal domains.",
+  intro: "Portsmouth demonstrates how FloodUQ turns coastal forcing into calibrated probability, timing, extent, and uncertainty products. The evidence is local; the deployment process is designed to be repeated with each coastline's own terrain and reference simulations.",
   deploymentStats: [
     { value: "3 x 20", label: "model and latent member structure" },
     { value: "5,904", label: "coastal mesh cells" },
@@ -257,7 +257,7 @@ export const portsmouthCaseStudy = {
     { label: "Maps and animations", value: 1.9, display: "1.9 min", tone: "green" },
     { label: "Calibration and summaries", value: 0.2, display: "< 0.2 min", tone: "amber" }
   ],
-  fullWorkflowNote: "Measured July 14, 2026 for one 60-member, 94-step run on the lab RTX 4090. Includes HDF5, summaries, maps, animations, and scrubbable frames; runtime varies with hardware, queue state, and requested products.",
+  fullWorkflowNote: "Measured July 14, 2026 for one 60-member, 94-step run on the lab RTX 4090, from validated forcing through calibrated summaries, maps, animations, and location inspection. Runtime varies with hardware, queue state, and requested products.",
   historicalNote: "Held-out historical cases include Ophelia 2023, Isabel 2003, and Irene 2011. Maps show exceedance probability and interval width; trajectories include HEC-RAS reference behavior."
 } as const;
 

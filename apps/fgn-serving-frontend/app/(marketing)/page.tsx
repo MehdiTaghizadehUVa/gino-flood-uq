@@ -112,8 +112,8 @@ export default function MarketingPage() {
               Know where flooding may go.<br />Know how certain the model is.
             </p>
             <p className="hero-copy">
-              FloodUQ turns a domain-specific coastal model into rapid probability, timing, extent, and uncertainty
-              products, delivered through a monitored coastal flood intelligence service.
+              Compare coastal flood scenarios quickly, evaluate calibrated exceedance probabilities, understand why
+              forecasts diverge, and identify where new high-fidelity evidence will add the most value.
             </p>
             <div className="hero-actions">
               <a className="primary-cta" href={PILOT_MAILTO}>
@@ -143,8 +143,8 @@ export default function MarketingPage() {
           title={<>A single flood map hides<br /><span>the decision risk.</span></>}
           intro={(
             <p>
-              A central estimate can show one plausible outcome. Study teams also need threshold probability, timing,
-              spread, and a clear signal when the model is operating outside familiar evidence.
+              A central estimate shows one expected outcome. Better scenario decisions also require probability,
+              timing, uncertainty, and a clear signal when the model is outside familiar evidence.
             </p>
           )}
           className="problem-section"
@@ -154,11 +154,11 @@ export default function MarketingPage() {
 
         <Section
           eyebrow="Service outcomes"
-          title={<>Answers organized around<br /><span>the questions you ask.</span></>}
+          title={<>See the probability, timing, and uncertainty<br /><span>behind every scenario.</span></>}
           intro={(
             <p>
-              Compare forcing scenarios, inspect individual locations, and retain the auditable evidence behind every
-              map and summary.
+              Compare forcing scenarios, inspect individual locations, and trace every conclusion back to the evidence
+              that produced it.
             </p>
           )}
           className="products-section"
@@ -181,21 +181,21 @@ export default function MarketingPage() {
             ))}
           </div>
           <div className="service-audit-band">
-            <MicroLabel>Connected evidence</MicroLabel>
+            <MicroLabel>Evidence that stays connected</MicroLabel>
             <p>
-              Cell-level traces, raw and calibrated products, input fingerprints, model versions, monitoring reports,
-              and downloadable artifacts remain attached to the same run.
+              Review local forecast traces, compare raw and calibrated probabilities, and trace each result to its
+              forcing, model version, calibration, and monitoring record.
             </p>
           </div>
         </Section>
 
         <Section
           eyebrow="Scenario capacity"
-          title={<>Explore alternatives without<br /><span>diffusion-scale sampling cost.</span></>}
+          title={<>Explore more alternatives<br /><span>within the same study cycle.</span></>}
           intro={(
             <p>
-              FloodUQ is designed for rapid ensemble inference so a study can examine changing assumptions rather than
-              stopping at one deterministic scenario.
+              Direct neural-operator inference reduces the cost of generating probabilistic scenarios, making it
+              practical to test changing assumptions instead of stopping at one deterministic map.
             </p>
           )}
           className="speed-section"
@@ -209,11 +209,11 @@ export default function MarketingPage() {
         <Section
           id="calibration"
           eyebrow="Calibrated confidence"
-          title={<>Probability is corrected<br /><span>against held-out evidence.</span></>}
+          title={<>Turn ensemble counts into<br /><span>probabilities you can evaluate.</span></>}
           intro={(
             <p>
-              Raw ensemble exceedance is mapped through threshold-specific calibration curves fitted to held-out
-              reference simulations. The correction and the original signal remain visible together.
+              Threshold-specific calibration aligns raw exceedance frequencies with held-out reference simulations,
+              while preserving the original ensemble signal for comparison.
             </p>
           )}
           className="calibration-section"
@@ -239,11 +239,11 @@ export default function MarketingPage() {
         <Section
           id="comparison"
           eyebrow="Why FloodUQ"
-          title={<>A managed uncertainty system,<br /><span>not just another surrogate.</span></>}
+          title={<>Fast forecasts are more useful<br /><span>when uncertainty stays visible.</span></>}
           intro={(
             <p>
-              Physics models remain the reference authority. FloodUQ complements them with rapid, calibrated ensemble
-              products, explicit disagreement structure, and monitoring around every submitted scenario.
+              FloodUQ complements high-fidelity physics with rapid calibrated ensembles, interpretable uncertainty
+              sources, and monitoring that identifies when a scenario needs stronger evidence.
             </p>
           )}
           className="comparison-section"
@@ -254,11 +254,11 @@ export default function MarketingPage() {
         <Section
           id="monitoring"
           eyebrow="Model governance"
-          title={<>The service knows when a scenario<br /><span>deserves more evidence.</span></>}
+          title={<>Know when a scenario<br /><span>needs more evidence.</span></>}
           intro={(
             <p>
-              Monitoring does not prove model error and it does not retrain automatically. It creates a disciplined,
-              expert-reviewed path from unfamiliar behavior to future high-fidelity evidence and versioned updates.
+              FloodUQ flags unfamiliar or high-disagreement scenarios for expert review, helping teams direct new
+              high-fidelity simulations toward the largest evidence gaps.
             </p>
           )}
           className="monitoring-section"
@@ -279,11 +279,11 @@ export default function MarketingPage() {
         <Section
           id="deployment"
           eyebrow="Managed deployment"
-          title={<>A repeatable path from your domain<br /><span>to a monitored decision platform.</span></>}
+          title={<>A proven path from your coastline<br /><span>to a working FloodUQ service.</span></>}
           intro={(
             <p>
-              FloodUQ is not a universal pretrained map. Each coastline is onboarded through a defined data, training,
-              calibration, validation, and governance workflow.
+              Each deployment is built from the coastline's own terrain, forcing scenarios, reference simulations,
+              validation criteria, and decision needs.
             </p>
           )}
           className="deployment-section"
@@ -294,11 +294,11 @@ export default function MarketingPage() {
         <Section
           id="solutions"
           eyebrow="Who it serves"
-          title={<>Built for coastal studies<br /><span>where uncertainty matters.</span></>}
+          title={<>Built for teams comparing<br /><span>coastal flood scenarios.</span></>}
           intro={(
             <p>
-              The primary service supports resilience and infrastructure studies, with technical partnerships for
-              engineering modelers and risk teams.
+              FloodUQ helps resilience agencies, infrastructure operators, engineering partners, and risk teams move
+              from isolated model runs to comparable probabilistic evidence.
             </p>
           )}
           className="solutions-section"
@@ -310,10 +310,10 @@ export default function MarketingPage() {
           <div className="demo-section-inner">
             <div className="demo-copy">
               <p className="marketing-eyebrow">Portsmouth product demo</p>
-              <h2>Inspect the workflow.<br /><span>Then scope your domain.</span></h2>
+              <h2>See calibrated flood uncertainty<br /><span>in action.</span></h2>
               <p>
-                The gated demo presents the Portsmouth deployment: submit coastal stage and precipitation forcing,
-                follow the GPU run, and inspect calibrated maps, disagreement diagnostics, monitoring, and artifacts.
+                Use the Portsmouth deployment to submit a forcing scenario, follow the forecast, inspect calibrated
+                maps and local uncertainty, and see how unfamiliar scenarios are identified for review.
               </p>
               <div className="hero-actions">
                 <a className="primary-cta" href={PILOT_MAILTO}>
@@ -331,13 +331,13 @@ export default function MarketingPage() {
             <div className="terminal" aria-label="FloodUQ managed service workflow">
               <div className="terminal-bar"><span /><span /><span /><strong>flooduq | managed coastal intelligence</strong></div>
               <div className="terminal-body">
-                <p><span className="terminal-prompt">01</span> validate domain forcing</p>
-                <p className="terminal-output"><Check size={14} /> contract and reference screening complete</p>
-                <p><span className="terminal-prompt">02</span> generate calibrated ensemble</p>
-                <p className="terminal-output"><Check size={14} /> probability, timing, extent, and disagreement products</p>
-                <p><span className="terminal-prompt">03</span> monitor forecast behavior</p>
-                <p className="terminal-output"><Check size={14} /> familiarity diagnostics and evidence queue updated</p>
-                <p className="terminal-cursor">ready <span>|</span></p>
+                <p><span className="terminal-prompt">01</span> submit a forcing scenario</p>
+                <p className="terminal-output"><Check size={14} /> input quality and model familiarity assessed</p>
+                <p><span className="terminal-prompt">02</span> generate calibrated flood evidence</p>
+                <p className="terminal-output"><Check size={14} /> depth, probability, timing, extent, and uncertainty ready</p>
+                <p><span className="terminal-prompt">03</span> review confidence and evidence gaps</p>
+                <p className="terminal-output"><Check size={14} /> priority scenarios preserved for expert review</p>
+                <p className="terminal-cursor">ready to compare <span>|</span></p>
               </div>
             </div>
           </div>
@@ -347,7 +347,7 @@ export default function MarketingPage() {
           <div>
             <p className="marketing-eyebrow">Start with a domain-specific pilot</p>
             <h2 id="final-cta-title">Bring your coastline, reference evidence, and study questions.</h2>
-            <p>We will define the deployment contract, validation evidence, uncertainty products, and governance requirements together.</p>
+            <p>Together, we will define the domain, reference simulations, decision thresholds, validation plan, and service configuration.</p>
           </div>
           <a className="primary-cta" href={PILOT_MAILTO}>
             Request a pilot <ArrowUpRight size={17} aria-hidden="true" />

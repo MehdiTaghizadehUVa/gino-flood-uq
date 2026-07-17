@@ -52,7 +52,7 @@ export function ForecastStoryPlayer({
       { label: "Initial mean-depth field", body: "The forecast opens from its forcing-conditioned water-depth history.", frameIndex: initial },
       { label: "Coastal depth response", body: "Mean water depth begins increasing along the connected coastal response pathways.", frameIndex: earlyResponse },
       { label: "Depth field expands inland", body: "The ensemble-mean depth pattern develops across a broader part of the modeled domain.", frameIndex: inlandExpansion },
-      { label: "Peak mean depth", body: "The wettable-domain, area-weighted mean water depth reaches its event maximum.", frameIndex: peakDepth },
+      { label: "Peak mean depth", body: "The area-weighted mean water depth reaches its event maximum across the modeled floodplain.", frameIndex: peakDepth },
       { label: "Depth recession", body: "Mean water depth recedes across the retained forecast horizon.", frameIndex: recession }
     ];
   }, [peakMeanDepthTimeIndex, products]);
@@ -200,9 +200,9 @@ export function ForecastStoryPlayer({
           </label>
           </div>
           <EvidenceCaption
-            title="A forecast through time, not a single peak map"
+            title="Follow the forecast from onset through recession"
             insight="Track where the selected product emerges, concentrates, and recedes across the full Irene 2011 horizon."
-            method="Source states are exact 15-minute production leads. The MP4/WebM stream blends adjacent rendered states only for visual continuity; the timeline and controls remain anchored to source leads."
+            method="Each source state is a 15-minute model lead. Adjacent rendered states are blended for smooth playback, while the timeline and controls remain anchored to the original forecast leads."
           />
         </figure>
       </div>
