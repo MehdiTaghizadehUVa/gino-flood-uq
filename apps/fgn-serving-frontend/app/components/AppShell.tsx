@@ -1,3 +1,4 @@
+import Image from "next/image";
 import type { ReactNode } from "react";
 import {
   Activity,
@@ -8,8 +9,7 @@ import {
   LineChart,
   ListChecks,
   LogOut,
-  ShieldCheck,
-  Waves
+  ShieldCheck
 } from "lucide-react";
 
 type AppSection = "home" | "runs" | "admin" | "monitoring";
@@ -44,7 +44,13 @@ export function AppShell({ active = "home", children, userEmail }: AppShellProps
       <aside className="app-sidebar" aria-label="Primary navigation">
         <div className="app-brand">
           <div className="app-brand-mark" aria-hidden="true">
-            <Waves size={19} />
+            <Image
+              src="/marketing/brand/flooduq-logo-mark.png"
+              alt=""
+              width={580}
+              height={327}
+              priority
+            />
           </div>
           <div>
             <p className="app-brand-title">Coastal Flood-UQ Console</p>

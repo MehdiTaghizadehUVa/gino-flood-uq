@@ -132,15 +132,14 @@ a:focus-visible {
 }
 
 .app-brand-mark {
-  display: grid;
-  width: 42px;
-  height: 42px;
-  place-items: center;
-  border: 1px solid rgba(148, 211, 224, 0.32);
-  border-radius: var(--radius-md);
-  background: linear-gradient(135deg, rgba(19, 163, 149, 0.28), rgba(56, 189, 248, 0.12));
-  color: #9eece4;
-  box-shadow: inset 0 0 22px rgba(56, 189, 248, 0.08);
+  width: 54px;
+  line-height: 0;
+}
+
+.app-brand-mark img {
+  width: 100%;
+  height: auto;
+  filter: drop-shadow(0 0 10px rgba(127, 214, 255, 0.18));
 }
 
 .app-brand-title,

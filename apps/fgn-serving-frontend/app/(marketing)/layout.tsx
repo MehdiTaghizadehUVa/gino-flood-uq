@@ -12,6 +12,10 @@ export const metadata: Metadata = {
   title: "FloodUQ | Managed probabilistic coastal flood modeling",
   description: "A managed coastal flood intelligence service for rapid scenario evaluation with calibrated probabilities, explainable uncertainty, and monitored model behavior.",
   alternates: { canonical: "/" },
+  icons: {
+    icon: [{ url: "/marketing/brand/flooduq-app-icon.png", type: "image/png", sizes: "512x512" }],
+    apple: [{ url: "/marketing/brand/flooduq-app-icon.png", sizes: "512x512", type: "image/png" }]
+  },
   openGraph: {
     title: "FloodUQ | Know where flooding may go, and how certain the model is",
     description: "Domain-specific coastal flood modeling with rapid ensemble inference, calibrated probability products, uncertainty source separation, and model monitoring.",

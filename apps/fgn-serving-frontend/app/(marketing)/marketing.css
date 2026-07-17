@@ -91,18 +91,15 @@ html[data-theme="marketing"] svg {
 }
 
 .marketing-brand {
-  display: inline-flex;
-  gap: 10px;
-  align-items: center;
-  color: var(--marketing-text);
-  font-family: var(--font-marketing-display), Inter, sans-serif;
-  font-size: 15px;
-  font-weight: 800;
+  display: block;
+  width: 172px;
+  line-height: 0;
   text-decoration: none;
 }
 
-.marketing-brand svg {
-  color: var(--marketing-accent);
+.marketing-brand-lockup {
+  width: 100%;
+  height: auto;
 }
 
 .marketing-nav-links {
@@ -242,19 +239,26 @@ html[data-theme="marketing"] svg {
   text-transform: uppercase;
 }
 
-.hero-wordmark,
-.footer-wordmark {
-  display: flex;
-  width: 100%;
-  justify-content: space-between;
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.hero-logo-heading {
   margin: 0;
-  color: var(--marketing-text);
-  font-family: var(--font-marketing-display), Inter, sans-serif;
-  font-size: 160px;
-  font-weight: 750;
-  line-height: 0.9;
-  letter-spacing: 0;
-  text-shadow: 0 0 52px rgba(127, 214, 255, 0.28);
+  line-height: 0;
+}
+
+.hero-brand-lockup {
+  width: min(100%, 1120px);
+  height: auto;
+  filter: drop-shadow(0 0 34px rgba(127, 214, 255, 0.16));
 }
 
 .hero-statement {
@@ -1791,9 +1795,14 @@ html[data-theme="marketing"] svg {
   background: var(--marketing-bg);
 }
 
-.footer-wordmark {
+.footer-logo {
   padding-bottom: 76px;
-  font-size: 150px;
+  line-height: 0;
+}
+
+.footer-logo img {
+  width: min(100%, 1120px);
+  height: auto;
 }
 
 .footer-grid {
@@ -2414,11 +2423,6 @@ body[data-reveal-ready="true"] [data-reveal]:not([data-reveal-visible="true"]) {
     text-decoration: none;
   }
 
-  .hero-wordmark,
-  .footer-wordmark {
-    font-size: 96px;
-  }
-
   .hero-statement,
   .section-heading h2,
   .demo-copy h2 {
@@ -2551,9 +2555,12 @@ body[data-reveal-ready="true"] [data-reveal]:not([data-reveal-visible="true"]) {
     min-height: 0;
   }
 
-  .hero-wordmark,
-  .footer-wordmark {
-    font-size: 46px;
+  .marketing-brand {
+    width: 150px;
+  }
+
+  .hero-brand-lockup {
+    width: 100%;
   }
 
   .hero-statement {
@@ -2781,7 +2788,7 @@ body[data-reveal-ready="true"] [data-reveal]:not([data-reveal-visible="true"]) {
     padding: 82px 18px 28px;
   }
 
-  .footer-wordmark {
+  .footer-logo {
     padding-bottom: 46px;
   }
 

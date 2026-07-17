@@ -96,8 +96,17 @@ export default function MarketingPage() {
           <div className="hero-scrim" aria-hidden="true" />
           <div className="hero-content">
             <p className="hero-kicker">Managed probabilistic coastal flood modeling</p>
-            <h1 id="hero-title" className="hero-wordmark" aria-label="FloodUQ">
-              {"FLOODUQ".split("").map((letter, index) => <span key={`${letter}-${index}`}>{letter}</span>)}
+            <h1 id="hero-title" className="hero-logo-heading">
+              <span className="visually-hidden">FloodUQ</span>
+              <Image
+                className="hero-brand-lockup"
+                src="/marketing/brand/flooduq-logo-lockup.png"
+                alt=""
+                width={1453}
+                height={327}
+                sizes="(max-width: 760px) calc(100vw - 32px), 1100px"
+                priority
+              />
             </h1>
             <p className="hero-statement">
               Know where flooding may go.<br />Know how certain the model is.

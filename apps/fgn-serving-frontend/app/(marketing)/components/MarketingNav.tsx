@@ -1,12 +1,19 @@
-import { ArrowUpRight, Waves } from "lucide-react";
+import Image from "next/image";
+import { ArrowUpRight } from "lucide-react";
 import { marketingNav, PILOT_MAILTO } from "../content";
 
 export function MarketingNav() {
   return (
     <header className="marketing-nav">
       <a className="marketing-brand" href="#top" aria-label="FloodUQ home">
-        <Waves size={20} aria-hidden="true" />
-        <span>FLOODUQ</span>
+        <Image
+          className="marketing-brand-lockup"
+          src="/marketing/brand/flooduq-logo-lockup.png"
+          alt=""
+          width={1453}
+          height={327}
+          priority
+        />
       </a>
       <nav className="marketing-nav-links" aria-label="Product navigation">
         {marketingNav.map((item) => (
