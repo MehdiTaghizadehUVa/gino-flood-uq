@@ -6,12 +6,13 @@ import path from "node:path";
 const frontendRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const marketingRoot = path.join(frontendRoot, "app", "(marketing)");
 const caseStudyManifestPath = path.join(frontendRoot, "public", "marketing", "portsmouth", "manifest.json");
-const [contentSource, pageSource, evidenceSource, caseStudyManifestSource, caseStudyAssetSource] = await Promise.all([
+const [contentSource, pageSource, evidenceSource, caseStudyManifestSource, caseStudyAssetSource, nextConfigSource] = await Promise.all([
   readFile(path.join(marketingRoot, "content.ts"), "utf8"),
   readFile(path.join(marketingRoot, "page.tsx"), "utf8"),
   readFile(path.join(marketingRoot, "evidence.json"), "utf8"),
   readFile(caseStudyManifestPath, "utf8"),
-  readFile(path.join(marketingRoot, "caseStudyAsset.ts"), "utf8")
+  readFile(path.join(marketingRoot, "caseStudyAsset.ts"), "utf8"),
+  readFile(path.join(frontendRoot, "next.config.ts"), "utf8")
 ]);
 
 const marketingFiles = await readdir(marketingRoot, { recursive: true, withFileTypes: true });
@@ -274,6 +275,10 @@ for (const product of manifest.flagship.products) {
 
 assert.ok(!allMarketingSource.includes("/api/"), "The public marketing route must not call runtime APIs.");
 assert.ok(pageSource.includes("<HeroFloodVideo"), "The marketing hero must use the managed video component.");
+assert.ok(
+  nextConfigSource.includes('pathname: "/marketing/**"'),
+  "Next Image must allow both brand and case-study assets under /marketing/."
+);
 assert.match(
   caseStudyAssetSource,
   /CASE_STUDY_ASSET_RELEASE\s*=\s*"[^"]+"/,
