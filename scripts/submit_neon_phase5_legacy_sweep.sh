@@ -5,7 +5,9 @@ if [[ $# -ne 1 ]]; then
   echo "Usage: $0 OUTPUT_ROOT" >&2
   exit 2
 fi
-OUTPUT_ROOT=$(realpath -m "$1")
+# Preserve Rivanna's container-visible /scratch path. Resolving host symlinks
+# rewrites it to /sfs/weka/scratch, which is not mounted in the container.
+OUTPUT_ROOT=$(realpath -ms "$1")
 REPO=${NEON_REPO:-/home/jrj6wm/GINO_Model/neuraloperator_neon_phase5}
 CONTAINER=${NEON_CONTAINER:-/share/resources/containers/apptainer/archive/pytorch-2.0.1.sif}
 CONFIG=${NEON_CONFIG:-/scratch/jrj6wm/GINO_Model/neon_stage2_full_train/config/coast_fgn_neon_tr450.yaml}

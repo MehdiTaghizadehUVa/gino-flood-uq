@@ -199,6 +199,18 @@ def test_phase5_top_level_dry_run_stops_before_first_sbatch():
     assert dry_run < first_submission
 
 
+def test_legacy_sweep_preserves_the_container_visible_scratch_mount():
+    script = (
+        Path(__file__).resolve().parents[1]
+        / "scripts"
+        / "submit_neon_phase5_legacy_sweep.sh"
+    ).read_text()
+
+    # Rivanna's /scratch symlink resolves to /sfs/weka/scratch on the host,
+    # but only /scratch is bound into the evaluation container.
+    assert 'OUTPUT_ROOT=$(realpath -ms "$1")' in script
+
+
 def test_conditional_pilot_manifest_writer_imports_checksummed_writer():
     script = (
         Path(__file__).resolve().parents[1]
