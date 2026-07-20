@@ -145,6 +145,28 @@ def test_old_style_arch_dict_without_rff_keys_loads_as_legacy(tmp_path):
     assert loaded.prior_rff_dim == 0
 
 
+def test_pre_rff_checkpoint_without_buffer_loads_as_legacy(tmp_path):
+    torch.manual_seed(4)
+    head = NEONEpistemicCorrection(
+        feature_channels=5,
+        out_channels=1,
+        epistemic_dim=4,
+        prior_rff_dim=0,
+    )
+    path = tmp_path / "pre_rff.pt"
+    save_neon_stage2_checkpoint(path, head)
+    payload = torch.load(path)
+    payload["architecture"].pop("prior_rff_dim")
+    payload["architecture"].pop("prior_rff_lengthscale")
+    payload["architecture"].pop("prior_rff_include_lead")
+    payload["state_dict"].pop("prior_rff_freqs")
+    torch.save(payload, path)
+
+    loaded, _ = load_neon_stage2_checkpoint(path)
+    assert loaded.prior_rff_dim == 0
+    assert loaded.prior_rff_freqs.numel() == 0
+
+
 def test_prior_floor_diagnostic_positive_on_constant_features():
     base, features, z_e, coords = _inputs()
     features = torch.zeros_like(features)

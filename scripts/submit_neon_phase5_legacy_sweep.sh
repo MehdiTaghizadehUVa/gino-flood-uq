@@ -35,6 +35,9 @@ apptainer exec --bind /scratch,/home "${CONTAINER}" \
   --config "${CONFIG}" --bundle "${BUNDLE}" \
   --source-root "${SOURCE_ROOT}" --output-root "${OUTPUT_ROOT}" \
   --expected-head "${HEAD}" --plan "${PLAN}" >/dev/null
+apptainer exec --bind /scratch,/home "${CONTAINER}" \
+  python scripts/neon_legacy_sweep_preflight.py validate-checkpoints \
+  --plan "${PLAN}" --expected-head "${HEAD}" >/dev/null
 
 # Resolve all five legacy checkpoint/config combinations before the scheduler
 # is mutated. Rivanna's system Python/PyYAML is deliberately not used here.

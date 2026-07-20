@@ -151,6 +151,29 @@ def load_and_validate_plan(
     return plan, selected
 
 
+def validate_checkpoint_loads(plan: dict[str, Any], *, loader: Any) -> list[dict[str, Any]]:
+    """Deserialize every unique legacy checkpoint before scheduler mutation."""
+
+    records = []
+    for row in plan.get("checkpoints") or []:
+        checkpoint = _require_file(Path(row["checkpoint"]))
+        if _sha256(checkpoint) != str(row["checkpoint_sha256"]):
+            raise ValueError("legacy checkpoint changed after preflight")
+        _module, metadata = loader(checkpoint, map_location="cpu")
+        records.append(
+            {
+                "n_train": int(row["n_train"]),
+                "checkpoint": str(checkpoint),
+                "metadata_keys": sorted(str(key) for key in metadata),
+            }
+        )
+    if len(records) != len(N_VALUES):
+        raise ValueError(
+            f"expected {len(N_VALUES)} unique legacy checkpoints, got {len(records)}"
+        )
+    return records
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -172,6 +195,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     check = subparsers.add_parser("validate-final")
     check.add_argument("--plan", type=Path, required=True)
     check.add_argument("--expected-head", required=True)
+    checkpoint_check = subparsers.add_parser("validate-checkpoints")
+    checkpoint_check.add_argument("--plan", type=Path, required=True)
+    checkpoint_check.add_argument("--expected-head", required=True)
     args = parser.parse_args(argv)
     if args.command == "prepare":
         payload = build_plan(
@@ -203,6 +229,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
         else:
             print(json.dumps(task, sort_keys=True))
+    elif args.command == "validate-checkpoints":
+        from neuralop.flood.neon import load_neon_stage2_checkpoint
+
+        records = validate_checkpoint_loads(plan, loader=load_neon_stage2_checkpoint)
+        print(json.dumps({"checkpoints": records, "valid": True}, sort_keys=True))
     else:
         print(json.dumps({"tasks": len(plan["tasks"]), "valid": True}))
     return 0

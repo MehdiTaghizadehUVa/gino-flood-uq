@@ -63,3 +63,27 @@ def test_legacy_export_plan_detects_post_preflight_checkpoint_mutation(tmp_path)
 
     with pytest.raises(ValueError, match="checkpoint changed"):
         MODULE.load_and_validate_plan(plan_path, expected_head="abc123", task_id=0)
+
+
+def test_legacy_preflight_deserializes_every_unique_checkpoint(tmp_path):
+    config, bundle, source = _sources(tmp_path)
+    plan = MODULE.build_plan(
+        config=config,
+        bundle=bundle,
+        source_root=source,
+        output_root=tmp_path / "out",
+        expected_head="abc123",
+    )
+    loaded = []
+
+    def loader(path, *, map_location):
+        loaded.append((Path(path), map_location))
+        return object(), {}
+
+    records = MODULE.validate_checkpoint_loads(plan, loader=loader)
+
+    assert len(records) == len(MODULE.N_VALUES)
+    assert [path.parent.name for path, _ in loaded] == [
+        f"tr_n{n_train}" for n_train in MODULE.N_VALUES
+    ]
+    assert all(map_location == "cpu" for _, map_location in loaded)

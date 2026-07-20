@@ -2212,7 +2212,13 @@ def load_neon_stage2_checkpoint(
     arch.setdefault("deterministic_head", False)
     arch.setdefault("deterministic_head_feature", "canonical_aleatory_mean")
     module = NEONEpistemicCorrection(**arch)
-    module.load_state_dict(payload["state_dict"])
+    state_dict = dict(payload["state_dict"])
+    if "prior_rff_freqs" not in state_dict and int(module.prior_rff_dim) == 0:
+        # Checkpoints written before the RFF prior existed have no registered
+        # buffer. The legacy architecture has an intentionally empty buffer;
+        # backfill only that exact case and retain strict loading otherwise.
+        state_dict["prior_rff_freqs"] = module.prior_rff_freqs.detach().clone()
+    module.load_state_dict(state_dict)
     if module.epistemic_basis_module is not None:
         module.epistemic_basis_module._validate_vectors()
     for param in module.prior_branch.parameters():
