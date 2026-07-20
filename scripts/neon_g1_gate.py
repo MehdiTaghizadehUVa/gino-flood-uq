@@ -58,7 +58,7 @@ def evaluate_g1(
     seed: int = 20260713,
     expected_families: int = 50,
     max_cancellation_fraction: float = 0.80,
-    crps_tolerance: float = 1.0e-12,
+    crps_noninferiority_margin_m: float = 1.0e-4,
 ) -> dict[str, Any]:
     """Return the auditable G1 decision for a completed B3 run."""
     run_dir = Path(run_dir)
@@ -98,18 +98,46 @@ def evaluate_g1(
         )
     if len(set(family_ids)) != len(family_ids):
         raise ValueError("paired validation family IDs are not unique.")
-    rmse_differences = [
-        float(item["stage2_minus_base_rmse_physical"]) for item in pairs
+    required_pair_keys = (
+        "stage2_minus_base_rmse_physical",
+        "base_fair_crps_physical",
+        "mixture_fair_crps_physical",
+    )
+    missing_pair_keys = sorted(
+        {
+            key
+            for item in pairs
+            for key in required_pair_keys
+            if key not in item
+        }
+    )
+    if missing_pair_keys:
+        raise ValueError(
+            "paired validation rows are missing Phase-5 metrics: "
+            f"{missing_pair_keys}."
+        )
+    rmse_differences = [float(item["stage2_minus_base_rmse_physical"]) for item in pairs]
+    crps_differences = [
+        float(item["mixture_fair_crps_physical"])
+        - float(item["base_fair_crps_physical"])
+        for item in pairs
     ]
-    paired = _paired_bootstrap(
+    paired_rmse = _paired_bootstrap(
         rmse_differences, replicates=int(bootstrap_replicates), seed=int(seed)
     )
+    paired_crps = _paired_bootstrap(
+        crps_differences,
+        replicates=int(bootstrap_replicates),
+        seed=int(seed) + 1,
+    )
+    rmse_margin_m = metrics["selection_rmse_margin_m"]
+    crps_margin_m = float(crps_noninferiority_margin_m)
+    if crps_margin_m < 0.0:
+        raise ValueError("crps_noninferiority_margin_m must be nonnegative.")
 
     checks = {
-        "mixture_crps_nonworse": metrics["val_mixture_fair_crps_physical"]
-        <= metrics["val_base_fair_crps_physical"] + float(crps_tolerance),
-        "rmse_noninferior": metrics["val_stage2_minus_base_rmse_physical"]
-        <= metrics["selection_rmse_margin_m"],
+        "crps_noninferior": paired_crps["ci95_upper"] <= crps_margin_m,
+        "rmse_noninferior": paired_rmse["ci95_upper"] <= rmse_margin_m,
         "cancellation_below_warning_threshold": metrics["val_cancellation_fraction"]
         <= float(max_cancellation_fraction),
         "retention_finite_nonnegative": metrics["val_prior_retention_ratio"] >= 0.0,
@@ -136,14 +164,25 @@ def evaluate_g1(
         "run_dir": str(run_dir),
         "best_epoch_zero_based": best_epoch,
         "n_paired_families": len(pairs),
-        "rmse_margin_m": metrics["selection_rmse_margin_m"],
+        "rmse_margin_m": rmse_margin_m,
+        "crps_noninferiority_margin_m": crps_margin_m,
         "checks": checks,
         "gate_passed": all(checks.values()),
         "paired_rmse_difference_m": {
-            **paired,
+            **paired_rmse,
             "bootstrap_replicates": int(bootstrap_replicates),
             "bootstrap_seed": int(seed),
-            "stronger_zero_ucb_check": paired["ci95_upper"] <= 0.0,
+            "margin_m": rmse_margin_m,
+            "ucb95_within_margin": paired_rmse["ci95_upper"] <= rmse_margin_m,
+            "zero_margin_sensitivity": paired_rmse["ci95_upper"] <= 0.0,
+        },
+        "paired_crps_difference_m": {
+            **paired_crps,
+            "bootstrap_replicates": int(bootstrap_replicates),
+            "bootstrap_seed": int(seed) + 1,
+            "margin_m": crps_margin_m,
+            "ucb95_within_margin": paired_crps["ci95_upper"] <= crps_margin_m,
+            "zero_margin_sensitivity": paired_crps["ci95_upper"] <= 0.0,
         },
         "diagnostics": {
             "cancellation_fraction": metrics["val_cancellation_fraction"],

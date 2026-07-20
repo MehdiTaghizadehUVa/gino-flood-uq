@@ -16,7 +16,15 @@ def _load_script():
     return module
 
 
-def _write_run(root: Path, *, replicate: int, n_train: int, gamma: float = 0.5) -> None:
+def _write_run(
+    root: Path,
+    *,
+    replicate: int,
+    n_train: int,
+    gamma: float = 0.5,
+    ladder_rung: str = "B3",
+    git_head: str | None = None,
+) -> None:
     family_ids = [f"F{i:03d}" for i in range(n_train)]
     run = root / f"rep{replicate}" / f"n{n_train}"
     run.mkdir(parents=True)
@@ -25,7 +33,7 @@ def _write_run(root: Path, *, replicate: int, n_train: int, gamma: float = 0.5) 
         json.dumps(
             {
                 "n_train": n_train,
-                "ladder_rung": "B3",
+                "ladder_rung": ladder_rung,
                 "subset_replicate": replicate,
                 "train_family_ids": family_ids,
                 "best_epoch": 2,
@@ -37,6 +45,8 @@ def _write_run(root: Path, *, replicate: int, n_train: int, gamma: float = 0.5) 
             }
         )
     )
+    if git_head is not None:
+        (run / "git_head.txt").write_text(git_head + "\n", encoding="utf-8")
 
 
 def test_contraction_analysis_recovers_replicated_power_law(tmp_path):
@@ -50,6 +60,19 @@ def test_contraction_analysis_recovers_replicated_power_law(tmp_path):
     assert result["gamma_mean"] == pytest.approx(0.5, abs=1e-12)
     assert result["gamma_std"] == pytest.approx(0.0, abs=1e-12)
     assert all(row["nested_prefixes_valid"] for row in result["replicates"])
+    assert "area/mask-weighted" in result["metric_definition"]
+
+    prefix = tmp_path / "summary"
+    assert script.main(
+        [
+            str(tmp_path),
+            "--output-prefix",
+            str(prefix),
+            "--bootstrap-samples",
+            "100",
+        ]
+    ) == 0
+    assert prefix.with_suffix(".json.sha256").is_file()
 
 
 def test_contraction_analysis_rejects_non_nested_family_prefixes(tmp_path):
@@ -64,3 +87,42 @@ def test_contraction_analysis_rejects_non_nested_family_prefixes(tmp_path):
     with pytest.raises(ValueError, match="nested prefix"):
         script.analyze_scaleout(tmp_path, bootstrap_samples=50)
 
+
+def test_contraction_analysis_supports_selected_phase5_pilot_rung(tmp_path):
+    script = _load_script()
+    for replicate in range(5):
+        for n_train in script.N_VALUES:
+            _write_run(
+                tmp_path,
+                replicate=replicate,
+                n_train=n_train,
+                ladder_rung="P1B_B",
+            )
+    result = script.analyze_scaleout(
+        tmp_path,
+        bootstrap_samples=100,
+        expected_ladder_rung="P1B_B",
+    )
+    assert result["ladder_rung"] == "P1B_B"
+
+
+def test_contraction_analysis_rejects_cross_commit_history(tmp_path):
+    script = _load_script()
+    for replicate in range(5):
+        for n_train in script.N_VALUES:
+            _write_run(
+                tmp_path,
+                replicate=replicate,
+                n_train=n_train,
+                git_head="expected-head",
+            )
+    (tmp_path / "rep2" / "n100" / "git_head.txt").write_text(
+        "other-head\n", encoding="utf-8"
+    )
+
+    with pytest.raises(ValueError, match="Git HEAD"):
+        script.analyze_scaleout(
+            tmp_path,
+            bootstrap_samples=100,
+            expected_git_head="expected-head",
+        )

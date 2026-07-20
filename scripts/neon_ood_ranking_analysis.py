@@ -11,6 +11,7 @@ import math
 import os
 import random
 import statistics
+import hashlib
 from pathlib import Path
 from typing import Any, Sequence
 
@@ -23,6 +24,10 @@ def _atomic_json(path: Path, payload: dict[str, Any]) -> None:
     tmp = path.with_name(path.name + ".tmp")
     tmp.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
     os.replace(tmp, path)
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    path.with_suffix(path.suffix + ".sha256").write_text(
+        f"{digest}  {path.name}\n", encoding="utf-8"
+    )
 
 
 def _read_rows(path: Path) -> list[dict[str, Any]]:
@@ -47,6 +52,14 @@ def _read_rows(path: Path) -> list[dict[str, Any]]:
             }
         )
     return parsed
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as handle:
+        for chunk in iter(lambda: handle.read(8 * 1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _pearson(x: Sequence[float], y: Sequence[float]) -> float:
@@ -173,6 +186,9 @@ def analyze_ood_ranking(
     bootstrap_samples: int = 10000,
     permutation_samples: int = 100000,
     seed: int = 20260713,
+    analysis_git_head: str | None = None,
+    protocol_sha256: str | None = None,
+    stage2_checkpoint_sha256: str | None = None,
 ) -> dict[str, Any]:
     ood = _read_rows(ood_metrics)
     iid = _read_rows(id_metrics)
@@ -220,6 +236,16 @@ def analyze_ood_ranking(
     id_rmse = statistics.fmean(row["rmse_m"] for row in iid)
     if id_std <= 0 or id_rmse <= 0:
         raise ValueError("ID means must be positive for OOD/ID ratios.")
+    if stage2_checkpoint_sha256 is not None:
+        ood_payload = json.loads(Path(ood_metrics).read_text(encoding="utf-8"))
+        actual_checkpoint = str(
+            (ood_payload.get("plan") or {}).get("stage2_checkpoint_sha256", "")
+        )
+        if actual_checkpoint != str(stage2_checkpoint_sha256):
+            raise ValueError(
+                "OOD metrics/checkpoint mismatch: "
+                f"{actual_checkpoint} != {stage2_checkpoint_sha256}."
+            )
     result = {
         "schema_version": "neon_ood_ranking_v1",
         "ood_metrics": str(Path(ood_metrics)),
@@ -248,6 +274,11 @@ def analyze_ood_ranking(
         "bootstrap_samples": int(bootstrap_samples),
         "permutation_samples_requested": int(permutation_samples),
         "seed": int(seed),
+        "analysis_git_head": analysis_git_head,
+        "protocol_sha256": protocol_sha256,
+        "stage2_checkpoint_sha256": stage2_checkpoint_sha256,
+        "ood_metrics_sha256": _sha256_file(Path(ood_metrics)),
+        "id_metrics_sha256": _sha256_file(Path(id_metrics)),
     }
     return result
 
@@ -270,6 +301,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--bootstrap-samples", type=int, default=10000)
     parser.add_argument("--permutation-samples", type=int, default=100000)
     parser.add_argument("--seed", type=int, default=20260713)
+    parser.add_argument("--analysis-git-head")
+    parser.add_argument("--protocol-sha256")
+    parser.add_argument("--stage2-checkpoint-sha256")
     args = parser.parse_args(argv)
     result = analyze_ood_ranking(
         args.ood_metrics,
@@ -278,6 +312,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         bootstrap_samples=args.bootstrap_samples,
         permutation_samples=args.permutation_samples,
         seed=args.seed,
+        analysis_git_head=args.analysis_git_head,
+        protocol_sha256=args.protocol_sha256,
+        stage2_checkpoint_sha256=args.stage2_checkpoint_sha256,
     )
     prefix = args.output_prefix
     _atomic_json(prefix.with_suffix(".json"), result)

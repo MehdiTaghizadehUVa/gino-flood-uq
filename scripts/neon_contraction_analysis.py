@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import json
 import math
 import os
@@ -23,6 +24,10 @@ def _atomic_json(path: Path, payload: dict[str, Any]) -> None:
     tmp = path.with_name(path.name + ".tmp")
     tmp.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
     os.replace(tmp, path)
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    path.with_suffix(path.suffix + ".sha256").write_text(
+        f"{digest}  {path.name}\n", encoding="utf-8"
+    )
 
 
 def _best_row(payload: dict[str, Any], *, path: Path) -> dict[str, Any]:
@@ -67,6 +72,11 @@ def analyze_scaleout(
     *,
     bootstrap_samples: int = 10000,
     bootstrap_seed: int = 20260713,
+    expected_ladder_rung: str = "B3",
+    expected_git_head: str | None = None,
+    analysis_git_head: str | None = None,
+    protocol_sha256: str | None = None,
+    governing_gate_sha256: str | None = None,
 ) -> dict[str, Any]:
     run_root = Path(run_root).resolve()
     replicate_rows: list[dict[str, Any]] = []
@@ -79,12 +89,25 @@ def analyze_scaleout(
             if not path.is_file():
                 raise FileNotFoundError(f"missing scale-out history: {path}")
             payload = json.loads(path.read_text())
+            if expected_git_head is not None:
+                git_head_path = path.with_name("git_head.txt")
+                if not git_head_path.is_file():
+                    raise ValueError(f"{path}: missing Git HEAD record {git_head_path}.")
+                task_head = git_head_path.read_text(encoding="utf-8").strip()
+                if task_head != expected_git_head:
+                    raise ValueError(
+                        f"{path}: Git HEAD {task_head!r} differs from expected "
+                        f"{expected_git_head!r}."
+                    )
             if int(payload.get("n_train", -1)) != n_train:
                 raise ValueError(f"{path}: n_train metadata mismatch.")
             if int(payload.get("subset_replicate", -1)) != replicate:
                 raise ValueError(f"{path}: subset_replicate metadata mismatch.")
-            if str(payload.get("ladder_rung", "")).upper() != "B3":
-                raise ValueError(f"{path}: contraction analysis requires B3 histories.")
+            expected_rung = str(expected_ladder_rung).upper()
+            if str(payload.get("ladder_rung", "")).upper() != expected_rung:
+                raise ValueError(
+                    f"{path}: contraction analysis requires {expected_rung} histories."
+                )
             family_ids = [str(value) for value in payload.get("train_family_ids", [])]
             if len(family_ids) != n_train or len(set(family_ids)) != n_train:
                 raise ValueError(f"{path}: invalid train_family_ids.")
@@ -108,6 +131,7 @@ def analyze_scaleout(
                     "best_val_fit": float(payload["best_val_fit"]),
                     "epistemic_std_m": std,
                     "history_path": str(path),
+                    "git_head": expected_git_head,
                 }
             )
         gamma, intercept = _fit_gamma(points)
@@ -133,6 +157,11 @@ def analyze_scaleout(
         "schema_version": "neon_contraction_analysis_v1",
         "run_root": str(run_root),
         "metric": STD_KEY,
+        "metric_definition": (
+            "sqrt(equal-family mean of per-family area/mask-weighted "
+            "Var_ze(E_za[stage2 correction])) in physical meters"
+        ),
+        "ladder_rung": str(expected_ladder_rung).upper(),
         "model": "log(std_epi_m) = intercept_replicate - gamma * log(N)",
         "n_values": list(N_VALUES),
         "n_replicates": N_REPLICATES,
@@ -142,6 +171,9 @@ def analyze_scaleout(
         "gamma_bootstrap_95_ci": [ci_low, ci_high],
         "bootstrap_samples": int(bootstrap_samples),
         "bootstrap_seed": int(bootstrap_seed),
+        "analysis_git_head": analysis_git_head,
+        "protocol_sha256": protocol_sha256,
+        "governing_gate_sha256": governing_gate_sha256,
         "replicates": replicate_rows,
         "points": point_rows,
     }
@@ -163,11 +195,21 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--output-prefix", type=Path)
     parser.add_argument("--bootstrap-samples", type=int, default=10000)
     parser.add_argument("--bootstrap-seed", type=int, default=20260713)
+    parser.add_argument("--ladder-rung", default="B3")
+    parser.add_argument("--analysis-git-head")
+    parser.add_argument("--expected-git-head")
+    parser.add_argument("--protocol-sha256")
+    parser.add_argument("--governing-gate-sha256")
     args = parser.parse_args(argv)
     result = analyze_scaleout(
         args.run_root,
         bootstrap_samples=args.bootstrap_samples,
         bootstrap_seed=args.bootstrap_seed,
+        expected_ladder_rung=args.ladder_rung,
+        expected_git_head=args.expected_git_head,
+        analysis_git_head=args.analysis_git_head,
+        protocol_sha256=args.protocol_sha256,
+        governing_gate_sha256=args.governing_gate_sha256,
     )
     prefix = args.output_prefix or (args.run_root / "contraction_analysis")
     _atomic_json(prefix.with_suffix(".json"), result)
@@ -183,4 +225,3 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
