@@ -10,9 +10,9 @@
 #SBATCH --error=/scratch/jrj6wm/GINO_Model/neon_stage2_full_train/repair_slurm_%j.err
 set -euo pipefail
 
-: "${NEON_LADDER_RUNG:?Set NEON_LADDER_RUNG to B0, B1a, B1b, B2, B3, B4, or B5}"
+: "${NEON_LADDER_RUNG:?Set NEON_LADDER_RUNG to B0, B1a, B1b, B2, B3, B4, B5, P1B_A, P1B_B, P1B_C, or P2}"
 : "${NEON_EXPECTED_HEAD:?Set NEON_EXPECTED_HEAD to the preflight-validated commit}"
-REPO=${NEON_REPO:-/home/jrj6wm/GINO_Model/neuraloperator_neon_v4_integrated}
+REPO=${NEON_REPO:-/home/jrj6wm/GINO_Model/neuraloperator_neon_phase5}
 CONTAINER=${NEON_CONTAINER:-/share/resources/containers/apptainer/archive/pytorch-2.0.1.sif}
 RUN_ROOT=/scratch/jrj6wm/GINO_Model/neon_stage2_full_train/repair_v4
 export NEON_N_TRAIN=${NEON_N_TRAIN:-450}
@@ -49,6 +49,18 @@ export APPTAINERENV_NEON_OUT_DIR="${NEON_OUT_DIR}"
 export APPTAINERENV_NEON_CACHE_DIR="${NEON_CACHE_DIR}"
 if [[ -n "${NEON_DE_SPREAD_MULTIPLIER:-}" ]]; then
   export APPTAINERENV_NEON_DE_SPREAD_MULTIPLIER="${NEON_DE_SPREAD_MULTIPLIER}"
+fi
+if [[ -n "${NEON_DIRICHLET_PARTICLE_SEED:-}" ]]; then
+  export APPTAINERENV_NEON_DIRICHLET_PARTICLE_SEED="${NEON_DIRICHLET_PARTICLE_SEED}"
+fi
+if [[ -n "${NEON_PRIOR_TARGET_STD_M:-}" ]]; then
+  export APPTAINERENV_NEON_PRIOR_TARGET_STD_M="${NEON_PRIOR_TARGET_STD_M}"
+fi
+if [[ -n "${NEON_PRIOR_SEED:-}" ]]; then
+  export APPTAINERENV_NEON_PRIOR_SEED="${NEON_PRIOR_SEED}"
+fi
+if [[ -n "${NEON_TRAIN_SEED:-}" ]]; then
+  export APPTAINERENV_NEON_TRAIN_SEED="${NEON_TRAIN_SEED}"
 fi
 apptainer exec --nv ${APPTAINER_BIND_ARGS} "${CONTAINER}" \
   python scripts/neon_stage2_tr_train.py

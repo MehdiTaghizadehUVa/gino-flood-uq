@@ -2,12 +2,12 @@
 set -euo pipefail
 
 if [[ $# -lt 1 || $# -gt 2 ]]; then
-  echo "Usage: $0 B0|B1a|B1b|B2|B3|B4|B5 [B4_DE_SPREAD_MULTIPLIER]" >&2
+  echo "Usage: $0 B0|B1a|B1b|B2|B3|B4|B5|P1B_A|P1B_B|P1B_C|P2 [B4_DE_SPREAD_MULTIPLIER]" >&2
   exit 2
 fi
 RUNG=${1^^}
 case "${RUNG}" in
-  B0|B1A|B1B|B2|B3|B5) ;;
+  B0|B1A|B1B|B2|B3|B5|P1B_A|P1B_B|P1B_C|P2) ;;
   B4)
     : "${2:?B4 requires a DE-spread multiplier: 0.5, 1.0, or 2.0}"
     case "$2" in 0.5|1.0|2.0) ;; *) echo "Invalid B4 multiplier: $2" >&2; exit 2;; esac
@@ -16,7 +16,7 @@ case "${RUNG}" in
   *) echo "Unsupported rung: $1" >&2; exit 2;;
 esac
 
-REPO=${NEON_REPO:-/home/jrj6wm/GINO_Model/neuraloperator_neon_v4_integrated}
+REPO=${NEON_REPO:-/home/jrj6wm/GINO_Model/neuraloperator_neon_phase5}
 CONTAINER=${NEON_CONTAINER:-/share/resources/containers/apptainer/archive/pytorch-2.0.1.sif}
 RUN_ROOT=${NEON_RUN_ROOT:-/scratch/jrj6wm/GINO_Model/neon_stage2_full_train/repair_v4}
 N_TRAIN=${NEON_N_TRAIN:-450}
@@ -98,6 +98,15 @@ ENV_ARGS=(
 if [[ -n "${NEON_DE_SPREAD_MULTIPLIER:-}" ]]; then
   ENV_ARGS+=("NEON_DE_SPREAD_MULTIPLIER=${NEON_DE_SPREAD_MULTIPLIER}")
 fi
+if [[ -n "${NEON_DIRICHLET_PARTICLE_SEED:-}" ]]; then
+  ENV_ARGS+=("NEON_DIRICHLET_PARTICLE_SEED=${NEON_DIRICHLET_PARTICLE_SEED}")
+fi
+if [[ -n "${NEON_PRIOR_TARGET_STD_M:-}" ]]; then
+  ENV_ARGS+=("NEON_PRIOR_TARGET_STD_M=${NEON_PRIOR_TARGET_STD_M}")
+fi
+for NAME in NEON_PRIOR_SEED NEON_TRAIN_SEED; do
+  if [[ -n "${!NAME:-}" ]]; then ENV_ARGS+=("${NAME}=${!NAME}"); fi
+done
 apptainer exec --bind /scratch,/home "${CONTAINER}" \
   env "${ENV_ARGS[@]}" python "${REPO}/scripts/neon_stage2_tr_train.py"
 test -s "${GENERATED_PREFLIGHT}"
@@ -131,7 +140,21 @@ EXPORTS="ALL,NEON_REPO=${REPO},NEON_CONTAINER=${CONTAINER},NEON_EXPECTED_HEAD=${
 if [[ -n "${NEON_DE_SPREAD_MULTIPLIER:-}" ]]; then
   EXPORTS+=",NEON_DE_SPREAD_MULTIPLIER=${NEON_DE_SPREAD_MULTIPLIER}"
 fi
+if [[ -n "${NEON_DIRICHLET_PARTICLE_SEED:-}" ]]; then
+  EXPORTS+=",NEON_DIRICHLET_PARTICLE_SEED=${NEON_DIRICHLET_PARTICLE_SEED}"
+fi
+if [[ -n "${NEON_PRIOR_TARGET_STD_M:-}" ]]; then
+  EXPORTS+=",NEON_PRIOR_TARGET_STD_M=${NEON_PRIOR_TARGET_STD_M}"
+fi
+for NAME in NEON_PRIOR_SEED NEON_TRAIN_SEED; do
+  if [[ -n "${!NAME:-}" ]]; then EXPORTS+=",${NAME}=${!NAME}"; fi
+done
+SBATCH_ARGS=()
+if [[ -n "${NEON_SBATCH_DEPENDENCY:-}" ]]; then
+  SBATCH_ARGS+=(--dependency="${NEON_SBATCH_DEPENDENCY}")
+fi
 JOB_ID=$(sbatch --parsable \
+  "${SBATCH_ARGS[@]}" \
   --job-name="neon_${TAG}" \
   --output="${OUT_DIR}/slurm-%j.out" \
   --error="${OUT_DIR}/slurm-%j.err" \

@@ -26,7 +26,9 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import math
 import os
+import subprocess
 import sys
 import time
 from dataclasses import asdict
@@ -62,7 +64,7 @@ CACHE_DIR = Path(
     or "/scratch/jrj6wm/GINO_Model/neon_stage2_full_train/feature_cache_tr_k8"
 )
 
-PRIOR_SEED = 20260703
+PRIOR_SEED = int(os.environ.get("NEON_PRIOR_SEED") or "20260703")
 PRIOR_SCALE = os.environ.get("NEON_PRIOR_SCALE") or "auto_0p10_base_rmse"
 D_E = int(os.environ.get("NEON_D_E") or "16")
 N_EPOCHS = int(os.environ.get("NEON_EPOCHS") or "30")
@@ -70,10 +72,18 @@ VAL_SEED = 1234
 
 
 def _ladder_overrides(
-    rung: str, *, de_spread_multiplier: float | None = None
+    rung: str,
+    *,
+    de_spread_multiplier: float | None = None,
+    dirichlet_particle_seed: int | None = None,
+    prior_target_std_m: float | None = None,
 ) -> dict:
     rung = str(rung).strip().upper()
-    if rung not in {"B0", "B1A", "B1B", "B2", "B3", "B4", "B5"}:
+    supported = {
+        "B0", "B1A", "B1B", "B2", "B3", "B4", "B5",
+        "P1B_A", "P1B_B", "P1B_C", "P2",
+    }
+    if rung not in supported:
         raise ValueError(f"unsupported NEON ladder rung {rung!r}.")
     values = {
         "bootstrap_distribution": "tempered_exponential",
@@ -86,11 +96,12 @@ def _ladder_overrides(
         "selection_enforce_rmse": False,
         "selection_min_retention": 0.0,
     }
-    if rung in {"B1A", "B1B", "B2", "B3", "B4", "B5"}:
+    repaired = {"P1B_A", "P1B_B", "P1B_C", "P2"}
+    if rung in {"B1A", "B1B", "B2", "B3", "B4", "B5"} | repaired:
         values["member_bootstrap_enabled"] = False
-    if rung in {"B1B", "B2", "B3", "B4", "B5"}:
+    if rung in {"B1B", "B2", "B3", "B4", "B5"} | repaired:
         values["bootstrap_distribution"] = "probit_exponential"
-    if rung in {"B2", "B3", "B4", "B5"}:
+    if rung in {"B2", "B3", "B4", "B5"} | repaired:
         values.update(
             epistemic_basis="hermite_random_projection",
             concat_index=False,
@@ -98,7 +109,7 @@ def _ladder_overrides(
             deterministic_head=True,
             deterministic_head_feature="canonical_aleatory_mean",
         )
-    if rung in {"B3", "B4", "B5"}:
+    if rung in {"B3", "B4", "B5"} | repaired:
         values.update(selection_metric="mixture_crps", selection_enforce_rmse=True)
     if rung == "B4":
         multiplier = float(
@@ -120,8 +131,60 @@ def _ladder_overrides(
             prior_rff_dim=0,
             d_e=16,
             dirichlet_num_particles=16,
+            dirichlet_particle_seed=int(
+                dirichlet_particle_seed
+                if dirichlet_particle_seed is not None
+                else (os.environ.get("NEON_DIRICHLET_PARTICLE_SEED") or "123")
+            ),
             m_eval=16,
         )
+    if rung == "P1B_A":
+        values.update(
+            d_e=128,
+            bootstrap_index_dim=None,
+            epistemic_basis="hermite_random_projection",
+            epistemic_linear_terms=True,
+            epistemic_quadratic_terms=0,
+            train_parameter_match_basis_dim=None,
+        )
+    if rung == "P1B_B":
+        values.update(
+            d_e=16,
+            bootstrap_index_dim=128,
+            bootstrap_model_projection_seed=123,
+            train_parameter_match_basis_dim=None,
+        )
+    if rung == "P1B_C":
+        values.update(
+            d_e=16,
+            bootstrap_index_dim=None,
+            train_parameter_match_basis_dim=128,
+        )
+    if rung == "P2":
+        values.update(
+            d_e=16,
+            bootstrap_index_dim=None,
+            epistemic_basis="identity",
+            concat_index=False,
+            prior_rff_dim=32,
+            train_parameter_match_basis_dim=None,
+        )
+    target_std_m = (
+        prior_target_std_m
+        if prior_target_std_m is not None
+        else (
+            float(os.environ["NEON_PRIOR_TARGET_STD_M"])
+            if os.environ.get("NEON_PRIOR_TARGET_STD_M")
+            else None
+        )
+    )
+    if target_std_m is not None:
+        if not math.isfinite(float(target_std_m)) or float(target_std_m) <= 0.0:
+            raise ValueError("NEON_PRIOR_TARGET_STD_M must be finite and > 0.")
+        values["prior_scale"] = {
+            "mode": "de_spread_target",
+            "target_std_m": float(target_std_m),
+        }
     return values
 
 
@@ -132,6 +195,8 @@ def _resolved_ladder_config(
     d_e: int,
     n_epochs: int,
     de_spread_multiplier: float | None = None,
+    dirichlet_particle_seed: int | None = None,
+    prior_target_std_m: float | None = None,
 ):
     """Resolve and validate one attribution-ladder configuration."""
     from neuralop.flood.neon_config import NEONStage2Config
@@ -151,7 +216,10 @@ def _resolved_ladder_config(
     )
     config_kwargs.update(
         _ladder_overrides(
-            rung, de_spread_multiplier=de_spread_multiplier
+            rung,
+            de_spread_multiplier=de_spread_multiplier,
+            dirichlet_particle_seed=dirichlet_particle_seed,
+            prior_target_std_m=prior_target_std_m,
         )
     )
     return NEONStage2Config(**config_kwargs).validate()
@@ -166,6 +234,7 @@ def _write_preflight_manifest(
     output_dir: Path,
     cache_dir: Path,
     subset_replicate: int,
+    prior_seed: int | None = None,
 ) -> None:
     """Atomically persist the exact validated configuration before sbatch."""
     payload = {
@@ -173,6 +242,9 @@ def _write_preflight_manifest(
         "ladder_rung": str(rung).upper(),
         "n_train": int(n_train),
         "subset_replicate": int(subset_replicate),
+        "prior_seed": int(PRIOR_SEED if prior_seed is None else prior_seed),
+        "training_generator_seed": int(os.environ.get("NEON_TRAIN_SEED") or "0"),
+        "validation_seed": int(VAL_SEED),
         "output_dir": str(output_dir),
         "cache_dir": str(cache_dir),
         "config": asdict(config),
@@ -190,6 +262,41 @@ def _sha256(path: str) -> str:
         for block in iter(lambda: fh.read(1 << 20), b""):
             h.update(block)
     return h.hexdigest()
+
+
+def _write_training_completion_manifest(
+    *,
+    output_dir: Path,
+    checkpoint_path: Path,
+    history_path: Path,
+    preflight_path: Path,
+    git_head: str,
+    rung: str,
+    n_train: int,
+) -> Path:
+    """Atomically sign the exact training products consumed by Phase 5."""
+
+    from neuralop.flood.eval.neon_phase5 import write_checksummed_artifact
+
+    files = {
+        "checkpoint": Path(checkpoint_path),
+        "history": Path(history_path),
+        "preflight": Path(preflight_path),
+    }
+    missing = [str(path) for path in files.values() if not path.is_file()]
+    if missing:
+        raise FileNotFoundError(f"cannot complete NEON training; missing products: {missing}")
+    payload = {
+        "schema_version": "neon_stage2_training_complete_v1",
+        "git_head": str(git_head),
+        "ladder_rung": str(rung).upper(),
+        "n_train": int(n_train),
+        "input_paths": {key: str(path.resolve()) for key, path in files.items()},
+        "input_sha256": {key: _sha256(str(path)) for key, path in files.items()},
+    }
+    destination = Path(output_dir) / "TRAINING_COMPLETE.json"
+    write_checksummed_artifact(destination, payload)
+    return destination
 
 
 def _training_state_paths(output_dir: Path) -> tuple[Path, Path | None]:
@@ -285,7 +392,7 @@ def main() -> int:
     }
     LOG.info("normalizer fingerprint: %s", normalizer_fingerprint)
 
-    gen = torch.Generator().manual_seed(0)
+    gen = torch.Generator().manual_seed(int(os.environ.get("NEON_TRAIN_SEED") or "0"))
     t1 = time.time()
     latest_state_path, resume_state_path = _training_state_paths(OUT_DIR)
     if resume_state_path is not None:
@@ -340,8 +447,25 @@ def main() -> int:
             "best_val_fit": result.best_val_fit,
             "history": result.history,
         }, fh, indent=2)
+    expected_head = os.environ.get("NEON_EXPECTED_HEAD")
+    if not expected_head:
+        expected_head = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], text=True
+        ).strip()
+    completion_path = _write_training_completion_manifest(
+        output_dir=OUT_DIR,
+        checkpoint_path=OUT_DIR / "neon_stage2_best.pt",
+        history_path=hist_path,
+        preflight_path=Path(
+            os.environ.get("NEON_PREFLIGHT_PATH") or OUT_DIR / "preflight.json"
+        ),
+        git_head=expected_head,
+        rung=LADDER_RUNG,
+        n_train=N_TRAIN,
+    )
     LOG.info("best_epoch=%s best_val_fit=%.6f history=%s",
              result.best_epoch, result.best_val_fit, hist_path)
+    LOG.info("signed training completion=%s", completion_path)
     for row in result.history:
         LOG.info("  epoch %2d  train_fit=%.5f  train_total=%.5f  val_fit=%.5f",
                  row["epoch"], row["train_fit"], row["train_total"], row["val_fit"])

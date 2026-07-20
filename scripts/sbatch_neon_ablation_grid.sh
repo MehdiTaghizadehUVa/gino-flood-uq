@@ -13,13 +13,15 @@ set -euo pipefail
 
 : "${NEON_EXPECTED_HEAD:?Missing preflight Git HEAD}"
 : "${NEON_SCALEOUT_PLAN:?Missing scale-out plan}"
-REPO=${NEON_REPO:-/home/jrj6wm/GINO_Model/neuraloperator_neon_v4_integrated}
+: "${NEON_PROTOCOL_SHA256:?Missing Phase-5 protocol checksum}"
+: "${NEON_GOVERNING_GATE_SHA256:?Missing governing Phase-5 gate checksum}"
+REPO=${NEON_REPO:-/home/jrj6wm/GINO_Model/neuraloperator_neon_phase5}
 CONTAINER=${NEON_CONTAINER:-/share/resources/containers/apptainer/archive/pytorch-2.0.1.sif}
 N_VALUES=(25 50 100 250 400)
 N_INDEX=$((SLURM_ARRAY_TASK_ID % 5))
 export NEON_SUBSET_REPLICATE=$((SLURM_ARRAY_TASK_ID / 5))
 export NEON_N_TRAIN=${N_VALUES[$N_INDEX]}
-export NEON_LADDER_RUNG=B3
+export NEON_LADDER_RUNG=${NEON_SCALEOUT_RUNG:-B3}
 export NEON_OUT_DIR=${NEON_SCALEOUT_ROOT}/rep${NEON_SUBSET_REPLICATE}/n${NEON_N_TRAIN}
 export NEON_CACHE_DIR
 
@@ -37,7 +39,12 @@ export APPTAINERENV_PYTHONPATH="${REPO}"
 apptainer exec --bind /scratch,/home "${CONTAINER}" \
   python "${REPO}/scripts/neon_scaleout_preflight.py" validate-task \
   --plan "${NEON_SCALEOUT_PLAN}" --task-id "${SLURM_ARRAY_TASK_ID}" \
-  --expected-head "${NEON_EXPECTED_HEAD}" >/dev/null
+  --expected-head "${NEON_EXPECTED_HEAD}" \
+  --prior-seed "${NEON_PRIOR_SEED:?Missing scale-out prior seed}" \
+  --protocol-sha256 "${NEON_PROTOCOL_SHA256}" \
+  --governing-gate-sha256 "${NEON_GOVERNING_GATE_SHA256}" \
+  ${NEON_DIRICHLET_PARTICLE_SEED:+--dirichlet-particle-seed "${NEON_DIRICHLET_PARTICLE_SEED}"} \
+  >/dev/null
 printf '%s\n' "${NEON_EXPECTED_HEAD}" > "${NEON_OUT_DIR}/git_head.txt"
 printf '%s\n' "${SLURM_ARRAY_JOB_ID}_${SLURM_ARRAY_TASK_ID}" > "${NEON_OUT_DIR}/slurm_task_id.txt"
 export APPTAINERENV_NEON_LADDER_RUNG="${NEON_LADDER_RUNG}"
@@ -45,5 +52,9 @@ export APPTAINERENV_NEON_N_TRAIN="${NEON_N_TRAIN}"
 export APPTAINERENV_NEON_SUBSET_REPLICATE="${NEON_SUBSET_REPLICATE}"
 export APPTAINERENV_NEON_OUT_DIR="${NEON_OUT_DIR}"
 export APPTAINERENV_NEON_CACHE_DIR="${NEON_CACHE_DIR}"
+export APPTAINERENV_NEON_PRIOR_SEED="${NEON_PRIOR_SEED:?Missing scale-out prior seed}"
+if [[ -n "${NEON_DIRICHLET_PARTICLE_SEED:-}" ]]; then
+  export APPTAINERENV_NEON_DIRICHLET_PARTICLE_SEED="${NEON_DIRICHLET_PARTICLE_SEED}"
+fi
 apptainer exec --nv ${APPTAINER_BIND_ARGS} "${CONTAINER}" \
   python scripts/neon_stage2_tr_train.py
