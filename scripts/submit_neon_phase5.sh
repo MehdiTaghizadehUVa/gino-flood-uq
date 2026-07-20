@@ -84,6 +84,12 @@ env NEON_REPO="${REPO}" NEON_CONTAINER="${CONTAINER}" \
   NEON_CONFIG="${CONFIG}" NEON_BUNDLE="${BUNDLE}" NEON_SUBMIT_DRY_RUN=1 \
   bash scripts/submit_neon_phase5_legacy_sweep.sh "${ROOT}/d4_legacy"
 
+if [[ "${NEON_SUBMIT_DRY_RUN:-0}" == 1 ]]; then
+  printf 'Validated complete Phase-5 submission plan: root=%s head=%s\n' \
+    "${ROOT}" "${HEAD}"
+  exit 0
+fi
+
 submit_task() {
   local task=$1 dependency=${2:-} name=$3
   local args=(--parsable --job-name="${name}" \

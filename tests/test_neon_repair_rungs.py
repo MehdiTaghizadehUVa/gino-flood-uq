@@ -172,6 +172,16 @@ def test_ood_array_pins_checkpoint_to_signed_id_evidence():
     assert "ID evidence and OOD checkpoint SHA-256 values differ" in script
 
 
+def test_phase5_top_level_dry_run_stops_before_first_sbatch():
+    script = (
+        Path(__file__).resolve().parents[1] / "scripts" / "submit_neon_phase5.sh"
+    ).read_text()
+
+    dry_run = script.index('"${NEON_SUBMIT_DRY_RUN:-0}" == 1')
+    first_submission = script.index("D2=$(submit_task")
+    assert dry_run < first_submission
+
+
 def test_conditional_pilot_manifest_writer_imports_checksummed_writer():
     script = (
         Path(__file__).resolve().parents[1]
