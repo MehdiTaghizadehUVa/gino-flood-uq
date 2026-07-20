@@ -14,9 +14,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
+import tempfile
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Optional, Sequence
+from typing import Any, Iterator, Optional, Sequence
 
 from neuralop.flood.neon_config import NEONStage2Config, load_neon_config
 
@@ -155,6 +158,35 @@ def _infer_latent_dim(config: NEONStage2Config) -> int:
     return int(getattr(config, "fgn_noise_dim", 32) or 32)
 
 
+@contextmanager
+def _patched_stage1_bundle_manifest(stage1_checkpoint: Any) -> Iterator[Path]:
+    """Yield an isolated compatibility manifest beside the source bundle.
+
+    The serving bundle may contain relative paths, so the patched manifest must
+    remain in the source directory. A process-unique file prevents concurrent
+    Slurm array tasks from truncating each other's fallback manifests.
+    """
+    source = Path(stage1_checkpoint)
+    with source.open(encoding="utf-8") as handle:
+        raw = json.load(handle)
+    raw["dt_seconds"] = 900  # tolerate serving dt metadata drift
+
+    fd, name = tempfile.mkstemp(
+        dir=source.parent,
+        prefix=f".{source.stem}.neon.",
+        suffix=".json",
+    )
+    patched = Path(name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(raw, handle)
+            handle.flush()
+            os.fsync(handle.fileno())
+        yield patched
+    finally:
+        patched.unlink(missing_ok=True)
+
+
 def _load_frozen_stage1(stage1_checkpoint: Any):  # pragma: no cover - GPU/infra path
     """Load a frozen Stage-1 coastal FGNO from a serving model-bundle JSON.
 
@@ -164,22 +196,14 @@ def _load_frozen_stage1(stage1_checkpoint: Any):  # pragma: no cover - GPU/infra
     is the path to a ``coastal_fgn_bundle.json``. Serving metadata drift (e.g.
     dt_seconds) is tolerated so the real weights load regardless.
     """
-    import json
-    from pathlib import Path as _Path
-
     from neuralop.flood.serving.inference import ProductionFGNInferenceService
     from neuralop.flood.serving.model_bundle import load_model_bundle
 
     try:
         bundle = load_model_bundle(str(stage1_checkpoint))
     except Exception:
-        with open(stage1_checkpoint) as handle:
-            raw = json.load(handle)
-        raw["dt_seconds"] = 900  # tolerate serving dt metadata drift
-        patched = str(_Path(stage1_checkpoint).with_name("coastal_fgn_bundle_neon.json"))
-        with open(patched, "w") as handle:
-            json.dump(raw, handle)
-        bundle = load_model_bundle(patched)
+        with _patched_stage1_bundle_manifest(stage1_checkpoint) as patched:
+            bundle = load_model_bundle(str(patched))
 
     import torch as _torch
 
