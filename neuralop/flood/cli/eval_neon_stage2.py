@@ -396,7 +396,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         reference_physical = inverse_transform_on_tensor_device(reference_normalizer, reference)
         sampling_design_factory = (
             fixed_support_sampling_design
-            if isinstance(module, PersistentDirichletParticleControl)
+            if particle_control is not None
             else crossed_sampling_design
         )
         sampling_design = sampling_design_factory(
@@ -469,41 +469,56 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
         impact_scalars = None
         if args.impact_metrics:
-            from neuralop.flood.eval.impact_metrics import compute_flood_impact_crps_metrics
+            from neuralop.flood.eval.impact_metrics import (
+                compute_nested_flood_impact_crps_metrics,
+            )
 
-            flat = prediction_physical.reshape(
-                1, -1, *prediction_physical.shape[3:]
-            )[0, :, :, :, 0]  # [MK, T, Nv]
-            mk = int(flat.shape[0])
-            n_sub = max(2, min(int(args.impact_members), mk))
-            if n_sub < mk:
-                # Deterministic stratified subsample across the flattened M*K
-                # grid (linspace strides across epistemic particles).
-                idx = torch.linspace(0, mk - 1, n_sub).round().long().unique()
-                flat = flat[idx]
             static_raw = np.stack(
                 [prepared["elevation_raw_np"], prepared["cell_area_m2_np"]], axis=1
             )
-            impact = compute_flood_impact_crps_metrics(
-                flat.permute(1, 0, 2).numpy(),                     # (T, ens, cells)
-                reference_physical[0, :, :, :, 0].permute(1, 0, 2).numpy(),
+            impact = compute_nested_flood_impact_crps_metrics(
+                prediction_physical[0, :, :, :, :, 0].numpy(),  # [M,K,T,Nv]
+                reference_physical[0, :, :, :, 0].numpy(),      # [R,T,Nv]
                 prepared["geometry_raw_np"],
                 static_raw=static_raw,
+                wettable_mask=(
+                    None
+                    if fam.structural_dry_mask is None
+                    else (~fam.structural_dry_mask.detach().cpu().bool()).numpy()
+                ),
+                sampling_design=sampling_design,
             )
             impact_scalars = {
                 k: float(np.nanmean(v)) for k, v in impact.items()
             }
             impact_scalars["family_id"] = fam.family_id
+            impact_scalars["nested_sampling_design"] = sampling_design.kind
             log.info("  [mem] impact done rss=%.1fG", _rss_gb())
 
         if args.write_artifacts:
             artifact_dir = out_dir / "artifacts"
             artifact_dir.mkdir(exist_ok=True)
+            structural_dry = (
+                torch.zeros(
+                    prediction_physical.shape[-2], dtype=torch.bool
+                )
+                if fam.structural_dry_mask is None
+                else fam.structural_dry_mask.detach().to("cpu", torch.bool)
+            )
+            wettable = ~structural_dry
+            dt_seconds = float(getattr(flood_config.data, "dt", 3600.0))
             save_nested_forecast_artifact(
                 artifact_dir / f"{fam.family_id}.h5",
                 hydrograph_id=fam.family_id,
                 prediction=prediction_physical,
                 ref_members_wd=reference_physical[0, :, :, :, 0].numpy(),
+                wettable_mask=wettable.numpy(),
+                structural_dry_mask=structural_dry.numpy(),
+                time_hours=(
+                    np.arange(1, prediction_physical.shape[3] + 1, dtype=np.float64)
+                    * dt_seconds
+                    / 3600.0
+                ),
                 geometry_raw=prepared["geometry_raw_np"],
                 elevation_raw=prepared["elevation_raw_np"],
                 metadata={

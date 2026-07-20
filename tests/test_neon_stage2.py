@@ -4,6 +4,7 @@ import tempfile
 import types
 from pathlib import Path
 
+import numpy as np
 import torch
 import pytest
 from torch import nn
@@ -12,7 +13,8 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 def _ensure_pkg(name: str):
-    sys.modules.setdefault(name, types.ModuleType(name))
+    package = sys.modules.setdefault(name, types.ModuleType(name))
+    package.__path__ = [str(REPO_ROOT.joinpath(*name.split(".")))]
 
 
 def _load_module(name: str, rel_path: str):
@@ -921,15 +923,29 @@ def test_forecast_artifact_round_trips_nested_member_metadata():
 def test_nested_forecast_artifact_adapter_flattens_members_and_preserves_ids():
     pred = torch.arange(1 * 2 * 2 * 3 * 4 * 1, dtype=torch.float32).reshape(1, 2, 2, 3, 4, 1)
     ref = torch.zeros(5, 3, 4, 1)
+    wettable = torch.tensor([True, False, True, True])
+    dry = ~wettable
+    time_hours = [0.25, 0.50, 0.75]
     with tempfile.TemporaryDirectory() as tmp_dir:
         path = Path(tmp_dir) / "nested.calibration_artifact.h5"
-        save_nested_forecast_artifact(path, hydrograph_id="nested", prediction=pred, ref_members_wd=ref)
+        save_nested_forecast_artifact(
+            path,
+            hydrograph_id="nested",
+            prediction=pred,
+            ref_members_wd=ref,
+            wettable_mask=wettable,
+            structural_dry_mask=dry,
+            time_hours=time_hours,
+        )
         loaded = load_forecast_artifact(path, load_members=True)
 
     assert loaded["pred_members_wd"].shape == (4, 3, 4)
     assert loaded["ref_members_wd"].shape == (5, 3, 4)
     assert loaded["member_epistemic_id"] == [0, 0, 1, 1]
     assert loaded["member_aleatory_id"] == [0, 1, 0, 1]
+    np.testing.assert_array_equal(loaded["wettable_mask"], wettable.numpy())
+    np.testing.assert_array_equal(loaded["structural_dry_mask"], dry.numpy())
+    np.testing.assert_allclose(loaded["time_hours"], time_hours)
 
 
 def test_epistemic_chunking_matches_full_fit():
@@ -1165,3 +1181,25 @@ def test_epistemic_variance_survives_size_one_chunking():
     assert abs(chunked["total_epistemic_variance"] - ref["total_epistemic_variance"]) <= 1e-6
     assert abs(chunked["prior_epistemic_variance"] - ref["prior_epistemic_variance"]) <= 1e-6
     assert abs(chunked["prior_retention_ratio"] - ref["prior_retention_ratio"]) <= 1e-6
+
+
+def test_epistemic_variance_diagnostics_use_area_mask_weights():
+    # The second cell has much larger epistemic variance but is structural-dry.
+    # A weighted contraction statistic must ignore it exactly.
+    total = torch.tensor(
+        [[[[[0.0], [0.0]]]], [[[[2.0], [20.0]]]]], dtype=torch.float32
+    ).permute(1, 0, 2, 3, 4)
+    prior = total.clone()
+    weights = torch.tensor([[[1.0], [0.0]]], dtype=torch.float32)
+
+    diagnostics = epistemic_variance_diagnostics(
+        mbar_total=total,
+        mbar_prior_scaled=prior,
+        weights=weights,
+    )
+
+    # Unbiased variance over [0, 2] is 2.0. The dry-cell variance of 200.0
+    # must not enter the weighted domain mean.
+    assert diagnostics["total_epistemic_variance"] == pytest.approx(2.0)
+    assert diagnostics["prior_epistemic_variance"] == pytest.approx(2.0)
+    assert diagnostics["prior_retention_ratio"] == pytest.approx(1.0)

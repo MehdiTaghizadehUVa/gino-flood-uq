@@ -129,6 +129,7 @@ def test_atomic_shards_merge_to_the_same_global_sufficient_statistics(tmp_path):
     payload = cli.merge_evaluation_shards(
         tmp_path / "shards", output_path=output_path, expected_families=2
     )
+    assert output_path.with_suffix(".json.sha256").is_file()
 
     assert output_path.exists()
     assert [r["family_id"] for r in payload["per_family"]] == ["TE000001", "TE000002"]

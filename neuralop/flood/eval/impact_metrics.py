@@ -262,6 +262,161 @@ def arrival_times(
     return first
 
 
+def _nested_score_function(sampling_design: Any):
+    """Resolve the finite-ensemble score implied by a nested sampling design."""
+
+    from neuralop.flood.neon import (
+        crossed_fair_crps_members,
+        fixed_support_fair_crps_members,
+        independent_nested_fair_crps_members,
+    )
+
+    kind = getattr(sampling_design, "kind", sampling_design)
+    scorers = {
+        "crossed_common_random_numbers": crossed_fair_crps_members,
+        "crossed": crossed_fair_crps_members,
+        "fixed_epistemic_support_common_random_numbers": fixed_support_fair_crps_members,
+        "fixed_support": fixed_support_fair_crps_members,
+        "independent_nested": independent_nested_fair_crps_members,
+    }
+    try:
+        return scorers[str(kind)]
+    except KeyError as exc:
+        raise ValueError(
+            "Impact metrics require a recognized nested sampling design; got "
+            f"{kind!r}."
+        ) from exc
+
+
+def _nested_crps_scalar(
+    forecast: np.ndarray,
+    reference: np.ndarray,
+    *,
+    scorer: Any,
+    weights: np.ndarray | None = None,
+) -> float:
+    """Score ``[M,K,L]`` against ``[R,L]`` without flattening the design."""
+
+    import torch
+
+    pred = torch.as_tensor(np.asarray(forecast), dtype=torch.float64)
+    ref = torch.as_tensor(np.asarray(reference), dtype=torch.float64)
+    if pred.ndim != 3 or ref.ndim != 2 or pred.shape[2] != ref.shape[1]:
+        raise ValueError(
+            "Nested impact score expects forecast [M,K,L] and reference [R,L]."
+        )
+    pred = pred.unsqueeze(0).unsqueeze(3).unsqueeze(-1)  # [1,M,K,1,L,1]
+    ref = ref.unsqueeze(0).unsqueeze(2).unsqueeze(-1)  # [1,R,1,L,1]
+    score_weights = None
+    if weights is not None:
+        score_weights = torch.as_tensor(weights, dtype=torch.float64).reshape(1, -1, 1)
+    return float(
+        scorer(
+            pred,
+            ref,
+            weights=score_weights,
+            reduction="mean",
+        ).item()
+    )
+
+
+def compute_nested_flood_impact_crps_metrics(
+    pred_wd_nested: np.ndarray,
+    ref_wd_rollout: np.ndarray,
+    geometry: Any,
+    static_raw: Any = None,
+    wettable_mask: Optional[np.ndarray] = None,
+    config: Any = None,
+    *,
+    sampling_design: Any,
+) -> Dict[str, np.ndarray | float]:
+    """Compute design-aware impact CRPS for one nested NEON forecast.
+
+    The forecast must retain its ``[M,K,T,Nv]`` epistemic-by-aleatory axes.
+    Inundated areas are reported in km2 and use the configured depth threshold
+    (0.1 m by default). Arrival time is right-censored at ``T+1`` for members
+    and reference realizations that never exceed the threshold.
+    """
+
+    cfg = normalize_impact_metrics_config(config)
+    if not cfg.enabled:
+        return {}
+    pred = np.asarray(pred_wd_nested, dtype=np.float64)
+    ref = np.asarray(ref_wd_rollout, dtype=np.float64)
+    if pred.ndim != 4 or ref.ndim != 3:
+        raise ValueError(
+            "Nested impact metrics expect prediction [M,K,T,Nv] and reference [R,T,Nv]."
+        )
+    M, K, n_steps, n_cells = pred.shape
+    if M < 2 or K < 2:
+        raise ValueError("Nested impact metrics require M >= 2 and K >= 2.")
+    if ref.shape[1:] != (n_steps, n_cells):
+        raise ValueError(
+            "Forecast/reference nested impact arrays must share time and cell dimensions."
+        )
+    scorer = _nested_score_function(sampling_design)
+    coords, area_m2, active = _active_geometry_and_area(
+        geometry, static_raw, wettable_mask, n_cells
+    )
+    if coords.shape[0] == 0:
+        return {}
+    pred = pred[..., active]
+    ref = ref[..., active]
+    domain_area_m2 = float(np.sum(area_m2))
+    if not np.isfinite(domain_area_m2) or domain_area_m2 <= 0.0:
+        raise ValueError("Impact metric normalization requires positive active-domain area.")
+
+    area_km2 = area_m2 / 1_000_000.0
+    threshold = float(cfg.inundation_threshold_m)
+    pred_area = np.sum((pred >= threshold) * area_km2[None, None, None, :], axis=-1)
+    ref_area = np.sum((ref >= threshold) * area_km2[None, None, :], axis=-1)
+    pred_peak = np.maximum.accumulate(pred_area, axis=2)
+    ref_peak = np.maximum.accumulate(ref_area, axis=1)
+
+    area_scores = []
+    peak_scores = []
+    for t in range(n_steps):
+        area_scores.append(
+            _nested_crps_scalar(
+                pred_area[:, :, t, None],
+                ref_area[:, t, None],
+                scorer=scorer,
+            )
+        )
+        peak_scores.append(
+            _nested_crps_scalar(
+                pred_peak[:, :, t, None],
+                ref_peak[:, t, None],
+                scorer=scorer,
+            )
+        )
+
+    pred_wet = pred >= threshold
+    ref_wet = ref >= threshold
+    censor_step = float(n_steps + 1)
+    pred_any = np.any(pred_wet, axis=2)
+    ref_any = np.any(ref_wet, axis=1)
+    pred_arrival = np.argmax(pred_wet, axis=2).astype(np.float64) + 1.0
+    ref_arrival = np.argmax(ref_wet, axis=1).astype(np.float64) + 1.0
+    pred_arrival[~pred_any] = censor_step
+    ref_arrival[~ref_any] = censor_step
+    arrival_score = _nested_crps_scalar(
+        pred_arrival,
+        ref_arrival,
+        scorer=scorer,
+        weights=area_m2,
+    )
+
+    return {
+        "crps_total_inundated_area_km2": np.asarray(area_scores, dtype=np.float64),
+        "crps_peak_inundated_area_km2": np.asarray(peak_scores, dtype=np.float64),
+        "crps_arrival_time_step": float(arrival_score),
+        "inundation_threshold_m": threshold,
+        "area_unit_scale_m2_per_output_unit": 1_000_000.0,
+        "arrival_censor_step": censor_step,
+    }
+
+
 def compute_flood_impact_crps_metrics(
     pred_wd_rollout: np.ndarray,
     ref_wd_rollout: np.ndarray,

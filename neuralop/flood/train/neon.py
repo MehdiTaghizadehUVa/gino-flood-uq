@@ -31,6 +31,7 @@ from neuralop.flood.neon import (
     fixed_support_fair_crps_members,
     per_epistemic_fair_crps,
     prior_psi_floor_diagnostic,
+    project_bootstrap_epistemic_indices,
     sample_epistemic_indices,
     save_neon_stage2_checkpoint,
     stage2_fit_score,
@@ -743,6 +744,7 @@ def neon_stage2_training_step(
             epistemic_variance_diagnostics(
                 mbar_total=_mbar_total,
                 mbar_prior_scaled=_mbar_prior,
+                weights=weights,
             )
         )
         losses.diagnostics.update(
@@ -814,6 +816,7 @@ def neon_stage2_training_step(
             epistemic_variance_diagnostics(
                 mbar_total=_mbar_total,
                 mbar_prior_scaled=_mbar_prior,
+                weights=weights,
             )
         )
         diag_agg.update(
@@ -1260,6 +1263,33 @@ def _prefetch_feature(
     )
 
 
+def _sample_model_epistemic_indices(
+    num_particles: int,
+    model_dim: int,
+    *,
+    projection: torch.Tensor | None,
+    device: torch.device | str,
+    dtype: torch.dtype,
+    generator: torch.Generator | None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Sample bootstrap indices and return their model-space representation."""
+
+    bootstrap_dim = int(model_dim) if projection is None else int(projection.shape[0])
+    bootstrap_index = sample_epistemic_indices(
+        int(num_particles),
+        bootstrap_dim,
+        device=device,
+        dtype=dtype,
+        generator=generator,
+    )
+    model_index = project_bootstrap_epistemic_indices(
+        bootstrap_index,
+        model_dim=int(model_dim),
+        projection=projection,
+    )
+    return model_index, bootstrap_index
+
+
 def _evaluate_neon_validation(
     *,
     module: NEONEpistemicCorrection,
@@ -1274,6 +1304,7 @@ def _evaluate_neon_validation(
     physical_scale: float = 1.0,
     paired_rmse_rows: list[dict[str, float | str]] | None = None,
     fixed_epistemic_support: torch.Tensor | None = None,
+    bootstrap_model_projection: torch.Tensor | None = None,
     target_normalizer=None,
     reference_normalizer=None,
 ) -> tuple[float, dict[str, float]]:
@@ -1316,12 +1347,14 @@ def _evaluate_neon_validation(
                     device=batch.features.device, dtype=batch.features.dtype
                 )
                 if fixed_epistemic_support is not None
-                else sample_epistemic_indices(
-                    int(m), int(d_e),
+                else _sample_model_epistemic_indices(
+                    int(m),
+                    int(d_e),
+                    projection=bootstrap_model_projection,
                     device=batch.features.device,
                     dtype=batch.features.dtype,
                     generator=generator,
-                )
+                )[0]
             )
             ref = _reference_with_batch_dim(family.reference)
             total_m = int(z_e.shape[0])
@@ -1403,7 +1436,7 @@ def _evaluate_neon_validation(
             nested_metric = flat_metric.reshape_as(nested_prediction)
             mixture_score = (
                 fixed_support_fair_crps_members
-                if isinstance(module, PersistentDirichletParticleControl)
+                if fixed_epistemic_support is not None
                 else crossed_fair_crps_members
             )
             mixture_crps = mixture_score(
@@ -1481,19 +1514,18 @@ def _evaluate_neon_validation(
                 epistemic_variance_diagnostics(
                     mbar_total=_mbar_total,
                     mbar_prior_scaled=_mbar_prior,
+                    weights=family.weights,
                 )
             )
             # Corrections are represented in normalized target units even when
             # forecast skill is evaluated after inverse transformation.  The
             # standard-deviation diagnostics therefore need the affine target
             # scale explicitly to remain comparable across normalizers.
-            diag_val["total_epistemic_std_physical"] = (
-                math.sqrt(max(diag_val["total_epistemic_variance"], 0.0))
-                * float(physical_scale)
+            diag_val["total_epistemic_variance_physical"] = (
+                diag_val["total_epistemic_variance"] * float(physical_scale) ** 2
             )
-            diag_val["prior_epistemic_std_physical"] = (
-                math.sqrt(max(diag_val["prior_epistemic_variance"], 0.0))
-                * float(physical_scale)
+            diag_val["prior_epistemic_variance_physical"] = (
+                diag_val["prior_epistemic_variance"] * float(physical_scale) ** 2
             )
             diag_val.update(
                 prior_psi_floor_diagnostic(
@@ -1508,7 +1540,14 @@ def _evaluate_neon_validation(
                 diag_total[key] = diag_total.get(key, 0.0) + value
             count += 1
     denom = max(count, 1)
-    return total / denom, {key: value / denom for key, value in diag_total.items()}
+    averaged = {key: value / denom for key, value in diag_total.items()}
+    averaged["total_epistemic_std_physical"] = math.sqrt(
+        max(averaged.get("total_epistemic_variance_physical", 0.0), 0.0)
+    )
+    averaged["prior_epistemic_std_physical"] = math.sqrt(
+        max(averaged.get("prior_epistemic_variance_physical", 0.0), 0.0)
+    )
+    return total / denom, averaged
 
 
 def build_neon_stage2_metadata(
@@ -1599,6 +1638,7 @@ def train_neon_stage2_epochs(
     selection_enforce_rmse: bool = True,
     validation_physical_scale: float = 1.0,
     dirichlet_particle_control: PersistentDirichletParticleControl | None = None,
+    bootstrap_model_projection: torch.Tensor | None = None,
     validation_target_normalizer=None,
     validation_reference_normalizer=None,
     progress_reporter: Optional[NEONTrainingProgressReporter] = None,
@@ -1672,6 +1712,7 @@ def train_neon_stage2_epochs(
         train_diag_sum: dict[str, float] = {}
         n_train_families = 0
         epoch_z_e = None
+        epoch_bootstrap_index = None
         epoch_bootstrap_weights = None
         ordered_indices = _shuffled_family_indices(
             len(train_families),
@@ -1710,9 +1751,11 @@ def train_neon_stage2_epochs(
         ):
             optimizer.zero_grad(set_to_none=True)
             group_z_e = epoch_z_e
+            group_bootstrap_index = epoch_bootstrap_index
             group_bootstrap_weights = epoch_bootstrap_weights
             if epistemic_resample == "effective_batch":
                 group_z_e = None
+                group_bootstrap_index = None
                 group_bootstrap_weights = None
             for micro_indices in _chunk_indices(effective_indices, family_batch_size):
                 micro_families = [train_families[idx] for idx in micro_indices]
@@ -1761,8 +1804,10 @@ def train_neon_stage2_epochs(
                             )
                         )
                     else:
-                        group_z_e = sample_epistemic_indices(
-                            int(m_train), int(d_e),
+                        group_z_e, group_bootstrap_index = _sample_model_epistemic_indices(
+                            int(m_train),
+                            int(d_e),
+                            projection=bootstrap_model_projection,
                             device=batch.features.device,
                             dtype=batch.features.dtype,
                             generator=generator,
@@ -1771,7 +1816,7 @@ def train_neon_stage2_epochs(
                         if bool(boot.get("enabled", False)) and objective == "per_epistemic_fcrps":
                             group_bootstrap_weights = epistemic_bootstrap_weights(
                                 all_family_ids,
-                                group_z_e,
+                                group_bootstrap_index,
                                 seed=int(boot.get("seed", 0)),
                                 distribution=str(boot.get("distribution", "tempered_exponential")),
                                 temperature=float(boot.get("temperature", 0.5)),
@@ -1781,6 +1826,7 @@ def train_neon_stage2_epochs(
                             )
                     if epistemic_resample == "epoch":
                         epoch_z_e = group_z_e
+                        epoch_bootstrap_index = group_bootstrap_index
                         epoch_bootstrap_weights = group_bootstrap_weights
                 z_e = group_z_e
                 sample_weights = None
@@ -1800,7 +1846,7 @@ def train_neon_stage2_epochs(
                 if bool(member_boot.get("enabled", False)) and objective == "per_epistemic_fcrps":
                     member_weights = epistemic_member_bootstrap_weights(
                         [family.family_id for family in micro_families],
-                        z_e,
+                        group_bootstrap_index if group_bootstrap_index is not None else z_e,
                         int(reference.shape[1]),
                         member_indices=reference_member_indices,
                         seed=int(member_boot.get("seed", 1)),
@@ -1938,6 +1984,7 @@ def train_neon_stage2_epochs(
                 if dirichlet_particle_control is None
                 else dirichlet_particle_control.eval_epistemic_indices()
             ),
+            bootstrap_model_projection=bootstrap_model_projection,
             target_normalizer=validation_target_normalizer,
             reference_normalizer=validation_reference_normalizer,
         )

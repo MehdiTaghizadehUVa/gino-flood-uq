@@ -306,6 +306,142 @@ def sample_epistemic_indices(
     )
 
 
+def fixed_bootstrap_model_projection(
+    bootstrap_dim: int,
+    model_dim: int,
+    *,
+    seed: int,
+    dtype: torch.dtype = torch.float32,
+) -> torch.Tensor:
+    """Return a deterministic orthonormal map from bootstrap to model index.
+
+    If ``u ~ N(0, I_bootstrap)`` and the returned matrix is ``P``, then
+    ``u @ P ~ N(0, I_model)``.  The matrix is stored in Stage-2 checkpoint
+    metadata; the seed is construction provenance, not the behavioral
+    definition of an already-trained model.
+    """
+
+    bootstrap_dim = int(bootstrap_dim)
+    model_dim = int(model_dim)
+    if bootstrap_dim < model_dim:
+        raise ValueError(
+            "bootstrap_dim must be >= model_dim for an orthonormal projection, "
+            f"got {bootstrap_dim} < {model_dim}."
+        )
+    if model_dim < 1:
+        raise ValueError("model_dim must be >= 1.")
+    generator = torch.Generator(device="cpu").manual_seed(int(seed))
+    matrix = torch.randn(
+        bootstrap_dim,
+        model_dim,
+        generator=generator,
+        dtype=torch.float64,
+    )
+    projection, triangular = torch.linalg.qr(matrix, mode="reduced")
+    # Fix QR's otherwise arbitrary column signs for stable cross-version hashes.
+    signs = torch.sign(torch.diagonal(triangular))
+    signs = torch.where(signs == 0, torch.ones_like(signs), signs)
+    return (projection * signs.unsqueeze(0)).to(dtype=dtype).contiguous()
+
+
+def project_bootstrap_epistemic_indices(
+    bootstrap_index: torch.Tensor,
+    *,
+    model_dim: int,
+    projection: torch.Tensor | Sequence[Sequence[float]] | None,
+) -> torch.Tensor:
+    """Map bootstrap-law indices into the EpiNet model-index space.
+
+    Bootstrap weights must be evaluated in the original bootstrap space.  The
+    returned tensor is only the index supplied to the Stage-2 model.  Stored
+    projections are validated here so training and all evaluation paths obey
+    the same law.
+    """
+
+    if bootstrap_index.ndim != 2:
+        raise ValueError(
+            "bootstrap_index must have shape [particles, bootstrap_dim], got "
+            f"{tuple(bootstrap_index.shape)}."
+        )
+    model_dim = int(model_dim)
+    bootstrap_dim = int(bootstrap_index.shape[1])
+    if projection is None:
+        if bootstrap_dim != model_dim:
+            raise ValueError(
+                "bootstrap/model dimensions differ but no projection was supplied: "
+                f"bootstrap_dim={bootstrap_dim}, model_dim={model_dim}."
+            )
+        return bootstrap_index
+
+    matrix = torch.as_tensor(
+        projection,
+        device=bootstrap_index.device,
+        dtype=bootstrap_index.dtype,
+    )
+    expected = (bootstrap_dim, model_dim)
+    if matrix.ndim != 2 or tuple(matrix.shape) != expected:
+        raise ValueError(
+            "bootstrap_model_projection must have shape "
+            f"{expected}, got {tuple(matrix.shape)}."
+        )
+    gram = matrix.detach().float().T @ matrix.detach().float()
+    if not torch.allclose(
+        gram.cpu(), torch.eye(model_dim), atol=2.0e-5, rtol=0.0
+    ):
+        raise ValueError("bootstrap_model_projection columns must be orthonormal.")
+    return bootstrap_index @ matrix
+
+
+def match_projected_trainable_hidden_channels(
+    *,
+    input_dim: int,
+    source_hidden_channels: int,
+    source_basis_dim: int,
+    target_basis_dim: int,
+    out_channels: int,
+    n_hidden_layers: int,
+    max_hidden_channels: int = 4096,
+) -> int:
+    """Match the trainable projected-branch MLP parameter count.
+
+    This isolates index/basis capacity from raw parameter count in the P1b-C
+    control.  Only the trainable coefficient MLP is matched; deterministic and
+    frozen-prior branches are unchanged and reported separately.
+    """
+
+    input_dim = int(input_dim)
+    source_hidden_channels = int(source_hidden_channels)
+    source_basis_dim = int(source_basis_dim)
+    target_basis_dim = int(target_basis_dim)
+    out_channels = int(out_channels)
+    n_hidden_layers = int(n_hidden_layers)
+    if min(
+        input_dim,
+        source_hidden_channels,
+        source_basis_dim,
+        target_basis_dim,
+        out_channels,
+    ) < 1:
+        raise ValueError("all dimensions must be >= 1.")
+    if n_hidden_layers < 1:
+        raise ValueError("n_hidden_layers must be >= 1 for parameter matching.")
+
+    def _count(hidden: int, basis_dim: int) -> int:
+        hidden = int(hidden)
+        output_dim = out_channels * int(basis_dim)
+        total = input_dim * hidden + hidden
+        for _ in range(n_hidden_layers - 1):
+            total += hidden * hidden + hidden
+        total += hidden * output_dim + output_dim
+        return total
+
+    source_count = _count(source_hidden_channels, source_basis_dim)
+    return min(
+        range(1, int(max_hidden_channels) + 1),
+        key=lambda hidden: (abs(_count(hidden, target_basis_dim) - source_count), hidden),
+    )
+
+
 class CenteredHermiteBasis(nn.Module):
     """Low-rank analytically centered basis for Gaussian epistemic indices.
 
@@ -1823,6 +1959,7 @@ def epistemic_variance_diagnostics(
     *,
     mbar_total: torch.Tensor,
     mbar_prior_scaled: torch.Tensor,
+    weights: torch.Tensor | None = None,
     eps: float = 1.0e-12,
 ) -> dict[str, float]:
     """Epistemic (``z_e``) variance of the aleatory-averaged corrections.
@@ -1832,18 +1969,45 @@ def epistemic_variance_diagnostics(
     aleatory (``K``) axis. Both inputs are ``[B, M, T, Nv, C]`` and MUST carry
     the full set of ``M`` epistemic particles.
 
-    This exists because the epistemic variance is inherently a cross-``M``
+    When ``weights`` are provided, the reported scalar is an equal-family mean
+    of per-family area/mask-weighted variance fields. This exists because the
+    epistemic variance is inherently a cross-``M``
     quantity: computing it inside a per-``z_e`` chunk (``M == 1``) is undefined
     and silently returns zero. That is exactly the failure that produced
     all-zero epistemic-variance logs under ``epistemic_chunk_size=1``.
     """
 
+    def _domain_mean(field: torch.Tensor) -> torch.Tensor:
+        if weights is None:
+            return field.mean()
+        score_weights = weights.detach().to(device=field.device, dtype=field.dtype)
+        if score_weights.ndim == 3:
+            score_weights = score_weights.unsqueeze(0)
+        if score_weights.ndim != 4:
+            raise ValueError(
+                "weights must have shape [T, Nv, C] or [B, T, Nv, C], "
+                f"got {tuple(score_weights.shape)}."
+            )
+        if score_weights.shape[0] == 1 and field.shape[0] > 1:
+            score_weights = score_weights.expand(field.shape[0], -1, -1, -1)
+        if score_weights.shape != field.shape:
+            raise ValueError(
+                "weights and epistemic variance field must agree after batch "
+                f"broadcasting: {tuple(score_weights.shape)} != {tuple(field.shape)}."
+            )
+        denominator = score_weights.sum(dim=(1, 2, 3))
+        if bool((denominator <= 0).any()):
+            raise ValueError("epistemic variance weights must have positive mass per batch item.")
+        return (
+            (field * score_weights).sum(dim=(1, 2, 3)) / denominator
+        ).mean()
+
     with torch.no_grad():
         total = mbar_total.detach().float()
         prior = mbar_prior_scaled.detach().float()
         if total.shape[1] > 1:
-            total_var = total.var(dim=1, unbiased=True).mean()
-            prior_var = prior.var(dim=1, unbiased=True).mean()
+            total_var = _domain_mean(total.var(dim=1, unbiased=True))
+            prior_var = _domain_mean(prior.var(dim=1, unbiased=True))
             retention = total_var / (prior_var + eps)
         else:
             zero = total.new_zeros(())

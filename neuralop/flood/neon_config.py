@@ -90,12 +90,15 @@ class NEONStage2Config:
     epistemic_quadratic_terms: int = 16
     epistemic_basis_seed: int = 123
     epistemic_index_mode: str = "continuous"
+    bootstrap_index_dim: Optional[int] = None
+    bootstrap_model_projection_seed: int = 123
     dirichlet_num_particles: int = 16
     dirichlet_particle_seed: int = 123
     deterministic_head: bool = True
     deterministic_head_feature: str = "canonical_aleatory_mean"
     deterministic_head_canonical_k: int = 32
     deterministic_head_latent_seed: int = 123
+    train_parameter_match_basis_dim: Optional[int] = None
     family_batch_size: int = 1
     effective_batch_size: int = 8
     shuffle_families: bool = True
@@ -277,6 +280,10 @@ class NEONStage2Config:
                     "dirichlet_particles requires epistemic_basis='identity' and "
                     "concat_index=false; centered particle support is supplied directly."
                 )
+            if self.bootstrap_index_dim is not None:
+                raise NEONConfigError(
+                    "dirichlet_particles does not support a separate bootstrap_index_dim."
+                )
         if self.deterministic_head_feature not in _VALID_DETERMINISTIC_HEAD_FEATURES:
             raise NEONConfigError(
                 "deterministic_head_feature must be one of "
@@ -286,6 +293,19 @@ class NEONStage2Config:
         # Positive-integer dimensions.
         if int(self.d_e) < 1:
             raise NEONConfigError(f"d_e must be >= 1, got {self.d_e}.")
+        if self.bootstrap_index_dim is not None:
+            if int(self.bootstrap_index_dim) < int(self.d_e):
+                raise NEONConfigError(
+                    "bootstrap_index_dim must be >= d_e, got "
+                    f"{self.bootstrap_index_dim} < {self.d_e}."
+                )
+        if self.train_parameter_match_basis_dim is not None:
+            if int(self.train_parameter_match_basis_dim) < 1:
+                raise NEONConfigError("train_parameter_match_basis_dim must be >= 1.")
+            if self.branch_type != "projected" or self.concat_index:
+                raise NEONConfigError(
+                    "train_parameter_match_basis_dim requires a projected, non-concat branch."
+                )
         for name in (
             "train_hidden_channels",
             "prior_hidden_channels",

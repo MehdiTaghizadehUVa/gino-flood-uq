@@ -13,7 +13,8 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 def _ensure_pkg(name: str):
-    sys.modules.setdefault(name, types.ModuleType(name))
+    package = sys.modules.setdefault(name, types.ModuleType(name))
+    package.__path__ = [str(REPO_ROOT.joinpath(*name.split(".")))]
 
 
 def _load_module(name: str, rel_path: str):

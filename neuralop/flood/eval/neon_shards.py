@@ -60,6 +60,24 @@ def atomic_json_dump(payload: dict[str, Any], path: Path) -> None:
             tmp.unlink()
 
 
+def write_sha256_sidecar(path: Path) -> str:
+    """Atomically publish the digest of a completed aggregate artifact."""
+
+    source = Path(path)
+    digest = sha256_file(source)
+    destination = source.with_suffix(source.suffix + ".sha256")
+    temporary = destination.with_name(
+        f".{destination.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
+    )
+    try:
+        temporary.write_text(f"{digest}  {source.name}\n", encoding="utf-8")
+        os.replace(temporary, destination)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+    return digest
+
+
 def evaluation_shard_path(shard_dir: Path, family_index: int) -> Path:
     return Path(shard_dir) / f"{int(family_index):05d}.json"
 
@@ -249,4 +267,5 @@ def merge_evaluation_shards(
         "impact_metrics": impact_rows,
     }
     atomic_json_dump(payload, Path(output_path))
+    write_sha256_sidecar(Path(output_path))
     return payload

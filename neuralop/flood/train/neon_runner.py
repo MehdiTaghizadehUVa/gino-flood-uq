@@ -15,6 +15,7 @@ import math
 import os
 import threading
 from concurrent.futures import Future, ThreadPoolExecutor
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, Callable, Optional, Sequence, Tuple
 
@@ -25,7 +26,9 @@ from neuralop.flood.neon import (
     PersistentDirichletParticleControl,
     base_rmse_from_reference,
     calibrate_prior_scale,
+    fixed_bootstrap_model_projection,
     freeze_stage1_model,
+    match_projected_trainable_hidden_channels,
     sample_epistemic_indices,
 )
 from neuralop.flood.train.neon import (
@@ -698,6 +701,42 @@ def run_neon_stage2_training(
                 "raise memory_cache_limit_bytes if this is intentional."
             )
 
+    parameter_match_basis_dim = getattr(config, "train_parameter_match_basis_dim", None)
+    if parameter_match_basis_dim is not None:
+        if str(getattr(config, "epistemic_basis", "identity")) == "hermite_random_projection":
+            target_basis_dim = (
+                int(config.d_e) if bool(getattr(config, "epistemic_linear_terms", True)) else 0
+            ) + int(getattr(config, "epistemic_quadratic_terms", 0))
+        else:
+            target_basis_dim = int(config.d_e)
+        resolved_hidden = match_projected_trainable_hidden_channels(
+            input_dim=feature_channels + int(getattr(config, "lead_time_dim", 0)),
+            source_hidden_channels=int(getattr(config, "train_hidden_channels", 16)),
+            source_basis_dim=int(parameter_match_basis_dim),
+            target_basis_dim=target_basis_dim,
+            out_channels=int(out_channels),
+            n_hidden_layers=int(getattr(config, "branch_layers", 2)),
+        )
+        config = replace(config, train_hidden_channels=int(resolved_hidden)).validate()
+
+    bootstrap_index_dim = getattr(config, "bootstrap_index_dim", None)
+    bootstrap_model_projection = (
+        None
+        if bootstrap_index_dim is None
+        else fixed_bootstrap_model_projection(
+            int(bootstrap_index_dim),
+            int(config.d_e),
+            seed=int(getattr(config, "bootstrap_model_projection_seed", 123)),
+        )
+    )
+    bootstrap_projection_hash = (
+        None
+        if bootstrap_model_projection is None
+        else hashlib.sha256(
+            bootstrap_model_projection.detach().cpu().numpy().tobytes()
+        ).hexdigest()
+    )
+
     # Seed the EpiNet construction so the randomized prior branch (and the
     # trainable init) is reproducible from the recorded prior_seed.
     if prior_seed is not None:
@@ -719,6 +758,13 @@ def run_neon_stage2_training(
             resume_path,
             map_location=probe.features.device,
         )
+        resume_metadata = dict(resume_payload.get("metadata") or {})
+        stored_projection_hash = resume_metadata.get("bootstrap_model_projection_hash")
+        if stored_projection_hash != bootstrap_projection_hash:
+            raise ValueError(
+                "bootstrap/model projection changed across Stage-2 continuation: "
+                f"stored={stored_projection_hash!r}, current={bootstrap_projection_hash!r}."
+            )
         module.load_state_dict(resume_payload["state_dict"])
         generator_state = resume_payload.get("generator_state")
         if generator is not None and generator_state is not None:
@@ -737,10 +783,19 @@ def run_neon_stage2_training(
             )
             if dirichlet_particle_control is not None
             else sample_epistemic_indices(
-                calibration_m, int(config.d_e),
-                device=probe.features.device, dtype=probe.features.dtype, generator=generator,
+                calibration_m,
+                int(config.d_e)
+                if bootstrap_model_projection is None
+                else int(bootstrap_model_projection.shape[0]),
+                device=probe.features.device,
+                dtype=probe.features.dtype,
+                generator=generator,
             )
         )
+        if bootstrap_model_projection is not None and dirichlet_particle_control is None:
+            z_e = z_e @ bootstrap_model_projection.to(
+                device=probe.features.device, dtype=probe.features.dtype
+            )
         n_calib = min(
             max(1, int(getattr(config, "calibration_families", 4))),
             len(train_families),
@@ -831,6 +886,22 @@ def run_neon_stage2_training(
             "epistemic_basis_seed": int(getattr(config, "epistemic_basis_seed", 123)),
             "epistemic_index_mode": str(
                 getattr(config, "epistemic_index_mode", "continuous")
+            ),
+            "bootstrap_index_dim": (
+                None if bootstrap_index_dim is None else int(bootstrap_index_dim)
+            ),
+            "bootstrap_model_projection_seed": int(
+                getattr(config, "bootstrap_model_projection_seed", 123)
+            ),
+            "bootstrap_model_projection_hash": bootstrap_projection_hash,
+            "bootstrap_model_projection": (
+                None
+                if bootstrap_model_projection is None
+                else bootstrap_model_projection.detach().cpu().tolist()
+            ),
+            "train_parameter_match_basis_dim": parameter_match_basis_dim,
+            "train_parameter_match_resolved_hidden_channels": int(
+                getattr(config, "train_hidden_channels", hidden_channels)
             ),
             "dirichlet_particle_control": (
                 None
@@ -985,6 +1056,7 @@ def run_neon_stage2_training(
             validation_target_normalizer=target_normalizer,
             validation_reference_normalizer=reference_normalizer,
             dirichlet_particle_control=dirichlet_particle_control,
+            bootstrap_model_projection=bootstrap_model_projection,
             progress_reporter=progress_reporter,
             latest_checkpoint_path=latest_checkpoint_path,
             start_epoch=0

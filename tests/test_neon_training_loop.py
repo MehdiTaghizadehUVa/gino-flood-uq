@@ -22,7 +22,8 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 def _ensure_pkg(name: str):
-    sys.modules.setdefault(name, types.ModuleType(name))
+    package = sys.modules.setdefault(name, types.ModuleType(name))
+    package.__path__ = [str(REPO_ROOT.joinpath(*name.split(".")))]
 
 
 def _load_module(name: str, rel_path: str):
@@ -800,6 +801,24 @@ def test_validation_selection_metrics_are_inverse_transformed_to_physical_space(
     )
     assert physical["total_epistemic_std_physical"] == pytest.approx(
         2.0 * normalized["total_epistemic_std_physical"], rel=1e-5
+    )
+
+
+def test_validation_std_is_sqrt_of_mean_physical_variance():
+    module = _module()
+    _, diagnostics = train_neon._evaluate_neon_validation(
+        module=module,
+        families=[_family("v1", 0.1), _family("v2", 0.3)],
+        feature_collector=_make_feature_collector(),
+        m=3,
+        k=4,
+        d_e=4,
+        generator=torch.Generator().manual_seed(9),
+        physical_scale=2.5,
+    )
+
+    assert diagnostics["total_epistemic_std_physical"] == pytest.approx(
+        diagnostics["total_epistemic_variance_physical"] ** 0.5
     )
 
 

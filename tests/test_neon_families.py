@@ -13,7 +13,8 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 def _ensure_pkg(name: str):
-    sys.modules.setdefault(name, types.ModuleType(name))
+    package = sys.modules.setdefault(name, types.ModuleType(name))
+    package.__path__ = [str(REPO_ROOT.joinpath(*name.split(".")))]
 
 
 def _load_module(name: str, rel_path: str):
@@ -157,6 +158,7 @@ def test_build_families_explicitly_forwards_single_reference_opt_in(monkeypatch)
         return object(), [_sample("HIST_A", R=1), _sample("HIST_B", R=1)]
 
     eval_pkg = types.ModuleType("neuralop.flood.eval")
+    eval_pkg.__path__ = [str(REPO_ROOT / "neuralop" / "flood" / "eval")]
     datasets_mod = types.ModuleType("neuralop.flood.eval.datasets")
     datasets_mod._build_rollout_normalized_dataset = fake_builder
     monkeypatch.setitem(sys.modules, "neuralop.flood.eval", eval_pkg)
