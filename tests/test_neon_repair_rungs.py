@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import sys
 from pathlib import Path
 
 import pytest
@@ -16,6 +17,22 @@ def _load_script():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def test_phase5_p1a_evaluator_imports_through_its_executable_seam(monkeypatch):
+    """Submission preflight must be able to import every P1a dependency."""
+
+    scripts = Path(__file__).resolve().parents[1] / "scripts"
+    monkeypatch.syspath_prepend(str(scripts))
+    path = scripts / "neon_phase5_p1a_eval.py"
+    spec = importlib.util.spec_from_file_location("neon_phase5_p1a_eval_import_test", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        sys.modules.pop(spec.name, None)
 
 
 def test_resolved_ladder_config_separates_b1_mechanisms():

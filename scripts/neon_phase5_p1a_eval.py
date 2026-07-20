@@ -29,15 +29,15 @@ from neuralop.flood.neon import (
     base_rmse_from_reference,
     cancellation_diagnostics,
     crossed_fair_crps_members,
-    crossed_sampling_design,
     epistemic_bootstrap_weights,
     fixed_support_fair_crps_members,
-    fixed_support_sampling_design,
     project_bootstrap_epistemic_indices,
     sample_epistemic_indices,
 )
 from neuralop.flood.eval.neon import (
+    crossed_sampling_design,
     domain_average_variance_summary,
+    fixed_support_sampling_design,
     neon_epistemic_error_correlation,
 )
 from neon_phase5_runtime import (
