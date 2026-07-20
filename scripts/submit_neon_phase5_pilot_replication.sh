@@ -31,7 +31,7 @@ export APPTAINERENV_PYTHONPATH="${REPO}:${REPO}/scripts"
 read -r RUNG SCREEN_DIR < <(apptainer exec --bind /scratch,/home "${CONTAINER}" python - <<'PY' \
   "${SCREEN}" "${ROOT}/CONDITIONAL_PILOT_SUBMITTED.json" "${HEAD}" \
   "${ROOT}/PROTOCOL.json" "${ROOT}/gp1_replicated/DECISION.json"
-import pathlib, sys
+import json, pathlib, sys
 from neuralop.flood.eval.neon_phase5 import (
     validate_pilot_rungs_for_gp1_decision,
     verify_checksummed_artifact,

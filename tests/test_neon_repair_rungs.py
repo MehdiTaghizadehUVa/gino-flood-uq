@@ -240,6 +240,20 @@ def test_all_phase5_submission_manifests_are_checksummed_and_verified():
     assert "write_checksummed_artifact(" in pilot
 
 
+def test_pilot_replication_preflight_imports_json_before_loading_submission():
+    script = (
+        Path(__file__).resolve().parents[1]
+        / "scripts"
+        / "submit_neon_phase5_pilot_replication.sh"
+    ).read_text()
+    preflight = script.split("read -r RUNG SCREEN_DIR", 1)[1].split(
+        "TASK_SCRIPT=", 1
+    )[0]
+
+    assert "import json, pathlib, sys" in preflight
+    assert preflight.index("import json, pathlib, sys") < preflight.index("json.loads(")
+
+
 def test_phase_s_adapter_submits_all_predeclared_evidence_paths():
     script = (
         Path(__file__).resolve().parents[1]
