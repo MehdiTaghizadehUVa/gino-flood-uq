@@ -333,6 +333,32 @@ def test_stratified_cancellation_respects_cell_area_weights():
     assert result["strata"]["all_wettable__all"]["train_prior_cosine"] < -0.95
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA regression test")
+def test_stratified_cancellation_accepts_cpu_weights_with_cuda_fields():
+    """Evaluation metadata stays on CPU while correction fields live on the GPU."""
+
+    device = torch.device("cuda")
+    m, t, n = 8, 2, 3
+    psi = torch.randn(m, 1, dtype=torch.float64, device=device)
+    prior = psi[:, 0, None, None].expand(m, t, n).clone()
+    train = -0.5 * prior
+
+    result = stratified_whitened_cancellation(
+        train,
+        prior,
+        psi,
+        torch.eye(1, dtype=torch.float64),
+        reference_depth=torch.full((t, n), 0.05, dtype=torch.float64, device=device),
+        wettable_mask=torch.ones(n, dtype=torch.bool, device=device),
+        lead_bins={"all": (0, t)},
+        score_weights=torch.ones(t, n, 1, dtype=torch.float64),
+    )
+
+    assert result["strata"]["all_wettable__all"]["regression_slope"] == pytest.approx(
+        -0.5
+    )
+
+
 def test_bootstrap_scale_interval_resamples_families_and_draws_deterministically():
     # [families, draws] nonnegative epistemic variance contributions.
     variance = torch.tensor(

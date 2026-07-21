@@ -1176,9 +1176,10 @@ def _whitened_modeled_fields(
     eps: float,
 ) -> tuple[torch.Tensor, torch.Tensor, dict[str, float]]:
     train = torch.as_tensor(trainable_correction).double()
-    prior = torch.as_tensor(scaled_prior_correction).double()
-    psi = torch.as_tensor(basis_values).double()
-    covariance = torch.as_tensor(basis_covariance).double()
+    device = train.device
+    prior = torch.as_tensor(scaled_prior_correction, device=device).double()
+    psi = torch.as_tensor(basis_values, device=device).double()
+    covariance = torch.as_tensor(basis_covariance, device=device).double()
     if train.shape != prior.shape or train.ndim < 2:
         raise ValueError("trainable and prior corrections must share [M,...] shape.")
     if psi.ndim != 2 or psi.shape[0] != train.shape[0]:
@@ -1230,7 +1231,9 @@ def _cancellation_from_modeled_fields(
         def reduce(value: torch.Tensor) -> torch.Tensor:
             return value.mean()
     else:
-        weights = torch.as_tensor(location_weights).double()
+        weights = torch.as_tensor(
+            location_weights, device=train_model.device
+        ).double()
         if weights.shape != train_centered.shape[1:]:
             raise ValueError("location_weights must match the correction field without M.")
         if not torch.isfinite(weights).all() or bool((weights < 0).any()):
@@ -1271,7 +1274,8 @@ def stratified_whitened_cancellation(
     """Report coordinate-free cancellation by hydraulic regime and lead bin."""
 
     train = torch.as_tensor(trainable_correction).double()
-    prior = torch.as_tensor(scaled_prior_correction).double()
+    device = train.device
+    prior = torch.as_tensor(scaled_prior_correction, device=device).double()
     if train.shape != prior.shape or train.ndim not in {3, 4}:
         raise ValueError("corrections must share [M,T,Nv] or [M,T,Nv,C] shape.")
     if train.ndim == 4:
@@ -1279,18 +1283,20 @@ def stratified_whitened_cancellation(
             raise ValueError("stratified cancellation currently requires depth-only output.")
         train = train[..., 0]
         prior = prior[..., 0]
-    depth = torch.as_tensor(reference_depth).double()
+    depth = torch.as_tensor(reference_depth, device=device).double()
     if depth.ndim == 3 and depth.shape[-1] == 1:
         depth = depth[..., 0]
     if depth.shape != train.shape[1:]:
         raise ValueError("reference_depth must match [T,Nv] correction fields.")
-    wettable = torch.as_tensor(wettable_mask, dtype=torch.bool).reshape(-1)
+    wettable = torch.as_tensor(
+        wettable_mask, dtype=torch.bool, device=device
+    ).reshape(-1)
     if wettable.shape[0] != train.shape[2]:
         raise ValueError("wettable_mask must contain one value per mesh cell.")
     if score_weights is None:
         spatial_weights = torch.ones_like(depth)
     else:
-        spatial_weights = torch.as_tensor(score_weights).double()
+        spatial_weights = torch.as_tensor(score_weights, device=device).double()
         if spatial_weights.ndim == 3 and spatial_weights.shape[-1] == 1:
             spatial_weights = spatial_weights[..., 0]
         if spatial_weights.shape != depth.shape:
