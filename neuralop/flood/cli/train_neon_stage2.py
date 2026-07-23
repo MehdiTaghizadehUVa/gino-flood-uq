@@ -155,6 +155,38 @@ def _infer_latent_dim(config: NEONStage2Config) -> int:
     return int(getattr(config, "fgn_noise_dim", 32) or 32)
 
 
+def _load_bundle_with_dt_fallback(stage1_checkpoint: Any, load_model_bundle_fn):
+    """Load a bundle, patching legacy timestep metadata without shared files."""
+    import json
+    import tempfile
+    from pathlib import Path as _Path
+
+    manifest = _Path(stage1_checkpoint)
+    try:
+        return load_model_bundle_fn(str(manifest))
+    except Exception:
+        with manifest.open() as handle:
+            raw = json.load(handle)
+        raw["dt_seconds"] = 900  # tolerate serving dt metadata drift
+
+        temporary_path = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                prefix=f".{manifest.stem}.neon.",
+                suffix=".json",
+                dir=manifest.parent,
+                delete=False,
+            ) as handle:
+                json.dump(raw, handle)
+                temporary_path = _Path(handle.name)
+            return load_model_bundle_fn(str(temporary_path))
+        finally:
+            if temporary_path is not None:
+                temporary_path.unlink(missing_ok=True)
+
+
 def _load_frozen_stage1(stage1_checkpoint: Any):  # pragma: no cover - GPU/infra path
     """Load a frozen Stage-1 coastal FGNO from a serving model-bundle JSON.
 
@@ -164,22 +196,10 @@ def _load_frozen_stage1(stage1_checkpoint: Any):  # pragma: no cover - GPU/infra
     is the path to a ``coastal_fgn_bundle.json``. Serving metadata drift (e.g.
     dt_seconds) is tolerated so the real weights load regardless.
     """
-    import json
-    from pathlib import Path as _Path
-
     from neuralop.flood.serving.inference import ProductionFGNInferenceService
     from neuralop.flood.serving.model_bundle import load_model_bundle
 
-    try:
-        bundle = load_model_bundle(str(stage1_checkpoint))
-    except Exception:
-        with open(stage1_checkpoint) as handle:
-            raw = json.load(handle)
-        raw["dt_seconds"] = 900  # tolerate serving dt metadata drift
-        patched = str(_Path(stage1_checkpoint).with_name("coastal_fgn_bundle_neon.json"))
-        with open(patched, "w") as handle:
-            json.dump(raw, handle)
-        bundle = load_model_bundle(patched)
+    bundle = _load_bundle_with_dt_fallback(stage1_checkpoint, load_model_bundle)
 
     import torch as _torch
 

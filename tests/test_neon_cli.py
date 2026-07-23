@@ -146,6 +146,47 @@ def test_main_requires_config():
         main([])
 
 
+def test_bundle_fallback_uses_process_local_manifest(tmp_path):
+    import json
+    import threading
+    import time
+    from concurrent.futures import ThreadPoolExecutor
+
+    manifest = tmp_path / "coastal_fgn_bundle.json"
+    manifest.write_text(
+        json.dumps(
+            {"dt_seconds": 1200, "geometry_path": "domain/geometry.npy"}
+        )
+    )
+    temporary_paths = []
+    lock = threading.Lock()
+
+    def fake_load_model_bundle(path):
+        candidate = Path(path)
+        if candidate == manifest:
+            raise ValueError("serving dt metadata drift")
+        with lock:
+            temporary_paths.append(candidate)
+        time.sleep(0.01)
+        return json.loads(candidate.read_text())
+
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        results = list(
+            executor.map(
+                lambda _: cli._load_bundle_with_dt_fallback(
+                    manifest, fake_load_model_bundle
+                ),
+                range(8),
+            )
+        )
+
+    assert all(result["dt_seconds"] == 900 for result in results)
+    assert len(set(temporary_paths)) == 8
+    assert all(path.parent == manifest.parent for path in temporary_paths)
+    assert all(not path.exists() for path in temporary_paths)
+    assert json.loads(manifest.read_text())["dt_seconds"] == 1200
+
+
 def test_eval_cli_dry_run_prints_torch_free_plan(capsys):
     import json as _json
 
