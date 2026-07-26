@@ -1,6 +1,8 @@
+from io import BytesIO
 from types import SimpleNamespace
 
 import pytest
+import torch
 
 from neuralop.flood.train.operator_app import _resolve_alr_config
 from neuralop.flood.eval.operator_app import _resolve_eval_alr_layout
@@ -36,7 +38,8 @@ def test_alr_config_resolves_stage1_schedule_and_nested_sample_counts():
     enabled, model_cfg, training_cfg = _resolve_alr_config(config)
 
     assert enabled is True
-    assert model_cfg is config.model.anchored_low_rank
+    assert model_cfg == vars(config.model.anchored_low_rank)
+    assert isinstance(model_cfg, dict)
     assert training_cfg is config.training.anchored_low_rank
     assert config.gino.anchored_low_rank is model_cfg
     assert config.gino.fgn_latent_temporal_mode == "persistent"
@@ -44,6 +47,16 @@ def test_alr_config_resolves_stage1_schedule_and_nested_sample_counts():
     assert config.opt.crps_n_samples == 2
     assert config.opt.n_epochs == 30
     assert config.opt.alr_eval_n_samples == 60
+
+
+def test_alr_resolved_architecture_metadata_is_torch_serializable():
+    config = _config()
+    _, model_cfg, _ = _resolve_alr_config(config)
+
+    buffer = BytesIO()
+    torch.save({"anchored_low_rank": model_cfg}, buffer)
+
+    assert buffer.tell() > 0
 
 
 def test_alr_config_requires_training_namespace():

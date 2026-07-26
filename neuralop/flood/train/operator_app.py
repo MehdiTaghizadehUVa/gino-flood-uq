@@ -78,6 +78,7 @@ from neuralop.flood.utils.runtime_core import (
     _is_power_of_two,
     _safe_float,
     _safe_int,
+    _to_builtin,
     dataloader_worker_init,
     load_config_and_setup,
     make_dataloader_generator,
@@ -149,13 +150,16 @@ def _resolve_alr_config(config):
     )
     if rmse_margin < 0:
         raise ValueError("rmse_noninferiority_margin must be nonnegative.")
-    setattr(config.gino, "anchored_low_rank", model_cfg)
+    model_cfg_payload = _to_builtin(model_cfg)
+    if not isinstance(model_cfg_payload, dict):
+        raise TypeError("model.anchored_low_rank must resolve to a mapping.")
+    setattr(config.gino, "anchored_low_rank", model_cfg_payload)
     setattr(config.gino, "fgn_latent_temporal_mode", "persistent")
     setattr(config.opt, "fgn_ar_state_update", "member_feedback")
     setattr(config.opt, "crps_n_samples", k_train)
     setattr(config.opt, "alr_eval_n_samples", num_particles * k_eval)
     setattr(config.opt, "n_epochs", warmup_epochs + joint_epochs)
-    return True, model_cfg, training_cfg
+    return True, model_cfg_payload, training_cfg
 
 
 def _load_alr_stage1_backbone(model, checkpoint_path):
