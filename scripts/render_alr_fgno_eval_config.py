@@ -2,6 +2,7 @@
 """Render one event-level ALR-FGNO evaluation configuration."""
 
 import argparse
+import os
 from pathlib import Path
 
 import yaml
@@ -23,6 +24,10 @@ HISTORICAL_BOUNDARY_ROOT = Path(
     "/scratch/jrj6wm/uncertainty_floodmodel/synthetic/coastal/portsmouth/"
     "historical_extreme_events_15min_20260625_single_member"
 )
+
+
+def _absolute_without_symlink_resolution(path):
+    return Path(os.path.abspath(str(path.expanduser())))
 
 
 def _load(path):
@@ -150,10 +155,10 @@ def main():
     parser.add_argument("--event-id", required=True)
     args = parser.parse_args()
     path = render_eval_config(
-        args.base.expanduser().resolve(),
-        args.output.expanduser().resolve(),
-        args.run_dir.expanduser().resolve(),
-        args.checkpoint_dir.expanduser().resolve(),
+        _absolute_without_symlink_resolution(args.base),
+        _absolute_without_symlink_resolution(args.output),
+        _absolute_without_symlink_resolution(args.run_dir),
+        _absolute_without_symlink_resolution(args.checkpoint_dir),
         args.dataset,
         args.event_id,
     )

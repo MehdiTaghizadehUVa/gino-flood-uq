@@ -2,6 +2,7 @@
 """Render one grounded ALR-FGNO pilot training configuration."""
 
 import argparse
+import os
 from pathlib import Path
 
 import yaml
@@ -20,6 +21,10 @@ _RUNS = {
     "n150": {"train_families": 150, "validation_families": 50},
     "full450": {"train_families": 450, "validation_families": 50},
 }
+
+
+def _absolute_without_symlink_resolution(path: Path) -> Path:
+    return Path(os.path.abspath(str(path.expanduser())))
 
 
 def _load(path: Path) -> dict:
@@ -89,12 +94,12 @@ def main() -> int:
     parser.add_argument("--run-kind", choices=sorted(_RUNS), required=True)
     args = parser.parse_args()
     render_config(
-        base=args.base.expanduser().resolve(),
-        output=args.output.expanduser().resolve(),
-        run_dir=args.run_dir.expanduser().resolve(),
+        base=_absolute_without_symlink_resolution(args.base),
+        output=_absolute_without_symlink_resolution(args.output),
+        run_dir=_absolute_without_symlink_resolution(args.run_dir),
         run_kind=args.run_kind,
     )
-    print(args.output.expanduser().resolve())
+    print(_absolute_without_symlink_resolution(args.output))
     return 0
 
 
