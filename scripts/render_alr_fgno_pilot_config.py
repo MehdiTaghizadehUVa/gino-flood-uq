@@ -66,7 +66,7 @@ def render_config(*, base: Path, output: Path, run_dir: Path, run_kind: str) -> 
     flood["log_file"] = str(run_dir / "training.log")
     flood["wandb"]["name"] = f"alr_fgno_{run_kind}_{run_dir.name}"
     flood["wandb"]["group"] = "coastal-alr-fgno-pilot"
-    flood["wandb"]["log"] = run_kind != "smoke"
+    flood["wandb"]["log"] = False  # Cluster jobs must not depend on an unstaged API key.
     flood["use_progress_bar"] = False
     flood["alr_pilot"] = {
         "run_kind": run_kind,
