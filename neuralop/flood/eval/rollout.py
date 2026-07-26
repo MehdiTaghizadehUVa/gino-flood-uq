@@ -30,6 +30,7 @@ from neuralop.flood.eval.impact_metrics import (
     compute_flood_impact_crps_metrics,
     normalize_impact_metrics_config,
 )
+from neuralop.flood.eval.alr_fgn import ALRMemberLayout, forward_alr_rollout_step
 from neuralop.flood.eval.mc_dropout import (
     enable_mc_dropout_only,
     mc_dropout_seed_context,
@@ -271,6 +272,8 @@ def _rollout_prediction_per_hydrograph(
     calibration_metadata: Optional[Mapping[str, Any]] = None,
     write_visualizations: bool = True,
     member_boundary_mode: str = "shared",
+    alr_num_particles: Optional[int] = None,
+    alr_aleatory_samples: Optional[int] = None,
 ) -> None:
     """
     Evaluate per hydrograph using all reference simulations as ground-truth uncertainty.
@@ -298,7 +301,25 @@ def _rollout_prediction_per_hydrograph(
     impact_metrics_enabled = impact_cfg.enabled and "wd" in target_variables
 
     n_models = len(models)
-    n_ens = max(1, int(n_ensemble_samples))
+    alr_layout = None
+    if alr_num_particles is not None or alr_aleatory_samples is not None:
+        if alr_num_particles is None or alr_aleatory_samples is None:
+            raise ValueError(
+                "ALR rollout requires both alr_num_particles and alr_aleatory_samples."
+            )
+        if n_models != 1:
+            raise ValueError("ALR rollout requires exactly one shared-backbone model.")
+        model = models[0]
+        if not bool(getattr(model, "anchored_low_rank_enabled", False)):
+            raise ValueError("ALR rollout arguments require an ALR-enabled model.")
+        alr_layout = ALRMemberLayout(
+            int(alr_num_particles), int(alr_aleatory_samples)
+        )
+        if int(getattr(model, "anchored_low_rank_num_particles", -1)) != alr_layout.num_particles:
+            raise ValueError("Configured ALR particle count does not match the checkpoint.")
+        n_ens = alr_layout.n_members
+    else:
+        n_ens = max(1, int(n_ensemble_samples))
     if n_models > 1 and n_ens < n_models:
         logger.warning(
             "n_ensemble_samples=%d is smaller than number of models=%d. "
@@ -307,8 +328,15 @@ def _rollout_prediction_per_hydrograph(
         )
         n_ens = n_models
     use_ensemble = n_ens > 1 or n_models > 1
-    member_model_indices = _build_member_model_indices(n_models, n_ens)
-    model_counts = [member_model_indices.count(i) for i in range(n_models)]
+    if alr_layout is None:
+        member_model_indices = _build_member_model_indices(n_models, n_ens)
+        variance_group_count = n_models
+    else:
+        member_model_indices = alr_layout.member_epistemic_id.tolist()
+        variance_group_count = alr_layout.num_particles
+    model_counts = [
+        member_model_indices.count(i) for i in range(variance_group_count)
+    ]
     if mc_dropout_enabled:
         dropout_counts = [enable_mc_dropout_only(model) for model in models]
         if any(count <= 0 for count in dropout_counts):
@@ -330,6 +358,11 @@ def _rollout_prediction_per_hydrograph(
     rollout_init_mode = normalize_rollout_init_mode(rollout_init_mode)
     member_boundary_mode = _normalize_member_boundary_mode(member_boundary_mode)
     use_reference_member_boundary = member_boundary_mode == "reference_member"
+    if alr_layout is not None and use_reference_member_boundary:
+        raise ValueError(
+            "The ALR pilot uses one shared clean forcing history; "
+            "member_boundary_mode='reference_member' is unsupported."
+        )
     if use_reference_member_boundary and rollout_init_mode != ROLLOUT_INIT_MEMBER_HISTORY:
         raise ValueError(
             "rollout.member_boundary_mode='reference_member' requires "
@@ -359,6 +392,17 @@ def _rollout_prediction_per_hydrograph(
             fgn_latent_temporal_mode,
             fgn_noise_dim,
             fgn_ar_state_update,
+        )
+    if alr_layout is not None:
+        if fgn_latent_temporal_mode != "persistent":
+            raise ValueError("ALR rollout requires persistent aleatory latents.")
+        if fgn_ar_state_update != "member_feedback":
+            raise ValueError("ALR rollout requires member_feedback state updates.")
+        logger.info(
+            "ALR nested rollout enabled: particles=%d aleatory_per_particle=%d total=%d",
+            alr_layout.num_particles,
+            alr_layout.aleatory_samples,
+            alr_layout.n_members,
         )
     if not use_ensemble:
         logger.warning(
@@ -615,7 +659,11 @@ def _rollout_prediction_per_hydrograph(
         fgn_latent_bank = None
         if fgn_noise_dim is not None:
             fgn_latent_bank = sample_fgn_rollout_latent_bank(
-                num_members=n_ens if use_ensemble else 1,
+                num_members=(
+                    alr_layout.aleatory_samples
+                    if alr_layout is not None
+                    else n_ens if use_ensemble else 1
+                ),
                 batch_size=1,
                 latent_dim=fgn_noise_dim,
                 device=device,
@@ -628,7 +676,26 @@ def _rollout_prediction_per_hydrograph(
             logvar_stack: Optional[torch.Tensor] = None
             state_stack: Optional[torch.Tensor] = None
             with torch.no_grad():
-                if use_ensemble:
+                if alr_layout is not None:
+                    nested_histories = torch.stack(current_dynamics, dim=0).reshape(
+                        alr_layout.num_particles,
+                        alr_layout.aleatory_samples,
+                        *current_dynamics[0].shape,
+                    )
+                    nested_prediction = forward_alr_rollout_step(
+                        models[0],
+                        histories=nested_histories,
+                        static=static_0,
+                        boundary=current_boundary,
+                        input_geom=geom_0,
+                        latent_queries=query_0,
+                        output_queries=geom_0,
+                        latent_bank=fgn_latent_bank,
+                    )
+                    pred_stack = nested_prediction.reshape(
+                        alr_layout.n_members, 1, *nested_prediction.shape[-2:]
+                    )
+                elif use_ensemble:
                     pred_members: List[torch.Tensor] = []
                     mu_members: List[torch.Tensor] = []
                     logvar_members: List[torch.Tensor] = []
@@ -859,7 +926,7 @@ def _rollout_prediction_per_hydrograph(
                 spread_ratio_full_t = spread_pred_full_t / max(spread_gt_full_t, MIN_EPS)
                 spread_ratio_t = spread_pred_t / max(spread_gt_t, MIN_EPS)
                 within_loc, between_loc, total_loc = _variance_decomposition_by_model(
-                    pred_ens_ch, member_model_indices, n_models
+                    pred_ens_ch, member_model_indices, variance_group_count
                 )
                 within_full_t = _masked_mean(within_loc, None)
                 between_full_t = _masked_mean(between_loc, None)
@@ -1105,6 +1172,16 @@ def _rollout_prediction_per_hydrograph(
                 elevation_raw=sample.get("elevation_raw"),
                 member_model_id=[member_model_indices[i] for i in range(n_ens)],
                 member_sample_id=list(range(n_ens)),
+                member_epistemic_id=(
+                    alr_layout.member_epistemic_id.tolist()
+                    if alr_layout is not None
+                    else None
+                ),
+                member_aleatory_id=(
+                    alr_layout.member_aleatory_id.tolist()
+                    if alr_layout is not None
+                    else None
+                ),
                 time_hours=(np.arange(1, pred_art.shape[1] + 1, dtype=np.float64) * float(dt) / 3600.0),
                 metadata={
                     "target_variable": "wd",
@@ -1113,6 +1190,12 @@ def _rollout_prediction_per_hydrograph(
                     "reference_run_ids": list(sample.get("reference_run_ids", [])),
                     "skip_before_timestep": int(skip_before_timestep),
                     "n_models": int(n_models),
+                    "alr_num_particles": (
+                        int(alr_layout.num_particles) if alr_layout is not None else None
+                    ),
+                    "alr_aleatory_samples": (
+                        int(alr_layout.aleatory_samples) if alr_layout is not None else None
+                    ),
                     "gaussian_mode": bool(gaussian_mode),
                     "fgn_noise_dim": None if fgn_noise_dim is None else int(fgn_noise_dim),
                     "calibration_applied": calibration_model is not None,

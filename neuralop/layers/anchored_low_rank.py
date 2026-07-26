@@ -91,6 +91,7 @@ class AnchoredLowRankDenseAdapter(nn.Module):
         self.register_buffer("anchor_b", anchor_b)
         self.offset_a = nn.Parameter(torch.zeros_like(anchor_a))
         self.offset_b = nn.Parameter(torch.zeros_like(anchor_b))
+        self.active = True
 
     def _normalize_anchors(self, a, b, *, reference_weight, relative_norm):
         delta = torch.einsum("mor,mri->moi", a, b) / float(self.rank)
@@ -119,6 +120,10 @@ class AnchoredLowRankDenseAdapter(nn.Module):
         *,
         channels_last: bool,
     ) -> torch.Tensor:
+        if not self.active:
+            output_shape = list(x.shape)
+            output_shape[-1 if channels_last else 1] = self.out_features
+            return x.new_zeros(output_shape)
         ids = _validate_particle_ids(
             particle_ids,
             batch_size=x.shape[0],
@@ -191,6 +196,7 @@ class AnchoredLowRankSpectralAdapter(nn.Module):
         self.register_buffer("anchor_b", anchor_b)
         self.offset_a = nn.Parameter(torch.zeros_like(anchor_a))
         self.offset_b = nn.Parameter(torch.zeros_like(anchor_b))
+        self.active = True
 
     def explicit_delta_weight(
         self,
@@ -236,6 +242,8 @@ class AnchoredLowRankSpectralAdapter(nn.Module):
         *,
         mode_slices: Sequence[slice] | None = None,
     ) -> torch.Tensor:
+        if not self.active:
+            return x.new_zeros((x.shape[0], self.out_channels, *x.shape[2:]))
         ids = _validate_particle_ids(
             particle_ids,
             batch_size=x.shape[0],

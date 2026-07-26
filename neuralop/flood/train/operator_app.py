@@ -61,6 +61,7 @@ from neuralop.flood.train.fgn import FGNTrainer
 from neuralop.flood.train.alr_fgn import (
     AnchoredLowRankFGNTrainer,
     DirichletFamilyBootstrap,
+    PhysicalRMSE,
     split_alr_family_indices,
 )
 from neuralop.flood.train.gaussian import GaussianNLLTrainer
@@ -140,6 +141,13 @@ def _resolve_alr_config(config):
         raise ValueError("ALR-FGNO requires at least two particles.")
     if k_train < 2 or k_eval < 2:
         raise ValueError("ALR-FGNO requires k_train and k_eval to be at least two.")
+    if not bool(_cfg_get(config, "inverse_test", True)):
+        raise ValueError("ALR-FGNO checkpoint selection requires inverse_test=true.")
+    rmse_margin = float(
+        _cfg_get(training_cfg, "rmse_noninferiority_margin", 0.001)
+    )
+    if rmse_margin < 0:
+        raise ValueError("rmse_noninferiority_margin must be nonnegative.")
     setattr(config.gino, "anchored_low_rank", model_cfg)
     setattr(config.gino, "fgn_latent_temporal_mode", "persistent")
     setattr(config.opt, "fgn_ar_state_update", "member_feedback")
@@ -865,6 +873,8 @@ def main():
                 ),
             ),
         }
+        if alr_enabled:
+            eval_losses["rmse"] = PhysicalRMSE()
     else:
         eval_losses = {config.opt.testing_loss: test_loss_fn}
 
@@ -1006,6 +1016,13 @@ def main():
                 ),
                 eval_aleatory_samples=int(
                     _cfg_get(alr_training_cfg, "k_eval", 15)
+                ),
+                rmse_noninferiority_margin=float(
+                    _cfg_get(
+                        alr_training_cfg,
+                        "rmse_noninferiority_margin",
+                        0.001,
+                    )
                 ),
                 target_normalizer=normalizers.get("target"),
                 **trainer_kwargs,
@@ -1247,6 +1264,15 @@ def main():
                 "Wrote normalizer fingerprint sidecar at %s "
                 "(resume safety contract for normalizer-checkpoint pairing)",
                 _sidecar,
+            )
+
+    if alr_enabled and checkpoint_resume_dir is None:
+        base_validation_rmse = trainer.measure_frozen_base_rmse(test_loader)
+        if is_logger:
+            logger.info(
+                "ALR frozen Stage-1 validation RMSE: %.6f m; allowed margin: %.6f m",
+                base_validation_rmse,
+                trainer.rmse_noninferiority_margin,
             )
 
     trainer.train(

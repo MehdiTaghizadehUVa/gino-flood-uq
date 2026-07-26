@@ -385,3 +385,29 @@ def test_gino_alr_requires_particle_ids():
         assert "particle_ids" in str(exc)
     else:
         raise AssertionError("ALR-GINO must require explicit particle_ids.")
+
+
+def test_gino_can_disable_adapters_for_exact_warm_start_baseline():
+    torch.manual_seed(61)
+    base = _tiny_gino(anchored_low_rank={"enabled": False})
+    alr = _tiny_gino(
+        anchored_low_rank={
+            "enabled": True,
+            "num_particles": 2,
+            "rank": 2,
+            "anchor_relative_norm": 0.03,
+            "anchor_seed": 67,
+            "fno_last_n_blocks": 2,
+        }
+    )
+    missing, unexpected = alr.load_state_dict(base.state_dict(), strict=False)
+    assert missing
+    assert not unexpected
+
+    inputs = _tiny_gino_inputs(batch_size=2)
+    expected = base(**inputs)
+    alr.set_anchored_low_rank_active(False)
+    actual = alr(**inputs, particle_ids=torch.tensor([0, 1]))
+
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    assert alr.anchored_low_rank_active is False

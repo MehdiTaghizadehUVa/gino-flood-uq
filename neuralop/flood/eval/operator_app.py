@@ -20,6 +20,7 @@ from neuralop.flood.eval.datasets import (
     _set_dataset_structural_dry_mask,
 )
 from neuralop.flood.eval.metrics import _build_eval_losses, _is_gaussian_mode
+from neuralop.flood.eval.alr_fgn import ALRMemberLayout
 from neuralop.flood.eval.mc_dropout import (
     evaluate_mc_dropout_one_step,
     validate_mc_dropout_config,
@@ -117,6 +118,23 @@ def _optional_path(value) -> Path | None:
         path = path.resolve()
     path.mkdir(parents=True, exist_ok=True)
     return path
+
+
+def _resolve_eval_alr_layout(config, models) -> ALRMemberLayout | None:
+    """Resolve the checkpoint-backed nested particle layout for ALR evaluation."""
+
+    enabled = [
+        bool(getattr(model, "anchored_low_rank_enabled", False)) for model in models
+    ]
+    if not any(enabled):
+        return None
+    if len(models) != 1 or not all(enabled):
+        raise ValueError("ALR evaluation requires exactly one ALR shared-backbone model.")
+    particles = int(getattr(models[0], "anchored_low_rank_num_particles", -1))
+    training_cfg = _opt(config, "training", "anchored_low_rank", None)
+    configured_k = _opt(training_cfg, None, "k_eval", 15)
+    rollout_k = _opt(config, "rollout", "alr_aleatory_samples", configured_k)
+    return ALRMemberLayout(particles, int(rollout_k))
 
 
 def main() -> int:
@@ -241,6 +259,7 @@ def main() -> int:
 
     with _PhaseTimer(logger, "Loading model checkpoint(s)"):
         models = _load_models_from_runs(config, device, checkpoint_runs, logger)
+    alr_layout = _resolve_eval_alr_layout(config, models)
     inverse_test = _opt(config, None, "inverse_test", True)
     if normalizers.get("target") is not None:
         normalizers["target"] = normalizers["target"].to(device)
@@ -282,6 +301,12 @@ def main() -> int:
         )
 
     run_single = args.run_single_step and not args.skip_single_step
+    if run_single and alr_layout is not None:
+        logger.warning(
+            "Skipping legacy one-step evaluator for ALR-FGNO; nested physical-space "
+            "skill is computed by the rollout evaluator."
+        )
+        run_single = False
     if run_single:
         model_metrics: List[Dict[str, float]] = []
         with _PhaseTimer(logger, "One-step evaluation (all models)"):
@@ -341,6 +366,14 @@ def main() -> int:
     )
     logger.info("Rollout initialization mode=%s", rollout_init_mode)
     rollout_n_ensemble = int(_opt(config, "rollout", "n_ensemble_samples", 1))
+    if alr_layout is not None:
+        rollout_n_ensemble = alr_layout.n_members
+        logger.info(
+            "Using ALR nested rollout layout M=%d K=%d => %d members.",
+            alr_layout.num_particles,
+            alr_layout.aleatory_samples,
+            alr_layout.n_members,
+        )
     gaussian_state_update_cfg = str(
         _opt(config, "rollout", "gaussian_state_update", "sample")
     ).strip().lower()
@@ -362,6 +395,11 @@ def main() -> int:
             "CLI override" if args.gaussian_state_update is not None else "config",
         )
     ens_per_model = _opt(config, "rollout", "n_ensemble_samples_per_model", None)
+    if alr_layout is not None and ens_per_model is not None:
+        raise ValueError(
+            "rollout.n_ensemble_samples_per_model is incompatible with ALR-FGNO; "
+            "configure training.anchored_low_rank.k_eval instead."
+        )
     if mc_dropout_cfg.enabled:
         rollout_n_ensemble = int(mc_dropout_cfg.samples)
         ens_per_model = None
@@ -443,8 +481,18 @@ def main() -> int:
                 forecast_artifact_dir=str(forecast_artifact_dir) if forecast_artifact_dir is not None else None,
                 write_visualizations=write_visualizations,
                 member_boundary_mode=_opt(config, "rollout", "member_boundary_mode", "shared"),
+                alr_num_particles=(
+                    alr_layout.num_particles if alr_layout is not None else None
+                ),
+                alr_aleatory_samples=(
+                    alr_layout.aleatory_samples if alr_layout is not None else None
+                ),
             )
         else:
+            if alr_layout is not None:
+                raise ValueError(
+                    "ALR-FGNO evaluation requires hydrograph-grouped rollout data."
+                )
             _rollout_prediction_generic(
                 models=models,
                 rollout_dataset=rollout_norm_ds,

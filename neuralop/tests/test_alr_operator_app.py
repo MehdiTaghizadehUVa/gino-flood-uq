@@ -3,6 +3,7 @@ from types import SimpleNamespace
 import pytest
 
 from neuralop.flood.train.operator_app import _resolve_alr_config
+from neuralop.flood.eval.operator_app import _resolve_eval_alr_layout
 
 
 def _config(*, enabled=True, training=True):
@@ -25,6 +26,7 @@ def _config(*, enabled=True, training=True):
         training=SimpleNamespace(anchored_low_rank=training_alr),
         gino=SimpleNamespace(),
         opt=SimpleNamespace(),
+        inverse_test=True,
     )
 
 
@@ -73,3 +75,44 @@ def test_alr_config_rejects_invalid_epoch_schedule(warmup, joint, message):
 
     with pytest.raises(ValueError, match=message):
         _resolve_alr_config(config)
+
+
+def test_alr_config_requires_physical_validation_metrics():
+    config = _config()
+    config.inverse_test = False
+
+    with pytest.raises(ValueError, match="inverse_test=true"):
+        _resolve_alr_config(config)
+
+
+def test_alr_config_rejects_negative_rmse_margin():
+    config = _config()
+    config.training.anchored_low_rank.rmse_noninferiority_margin = -0.1
+
+    with pytest.raises(ValueError, match="rmse_noninferiority_margin"):
+        _resolve_alr_config(config)
+
+
+def test_eval_alr_layout_uses_checkpoint_particle_count_and_configured_k():
+    config = _config()
+    model = SimpleNamespace(
+        anchored_low_rank_enabled=True,
+        anchored_low_rank_num_particles=4,
+    )
+
+    layout = _resolve_eval_alr_layout(config, [model])
+
+    assert layout.num_particles == 4
+    assert layout.aleatory_samples == 15
+    assert layout.n_members == 60
+
+
+def test_eval_alr_layout_rejects_multiple_shared_backbones():
+    config = _config()
+    model = SimpleNamespace(
+        anchored_low_rank_enabled=True,
+        anchored_low_rank_num_particles=4,
+    )
+
+    with pytest.raises(ValueError, match="exactly one"):
+        _resolve_eval_alr_layout(config, [model, model])

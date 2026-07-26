@@ -12,6 +12,7 @@ from neuralop.flood.processing.wv_impl import (
     _build_x_from_dynamic_boundary,
     get_flood_crps_weights,
 )
+from neuralop.flood.losses import masked_rmse
 from neuralop.flood.train.fgn import FGNTrainer
 from neuralop.flood.utils.runtime_core import parse_family_id_from_run_id
 from neuralop.losses.probabilistic_losses import CRPSLoss
@@ -33,6 +34,21 @@ class ParticleCRPSResult:
 
     mean: torch.Tensor
     per_particle: torch.Tensor
+
+
+class PhysicalRMSE:
+    """Wettable-domain RMSE for postprocessed physical predictions."""
+
+    reduction = "mean"
+    expects_samples = False
+
+    def __call__(self, pred, target, *, structural_dry_mask=None, **kwargs):
+        del kwargs
+        return masked_rmse(
+            pred,
+            target,
+            structural_dry_mask=structural_dry_mask,
+        )
 
 
 @dataclass(frozen=True)
@@ -358,6 +374,7 @@ class AnchoredLowRankFGNTrainer(FGNTrainer):
         anchor_penalty_weight: float = 1.0e-3,
         adapter_warmup_epochs: int = 5,
         eval_aleatory_samples: int | None = None,
+        rmse_noninferiority_margin: float = 0.001,
         target_normalizer=None,
         water_depth_index: int = 0,
         **kwargs,
@@ -382,6 +399,95 @@ class AnchoredLowRankFGNTrainer(FGNTrainer):
         )
         self.target_normalizer = target_normalizer
         self.water_depth_index = int(water_depth_index)
+        self.rmse_noninferiority_margin = float(rmse_noninferiority_margin)
+        if self.rmse_noninferiority_margin < 0:
+            raise ValueError("RMSE non-inferiority margin must be nonnegative.")
+        self.base_validation_rmse = float("nan")
+
+    def _seed_for_eval_batch(self, *, epoch, log_prefix, batch_idx):
+        # Checkpoint selection must compare every epoch against the frozen base
+        # under the same aleatory draws.
+        return super()._seed_for_eval_batch(
+            epoch=0,
+            log_prefix=log_prefix,
+            batch_idx=batch_idx,
+        )
+
+    def configure_selection_contract(self, *, base_rmse, margin=None):
+        value = float(base_rmse)
+        if not torch.isfinite(torch.tensor(value)):
+            raise ValueError("Frozen-base validation RMSE must be finite.")
+        self.base_validation_rmse = value
+        if margin is not None:
+            margin = float(margin)
+            if margin < 0:
+                raise ValueError("RMSE non-inferiority margin must be nonnegative.")
+            self.rmse_noninferiority_margin = margin
+        model = _unwrap_model(self.model)
+        stored = getattr(model, "anchored_low_rank_base_validation_rmse", None)
+        if torch.is_tensor(stored):
+            stored.fill_(value)
+
+    def _selection_base_rmse(self):
+        model = _unwrap_model(self.model)
+        stored = getattr(model, "anchored_low_rank_base_validation_rmse", None)
+        if torch.is_tensor(stored) and bool(torch.isfinite(stored).item()):
+            return float(stored.item())
+        return float(self.base_validation_rmse)
+
+    def measure_frozen_base_rmse(self, validation_loader):
+        """Measure the exact warm-started backbone with all adapters bypassed."""
+
+        model = _unwrap_model(self.model)
+        was_training = bool(model.training)
+        was_active = bool(getattr(model, "anchored_low_rank_active", True))
+        model.set_anchored_low_rank_active(False)
+        try:
+            metrics = self.evaluate(
+                {"rmse": PhysicalRMSE()},
+                validation_loader,
+                log_prefix="test",
+                epoch=0,
+            )
+        finally:
+            model.set_anchored_low_rank_active(was_active)
+            model.train(was_training)
+            if self.data_processor is not None:
+                self.data_processor.train(was_training)
+        value = float(metrics["test_rmse"])
+        self.configure_selection_contract(base_rmse=value)
+        return value
+
+    def evaluate_all(self, epoch, eval_losses, test_loaders):
+        all_metrics = {}
+        base_rmse = self._selection_base_rmse()
+        if not torch.isfinite(torch.tensor(base_rmse)):
+            raise RuntimeError(
+                "ALR checkpoint selection requires a frozen-base validation RMSE."
+            )
+        for loader_name, loader in test_loaders.items():
+            loader_metrics = self.evaluate(
+                eval_losses,
+                loader,
+                log_prefix=loader_name,
+                epoch=epoch,
+            )
+            crps_key = f"{loader_name}_crps"
+            rmse_key = f"{loader_name}_rmse"
+            if crps_key not in loader_metrics or rmse_key not in loader_metrics:
+                raise KeyError("ALR selection requires both CRPS and physical RMSE metrics.")
+            raw_crps = float(loader_metrics[crps_key])
+            rmse_delta = float(loader_metrics[rmse_key]) - base_rmse
+            gate_passed = rmse_delta <= self.rmse_noninferiority_margin
+            loader_metrics[f"{loader_name}_crps_unconstrained"] = raw_crps
+            loader_metrics[f"{loader_name}_rmse_delta_from_base"] = rmse_delta
+            loader_metrics[f"{loader_name}_rmse_gate_passed"] = float(gate_passed)
+            if not gate_passed:
+                loader_metrics[crps_key] = float("inf")
+            all_metrics.update(loader_metrics)
+        if self.verbose:
+            self.log_eval(epoch=epoch, eval_metrics=all_metrics)
+        return all_metrics
 
     def on_epoch_start(self, epoch):
         super().on_epoch_start(epoch)

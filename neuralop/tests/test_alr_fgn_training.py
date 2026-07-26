@@ -165,6 +165,7 @@ class _RecordingALRModel(torch.nn.Module):
         self.last_particle_ids = None
         self.last_latents = None
         self.adapters_only = None
+        self.anchored_low_rank_active = True
         self.x_calls = []
 
     def forward(self, *, x, ada_in, particle_ids, **kwargs):
@@ -172,13 +173,17 @@ class _RecordingALRModel(torch.nn.Module):
         self.last_particle_ids = particle_ids.detach().clone()
         self.last_latents = ada_in.detach().clone()
         self.x_calls.append(x.detach().clone())
-        return x[..., :1] + self.shared + particle_ids[:, None, None] * 0.2 + ada_in[:, None, :1]
+        particle_delta = particle_ids[:, None, None] * 0.2 if self.anchored_low_rank_active else 0.0
+        return x[..., :1] + self.shared + particle_delta + ada_in[:, None, :1]
 
     def anchored_low_rank_offset_penalty(self):
         return self.shared.square()
 
     def set_anchored_low_rank_training_phase(self, *, adapters_only):
         self.adapters_only = bool(adapters_only)
+
+    def set_anchored_low_rank_active(self, active):
+        self.anchored_low_rank_active = bool(active)
 
 
 def test_alr_trainer_vectorizes_particles_and_keeps_common_aleatory_bank():
@@ -326,3 +331,84 @@ def test_alr_family_split_has_no_member_leakage_and_nested_training_subsets():
     for index in full.train_indices:
         run_id, _ = _IndexedFamilies.sample_index[index]
         assert run_id.rpartition("_sim")[0] in full.train_family_ids
+
+
+def test_alr_validation_selection_enforces_physical_rmse_noninferiority():
+    from neuralop.flood.train.alr_fgn import PhysicalRMSE
+
+    model = _RecordingALRModel()
+    bootstrap = DirichletFamilyBootstrap(
+        family_ids=["F001"], num_particles=2, seed=37
+    )
+    trainer = AnchoredLowRankFGNTrainer(
+        model=model,
+        n_epochs=1,
+        device="cpu",
+        fgn_noise_dim=1,
+        crps_n_samples=2,
+        eval_aleatory_samples=2,
+        num_particles=2,
+        family_bootstrap=bootstrap,
+        deterministic_eval=True,
+        eval_seed=41,
+        use_progress_bar=False,
+    )
+    trainer.configure_selection_contract(base_rmse=0.0, margin=0.001)
+    sample = {
+        "x": torch.zeros(1, 1, 1),
+        "y": torch.zeros(1, 1, 1),
+        "input_geom": torch.zeros(1, 1, 2),
+        "latent_queries": torch.zeros(1, 1, 1, 2),
+        "output_queries": torch.zeros(1, 1, 2),
+        "family_id": ["F001"],
+    }
+    crps = FloodMaskedCRPSLoss(
+        policy="legacy_full_domain",
+        base_loss=CRPSLoss(n_samples=4, reduction="mean"),
+    )
+
+    metrics = trainer.evaluate_all(
+        epoch=0,
+        eval_losses={"crps": crps, "rmse": PhysicalRMSE()},
+        test_loaders={"test": [sample]},
+    )
+
+    assert torch.isfinite(torch.tensor(metrics["test_crps_unconstrained"]))
+    assert metrics["test_rmse_gate_passed"] == 0.0
+    assert metrics["test_crps"] == float("inf")
+
+
+def test_alr_base_rmse_measurement_bypasses_adapters_and_restores_them():
+    model = _RecordingALRModel()
+    bootstrap = DirichletFamilyBootstrap(
+        family_ids=["F001"], num_particles=2, seed=43
+    )
+    trainer = AnchoredLowRankFGNTrainer(
+        model=model,
+        n_epochs=1,
+        device="cpu",
+        fgn_noise_dim=1,
+        crps_n_samples=2,
+        eval_aleatory_samples=2,
+        num_particles=2,
+        family_bootstrap=bootstrap,
+        deterministic_eval=True,
+        eval_seed=47,
+        use_progress_bar=False,
+    )
+    trainer._sample_common_latents = lambda **kwargs: torch.zeros(
+        2, 1, 1, dtype=kwargs["dtype"]
+    )
+    sample = {
+        "x": torch.zeros(1, 1, 1),
+        "y": torch.zeros(1, 1, 1),
+        "input_geom": torch.zeros(1, 1, 2),
+        "latent_queries": torch.zeros(1, 1, 1, 2),
+        "output_queries": torch.zeros(1, 1, 2),
+        "family_id": ["F001"],
+    }
+
+    baseline = trainer.measure_frozen_base_rmse([sample])
+
+    torch.testing.assert_close(torch.tensor(baseline), torch.tensor(0.1))
+    assert model.anchored_low_rank_active is True

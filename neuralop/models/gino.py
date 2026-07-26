@@ -449,12 +449,17 @@ class GINO(BaseModel):
 
     def _configure_anchored_low_rank(self, config):
         self.anchored_low_rank_enabled = bool(_config_value(config, "enabled", False))
+        self.anchored_low_rank_active = self.anchored_low_rank_enabled
         self.anchored_low_rank_num_particles = int(
             _config_value(config, "num_particles", 4)
         )
         self.anchored_low_rank_rank = int(_config_value(config, "rank", 4))
         if not self.anchored_low_rank_enabled:
             return
+        self.register_buffer(
+            "anchored_low_rank_base_validation_rmse",
+            torch.tensor(float("nan"), dtype=torch.float32),
+        )
         if self.output_distribution != "deterministic":
             raise ValueError("ALR-FGNO pilot requires deterministic Stage-1 output heads.")
         if not self.use_fgn_noise:
@@ -535,6 +540,12 @@ class GINO(BaseModel):
         if penalties:
             return torch.stack(penalties).sum()
         return next(self.parameters()).new_zeros(())
+
+    def set_anchored_low_rank_active(self, active):
+        """Enable or bypass every particle adapter without changing the backbone."""
+        self.anchored_low_rank_active = bool(active) and self.anchored_low_rank_enabled
+        for adapter in self.anchored_low_rank_adapters():
+            adapter.active = self.anchored_low_rank_active
 
     def set_anchored_low_rank_training_phase(self, *, adapters_only):
         adapter_parameter_ids = {

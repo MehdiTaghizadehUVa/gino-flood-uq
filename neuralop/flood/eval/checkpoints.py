@@ -15,6 +15,51 @@ from neuralop.models.base_model import BaseModel
 from neuralop.training.training_state import load_training_state
 from neuralop.flood.eval.runtime import CHECKPOINT_BEST, CHECKPOINT_FILES, CHECKPOINT_LAST
 
+
+def _attach_alr_bootstrap_from_state(model: Any, state: Dict[str, Any]) -> bool:
+    """Recreate checkpointed ALR family-bootstrap state before strict loading."""
+
+    if not bool(getattr(model, "anchored_low_rank_enabled", False)):
+        return False
+    prefix = "alr_family_bootstrap."
+    weights_key = f"{prefix}weights"
+    extra_key = f"{prefix}_extra_state"
+    if weights_key not in state or extra_key not in state:
+        raise KeyError(
+            "ALR checkpoint is missing its persistent family-bootstrap weights or metadata."
+        )
+    extra = state[extra_key]
+    if not isinstance(extra, dict):
+        raise TypeError("ALR family-bootstrap extra state must be a dictionary.")
+    from neuralop.flood.train.alr_fgn import DirichletFamilyBootstrap
+
+    bootstrap = DirichletFamilyBootstrap(
+        family_ids=extra["family_ids"],
+        num_particles=int(extra["num_particles"]),
+        seed=int(extra["seed"]),
+    )
+    expected_shape = tuple(bootstrap.weights.shape)
+    actual_shape = tuple(torch.as_tensor(state[weights_key]).shape)
+    if actual_shape != expected_shape:
+        raise ValueError(
+            "ALR family-bootstrap matrix shape does not match checkpoint metadata: "
+            f"weights={actual_shape}, metadata={expected_shape}."
+        )
+    model.add_module("alr_family_bootstrap", bootstrap)
+    return True
+
+
+def _checkpoint_state_path(run_dir: Path, alias: str) -> Path:
+    path = run_dir / f"{alias}_state_dict.pt"
+    if alias == CHECKPOINT_LAST:
+        manifest_path = run_dir / "manifest.pt"
+        if manifest_path.exists():
+            manifest = torch.load(manifest_path, map_location="cpu", weights_only=False)
+            manifest_name = manifest.get("model") if isinstance(manifest, dict) else None
+            if manifest_name and (run_dir / str(manifest_name)).exists():
+                path = run_dir / str(manifest_name)
+    return path
+
 def _resolve_checkpoint_in_dir(save_dir: Path, preferred_alias: str = CHECKPOINT_LAST) -> Tuple[Path, str]:
     """Return (dir, alias) for a single checkpoint directory."""
     aliases = [preferred_alias]
@@ -172,6 +217,10 @@ def _load_models_from_runs(
     models: List[Any] = []
     for run_dir, alias, label in checkpoint_runs:
         model = _build_model_for_run(config, run_dir, alias, label, logger)
+        if bool(getattr(model, "anchored_low_rank_enabled", False)):
+            state_path = _checkpoint_state_path(run_dir, alias)
+            state = torch.load(state_path, map_location="cpu", weights_only=False)
+            _attach_alr_bootstrap_from_state(model, state)
         load_training_state(save_dir=run_dir, save_name=alias, model=model)
         model = model.to(device).eval()
         models.append(model)
