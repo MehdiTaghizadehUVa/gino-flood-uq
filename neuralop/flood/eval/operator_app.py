@@ -487,6 +487,9 @@ def main() -> int:
                 alr_aleatory_samples=(
                     alr_layout.aleatory_samples if alr_layout is not None else None
                 ),
+                forward_timing_path=_opt(
+                    config, "rollout", "forward_timing_path", None
+                ),
             )
         else:
             if alr_layout is not None:

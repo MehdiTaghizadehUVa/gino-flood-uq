@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import logging
+import json
 import os
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional
 
@@ -274,6 +276,7 @@ def _rollout_prediction_per_hydrograph(
     member_boundary_mode: str = "shared",
     alr_num_particles: Optional[int] = None,
     alr_aleatory_samples: Optional[int] = None,
+    forward_timing_path: Optional[str] = None,
 ) -> None:
     """
     Evaluate per hydrograph using all reference simulations as ground-truth uncertainty.
@@ -485,6 +488,7 @@ def _rollout_prediction_per_hydrograph(
     max_scatter_points_per_step = 250
     w_quantiles = np.linspace(0.0, 1.0, 21, dtype=np.float64)
     structural_mask_active = False
+    forward_timing_events: List[Dict[str, Any]] = []
 
     member_history_mapping_logged = False
     for sample in tqdm(hydrograph_samples, desc="Hydrograph rollout evaluation"):
@@ -671,10 +675,14 @@ def _rollout_prediction_per_hydrograph(
                 temporal_mode=fgn_latent_temporal_mode,
             )
 
+        event_forward_seconds = 0.0
         for t in range(sample_rollout_length):
             mu_stack: Optional[torch.Tensor] = None
             logvar_stack: Optional[torch.Tensor] = None
             state_stack: Optional[torch.Tensor] = None
+            if forward_timing_path is not None and device.type == "cuda":
+                torch.cuda.synchronize(device)
+            forward_started = time.perf_counter() if forward_timing_path is not None else None
             with torch.no_grad():
                 if alr_layout is not None:
                     nested_histories = torch.stack(current_dynamics, dim=0).reshape(
@@ -823,6 +831,7 @@ def _rollout_prediction_per_hydrograph(
                             mc_seed_parts=("rollout_hydro", hydro_id, "single", t, 0, 0, "fgn"),
                         )
                         pred_stack = pred.unsqueeze(0)
+
                     else:
                         pred = _forward_operator_model(
                             model,
@@ -835,6 +844,11 @@ def _rollout_prediction_per_hydrograph(
                             mc_seed_parts=("rollout_hydro", hydro_id, "single", t, 0, 0),
                         )
                         pred_stack = pred.unsqueeze(0)
+
+            if forward_started is not None:
+                if device.type == "cuda":
+                    torch.cuda.synchronize(device)
+                event_forward_seconds += time.perf_counter() - forward_started
 
             structural_dry_mask = sample.get("structural_dry_mask")
             inv_pred_ens = target_norm.inverse_transform(pred_stack.squeeze(1))
@@ -1327,6 +1341,45 @@ def _rollout_prediction_per_hydrograph(
                 )
 
         logger.info("Completed hydrograph %s (n_ref=%d, n_ens=%d)", hydro_id, n_ref, n_ens)
+        if forward_timing_path is not None:
+            forward_timing_events.append(
+                {
+                    "hydrograph_id": str(hydro_id),
+                    "rollout_steps": int(sample_rollout_length),
+                    "ensemble_members": int(n_ens),
+                    "forward_rollout_seconds": float(event_forward_seconds),
+                    "seconds_per_member_rollout": float(
+                        event_forward_seconds / max(1, n_ens)
+                    ),
+                }
+            )
+
+    if forward_timing_path is not None:
+        timing_path = Path(str(forward_timing_path)).expanduser()
+        timing_path.parent.mkdir(parents=True, exist_ok=True)
+        timing_payload = {
+            "timing_policy": (
+                "synchronized autoregressive prediction section only; excludes inverse "
+                "transforms, metrics, artifacts, and visualization"
+            ),
+            "device": str(device),
+            "cuda_device_name": (
+                torch.cuda.get_device_name(device) if device.type == "cuda" else None
+            ),
+            "alr_num_particles": (
+                int(alr_layout.num_particles) if alr_layout is not None else None
+            ),
+            "alr_aleatory_samples": (
+                int(alr_layout.aleatory_samples) if alr_layout is not None else None
+            ),
+            "events": forward_timing_events,
+        }
+        temporary_path = timing_path.with_suffix(timing_path.suffix + ".tmp")
+        temporary_path.write_text(
+            json.dumps(timing_payload, indent=2, sort_keys=True), encoding="utf-8"
+        )
+        temporary_path.replace(timing_path)
+        logger.info("Forward-only timing written to %s", timing_path)
 
     if not any(len(v) > 0 for v in per_channel_rmse.values()):
         logger.warning("No per-hydrograph metrics were produced.")
