@@ -146,3 +146,37 @@ def alr_nested_variance_components(prediction: torch.Tensor) -> dict[str, torch.
         "variance_epistemic": epistemic,
         "variance_total": aleatory + epistemic,
     }
+
+
+def alr_crossed_variance_components(prediction: torch.Tensor) -> dict[str, torch.Tensor]:
+    """Variance decomposition corrected for finite-K particle/latent interaction.
+
+    This estimator requires a common, column-aligned aleatory bank for every
+    particle. It removes the interaction mean square divided by K from the
+    variance of particle means and clamps only the corrected component at zero.
+    """
+
+    if prediction.ndim < 3:
+        raise ValueError("prediction must have shape [M, K, ...].")
+    particles, aleatory_samples = prediction.shape[:2]
+    if particles < 2 or aleatory_samples < 2:
+        raise ValueError("crossed variance requires M >= 2 and K >= 2.")
+    particle_mean = prediction.mean(dim=1, keepdim=True)
+    aleatory_mean = prediction.mean(dim=0, keepdim=True)
+    grand_mean = prediction.mean(dim=(0, 1), keepdim=True)
+    interaction = prediction - particle_mean - aleatory_mean + grand_mean
+    interaction_ms = interaction.square().sum(dim=(0, 1)) / float(
+        (particles - 1) * (aleatory_samples - 1)
+    )
+    epistemic_uncorrected = particle_mean.squeeze(1).var(dim=0, unbiased=True)
+    epistemic = (
+        epistemic_uncorrected - interaction_ms / float(aleatory_samples)
+    ).clamp_min(0)
+    aleatory = prediction.var(dim=1, unbiased=True).mean(dim=0)
+    return {
+        "variance_aleatory": aleatory,
+        "variance_epistemic": epistemic,
+        "variance_epistemic_uncorrected": epistemic_uncorrected,
+        "variance_interaction": interaction_ms,
+        "variance_total": aleatory + epistemic,
+    }

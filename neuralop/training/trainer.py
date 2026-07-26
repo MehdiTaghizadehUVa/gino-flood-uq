@@ -619,7 +619,11 @@ class Trainer:
                     v = val_loss.item() if hasattr(val_loss, "item") else val_loss
                     # When loss has reduction='mean', val is mean over batch; weight by batch size so sum/n_samples = true mean
                     loss_fn = loss_dict.get(loss_name)
-                    if hasattr(loss_fn, "reduction") and getattr(loss_fn, "reduction", None) == "mean":
+                    errors.setdefault(f"{log_prefix}_{loss_name}", 0)
+                    if loss_fn is None or (
+                        hasattr(loss_fn, "reduction")
+                        and getattr(loss_fn, "reduction", None) == "mean"
+                    ):
                         errors[f"{log_prefix}_{loss_name}"] += v * batch_size
                     else:
                         errors[f"{log_prefix}_{loss_name}"] += v

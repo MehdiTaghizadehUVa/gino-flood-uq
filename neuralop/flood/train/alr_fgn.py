@@ -12,7 +12,7 @@ from neuralop.flood.processing.wv_impl import (
     _build_x_from_dynamic_boundary,
     get_flood_crps_weights,
 )
-from neuralop.flood.losses import masked_rmse
+from neuralop.flood.losses import FloodMaskedCRPSLoss, masked_rmse
 from neuralop.flood.train.fgn import FGNTrainer
 from neuralop.flood.utils.runtime_core import parse_family_id_from_run_id
 from neuralop.losses.probabilistic_losses import CRPSLoss
@@ -610,6 +610,38 @@ class AnchoredLowRankFGNTrainer(FGNTrainer):
     def _anchor_penalty(self):
         return _unwrap_model(self.model).anchored_low_rank_offset_penalty()
 
+    @staticmethod
+    def _particle_correlation_mean(predictions):
+        particle_mean = predictions.mean(dim=1).reshape(predictions.shape[0], -1)
+        centered = particle_mean - particle_mean.mean(dim=1, keepdim=True)
+        normalized = centered / centered.norm(dim=1, keepdim=True).clamp_min(1.0e-12)
+        correlation = normalized @ normalized.transpose(0, 1)
+        mask = ~torch.eye(
+            correlation.shape[0], dtype=torch.bool, device=correlation.device
+        )
+        return correlation[mask].mean()
+
+    @staticmethod
+    def _particle_crps_loss(loss_fn, n_samples):
+        if isinstance(loss_fn, CRPSLoss):
+            return CRPSLoss(
+                n_samples=int(n_samples),
+                channel_weights=loss_fn.channel_weights,
+                reduction=loss_fn.reduction,
+            )
+        if isinstance(loss_fn, FloodMaskedCRPSLoss) and isinstance(
+            loss_fn.base_loss, CRPSLoss
+        ):
+            return FloodMaskedCRPSLoss(
+                policy=loss_fn.policy,
+                base_loss=CRPSLoss(
+                    n_samples=int(n_samples),
+                    channel_weights=loss_fn.base_loss.channel_weights,
+                    reduction=loss_fn.base_loss.reduction,
+                ),
+            )
+        return None
+
     def _train_one_batch_single_step(self, idx, sample, training_loss):
         del idx
         predictions = self._forward_nested_x(
@@ -624,6 +656,7 @@ class AnchoredLowRankFGNTrainer(FGNTrainer):
             for particle, value in enumerate(result.per_particle)
         }
         metrics["alr_anchor_penalty"] = penalty.detach()
+        metrics["alr_anchor_displacement_norm"] = penalty.detach().sqrt()
         if self.rel_l2_loss_fn is not None:
             with torch.no_grad():
                 metrics["rel_l2"] = self.rel_l2_loss_fn(
@@ -724,6 +757,7 @@ class AnchoredLowRankFGNTrainer(FGNTrainer):
             for particle, value in enumerate(last_result.per_particle)
         }
         metrics["alr_anchor_penalty"] = penalty.detach()
+        metrics["alr_anchor_displacement_norm"] = penalty.detach().sqrt()
         if last_rel_l2 is not None:
             metrics["rel_l2"] = last_rel_l2
         if gradient_mode == "truncated":
@@ -797,4 +831,21 @@ class AnchoredLowRankFGNTrainer(FGNTrainer):
                 target,
                 structural_dry_mask=sample.get("structural_dry_mask"),
             )
+            if expects_samples:
+                particle_loss_fn = self._particle_crps_loss(
+                    loss_fn, self.eval_aleatory_samples
+                )
+                if particle_loss_fn is None:
+                    continue
+                for particle in range(self.num_particles):
+                    losses[f"alr_particle_{name}_{particle}"] = particle_loss_fn(
+                        predictions[particle],
+                        target,
+                        structural_dry_mask=sample.get("structural_dry_mask"),
+                    )
+        losses["alr_particle_correlation_mean"] = self._particle_correlation_mean(
+            predictions
+        )
+        penalty = self._anchor_penalty()
+        losses["alr_anchor_displacement_norm"] = penalty.sqrt()
         return losses, mean_prediction if return_output else None

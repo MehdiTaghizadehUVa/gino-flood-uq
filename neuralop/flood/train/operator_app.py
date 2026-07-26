@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import warnings
 from functools import partial
@@ -642,6 +643,25 @@ def main():
             counts["adapter_trainable"],
             counts["adapter_trainable_fraction"],
             counts["anchor_buffers"],
+        )
+        checkpoint_dir = Path(str(config.checkpoint.save_dir)).expanduser()
+        checkpoint_dir.mkdir(parents=True, exist_ok=True)
+        parameter_report = {
+            "shared_parameters": counts["shared"],
+            "adapter_trainable_parameters": counts["adapter_trainable"],
+            "anchor_buffer_parameters": counts["anchor_buffers"],
+            "adapter_trainable_fraction": counts["adapter_trainable_fraction"],
+            "num_particles": int(_cfg_get(alr_model_cfg, "num_particles", 4)),
+            "rank": int(_cfg_get(alr_model_cfg, "rank", 4)),
+            "train_families": len(alr_family_split.train_family_ids),
+            "validation_families": len(alr_family_split.validation_family_ids),
+            "stage1_checkpoint_dir": str(
+                _cfg_get(alr_training_cfg, "stage1_checkpoint_dir", "")
+            ),
+        }
+        report_path = checkpoint_dir / "alr_pilot_parameter_report.json"
+        report_path.write_text(
+            json.dumps(parameter_report, indent=2, sort_keys=True), encoding="utf-8"
         )
 
     # Optimizer/scheduler

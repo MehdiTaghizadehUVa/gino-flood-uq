@@ -5,6 +5,7 @@ import torch
 from neuralop.flood.eval.alr_fgn import (
     ALRMemberLayout,
     alr_nested_variance_components,
+    alr_crossed_variance_components,
     forward_alr_rollout_step,
 )
 from neuralop.flood.eval.checkpoints import _attach_alr_bootstrap_from_state
@@ -81,6 +82,22 @@ def test_alr_nested_variance_separates_shared_aleatory_and_particle_effects():
     torch.testing.assert_close(components["variance_aleatory"], torch.tensor([[4.0]]))
     torch.testing.assert_close(components["variance_epistemic"], torch.tensor([[50.0]]))
     torch.testing.assert_close(components["variance_total"], torch.tensor([[54.0]]))
+
+
+def test_alr_crossed_variance_removes_finite_k_interaction_contamination():
+    particle = torch.tensor([0.0, 10.0]).view(2, 1, 1, 1)
+    aleatory = torch.tensor([0.0, 2.0]).view(1, 2, 1, 1)
+    interaction = torch.tensor([[1.0, -1.0], [-1.0, 1.0]]).view(2, 2, 1, 1)
+    prediction = particle + aleatory + interaction
+
+    components = alr_crossed_variance_components(prediction)
+
+    torch.testing.assert_close(
+        components["variance_epistemic_uncorrected"], torch.tensor([[50.0]])
+    )
+    torch.testing.assert_close(
+        components["variance_epistemic"], torch.tensor([[48.0]])
+    )
 
 
 def test_alr_checkpoint_loader_reconstructs_persistent_bootstrap_before_load():

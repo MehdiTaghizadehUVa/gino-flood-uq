@@ -226,7 +226,11 @@ def test_alr_trainer_vectorizes_particles_and_keeps_common_aleatory_bank():
     assert model.last_particle_ids.tolist() == [0, 0, 0, 0, 1, 1, 1, 1]
     latent = model.last_latents.reshape(2, 2, 2, 1)
     torch.testing.assert_close(latent[0], latent[1])
-    assert set(metrics) >= {"alr_particle_crps_0", "alr_particle_crps_1"}
+    assert set(metrics) >= {
+        "alr_particle_crps_0",
+        "alr_particle_crps_1",
+        "alr_anchor_displacement_norm",
+    }
     trainer.on_epoch_start(0)
     assert model.adapters_only is True
     trainer.on_epoch_start(1)
@@ -243,6 +247,10 @@ def test_alr_trainer_vectorizes_particles_and_keeps_common_aleatory_bank():
         return_output=True,
     )
     assert torch.isfinite(eval_metrics["crps"])
+    assert torch.isfinite(eval_metrics["alr_particle_crps_0"])
+    assert torch.isfinite(eval_metrics["alr_particle_crps_1"])
+    assert torch.isfinite(eval_metrics["alr_particle_correlation_mean"])
+    assert torch.isfinite(eval_metrics["alr_anchor_displacement_norm"])
     assert output.shape == sample["y"].shape
 
 
