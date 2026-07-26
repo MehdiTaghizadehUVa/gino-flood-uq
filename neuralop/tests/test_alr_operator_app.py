@@ -19,6 +19,7 @@ def _config(*, enabled=True, training=True):
             k_eval=15,
             adapter_warmup_epochs=5,
             joint_finetune_epochs=25,
+            k_validation=5,
         )
         if training
         else None
@@ -46,7 +47,7 @@ def test_alr_config_resolves_stage1_schedule_and_nested_sample_counts():
     assert config.opt.fgn_ar_state_update == "member_feedback"
     assert config.opt.crps_n_samples == 2
     assert config.opt.n_epochs == 30
-    assert config.opt.alr_eval_n_samples == 60
+    assert config.opt.alr_eval_n_samples == 20
 
 
 def test_alr_resolved_architecture_metadata_is_torch_serializable():

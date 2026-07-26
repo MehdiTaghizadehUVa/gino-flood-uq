@@ -139,10 +139,13 @@ def _resolve_alr_config(config):
     num_particles = int(_cfg_get(model_cfg, "num_particles", 4))
     k_train = int(_cfg_get(training_cfg, "k_train", 2))
     k_eval = int(_cfg_get(training_cfg, "k_eval", 15))
+    k_validation = int(_cfg_get(training_cfg, "k_validation", k_eval))
     if num_particles <= 1:
         raise ValueError("ALR-FGNO requires at least two particles.")
-    if k_train < 2 or k_eval < 2:
-        raise ValueError("ALR-FGNO requires k_train and k_eval to be at least two.")
+    if k_train < 2 or k_validation < 2 or k_eval < 2:
+        raise ValueError(
+            "ALR-FGNO requires k_train, k_validation, and k_eval to be at least two."
+        )
     if not bool(_cfg_get(config, "inverse_test", True)):
         raise ValueError("ALR-FGNO checkpoint selection requires inverse_test=true.")
     rmse_margin = float(
@@ -157,7 +160,7 @@ def _resolve_alr_config(config):
     setattr(config.gino, "fgn_latent_temporal_mode", "persistent")
     setattr(config.opt, "fgn_ar_state_update", "member_feedback")
     setattr(config.opt, "crps_n_samples", k_train)
-    setattr(config.opt, "alr_eval_n_samples", num_particles * k_eval)
+    setattr(config.opt, "alr_eval_n_samples", num_particles * k_validation)
     setattr(config.opt, "n_epochs", warmup_epochs + joint_epochs)
     return True, model_cfg_payload, training_cfg
 
@@ -1039,7 +1042,11 @@ def main():
                     _cfg_get(alr_training_cfg, "adapter_warmup_epochs", 5)
                 ),
                 eval_aleatory_samples=int(
-                    _cfg_get(alr_training_cfg, "k_eval", 15)
+                    _cfg_get(
+                        alr_training_cfg,
+                        "k_validation",
+                        _cfg_get(alr_training_cfg, "k_eval", 15),
+                    )
                 ),
                 eval_member_chunk_size=int(
                     _cfg_get(alr_training_cfg, "eval_member_chunk_size", 4)
@@ -1161,11 +1168,17 @@ def main():
         )
     if alr_enabled:
         logger.info(
-            "ALR-FGNO settings: particles=%s rank=%s k_train=%s k_eval=%s "
-            "adapter_warmup_epochs=%s joint_finetune_epochs=%s",
+            "ALR-FGNO settings: particles=%s rank=%s k_train=%s "
+            "k_validation=%s k_eval=%s adapter_warmup_epochs=%s "
+            "joint_finetune_epochs=%s",
             _cfg_get(alr_model_cfg, "num_particles", 4),
             _cfg_get(alr_model_cfg, "rank", 4),
             _cfg_get(alr_training_cfg, "k_train", 2),
+            _cfg_get(
+                alr_training_cfg,
+                "k_validation",
+                _cfg_get(alr_training_cfg, "k_eval", 15),
+            ),
             _cfg_get(alr_training_cfg, "k_eval", 15),
             _cfg_get(alr_training_cfg, "adapter_warmup_epochs", 5),
             _cfg_get(alr_training_cfg, "joint_finetune_epochs", 25),

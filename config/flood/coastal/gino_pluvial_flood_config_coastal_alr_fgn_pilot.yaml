@@ -30,6 +30,7 @@ flood: &FLOOD
       backbone_learning_rate: 1.0e-5
       rmse_noninferiority_margin: 0.001
       k_train: 2
+      k_validation: 5
       eval_member_chunk_size: 16
       k_eval: 15
       stage1_checkpoint_dir: "/sfs/gpfs/tardis/home/jrj6wm/GINO_Model/neuraloperator_no_physics_git_main/scripts/runtime/coastal_full_train_wvlike250/coastal_trial0035_wvlike_bs128_r48_det_a100_lr5e4_h128_uqgroup_20260407_110945_3af9ccf/checkpoint"
