@@ -199,6 +199,31 @@ class GNOBlock(nn.Module):
         self._is_cached = False
         self._is_verified = False
 
+    def enable_anchored_low_rank(
+        self,
+        *,
+        final_n_layers,
+        num_particles,
+        rank,
+        anchor_relative_norm,
+        seed,
+    ):
+        if not isinstance(self.channel_mlp, LinearChannelMLP):
+            raise TypeError("ALR output-GNO adapters require LinearChannelMLP.")
+        count = int(final_n_layers)
+        if count <= 0 or count > self.channel_mlp.n_layers:
+            raise ValueError(
+                f"final_n_layers must be in [1, {self.channel_mlp.n_layers}], got {count}."
+            )
+        first = self.channel_mlp.n_layers - count
+        self.channel_mlp.enable_anchored_low_rank(
+            layer_indices=range(first, self.channel_mlp.n_layers),
+            num_particles=num_particles,
+            rank=rank,
+            anchor_relative_norm=anchor_relative_norm,
+            seed=seed,
+        )
+
     def precompute_static_components(self, y: torch.Tensor, x: torch.Tensor):
         """
         Precompute and cache neighbor indices for static y and x.
@@ -250,7 +275,13 @@ class GNOBlock(nn.Module):
             raise ValueError("Input tensor x has changed since precomputation. Re-run precompute_static_components.")
         self._is_verified = True
 
-    def forward(self, y: torch.Tensor, x: torch.Tensor, f_y: Optional[torch.Tensor] = None) -> torch.Tensor:
+    def forward(
+        self,
+        y: torch.Tensor,
+        x: torch.Tensor,
+        f_y: Optional[torch.Tensor] = None,
+        particle_ids: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
         """
         Compute the output function evaluated at x by performing the kernel integral transform.
         Always compute the positional embeddings fresh to ensure they are part of the computation graph.
@@ -279,13 +310,17 @@ class GNOBlock(nn.Module):
                 self._verify_cached_components(y, x)
             neighbors_dict = self.cached_neighbors
 
-        out_features = self.integral_transform(
+        transform_kwargs = dict(
             y=y_embed,
             neighbors=neighbors_dict,
             x=x_embed,
             f_y=f_y,
-            weighting_fn=self.gno_weighting_fn
+            weighting_fn=self.gno_weighting_fn,
         )
+        # Preserve the exact legacy call contract for custom transform modules.
+        if particle_ids is not None:
+            transform_kwargs["particle_ids"] = particle_ids
+        out_features = self.integral_transform(**transform_kwargs)
         return out_features
 
     def reset_verification(self):

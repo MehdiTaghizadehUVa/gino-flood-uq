@@ -12,6 +12,18 @@ from ..layers.embeddings import SinusoidalEmbedding
 from ..layers.fno_block import FNOBlocks
 from ..layers.spectral_convolution import SpectralConv
 from ..layers.gno_block import GNOBlock
+from ..layers.anchored_low_rank import (
+    AnchoredLowRankDenseAdapter,
+    AnchoredLowRankSpectralAdapter,
+)
+
+
+def _config_value(config, key, default=None):
+    if config is None:
+        return default
+    if isinstance(config, dict):
+        return config.get(key, default)
+    return getattr(config, key, default)
 
 class GINO(BaseModel):
     """
@@ -225,6 +237,7 @@ class GINO(BaseModel):
         alpha: float = 1.0,
         beta:  float = 1.0,
         output_distribution: str = "deterministic",
+        anchored_low_rank=None,
         **kwargs
     ):
         super().__init__()
@@ -432,7 +445,110 @@ class GINO(BaseModel):
             self.mu_head = None
             self.logvar_head = None
 
-    def latent_embedding(self, in_p, ada_in=None):
+        self._configure_anchored_low_rank(anchored_low_rank)
+
+    def _configure_anchored_low_rank(self, config):
+        self.anchored_low_rank_enabled = bool(_config_value(config, "enabled", False))
+        self.anchored_low_rank_num_particles = int(
+            _config_value(config, "num_particles", 4)
+        )
+        self.anchored_low_rank_rank = int(_config_value(config, "rank", 4))
+        if not self.anchored_low_rank_enabled:
+            return
+        if self.output_distribution != "deterministic":
+            raise ValueError("ALR-FGNO pilot requires deterministic Stage-1 output heads.")
+        if not self.use_fgn_noise:
+            raise ValueError("ALR-FGNO requires the existing FGNO aleatory latent path.")
+        if self.anchored_low_rank_num_particles < 2:
+            raise ValueError("ALR-FGNO requires at least two epistemic particles.")
+        if self.anchored_low_rank_rank <= 0:
+            raise ValueError("ALR-FGNO adapter rank must be positive.")
+
+        seed = int(_config_value(config, "anchor_seed", 20260724))
+        relative_norm = float(_config_value(config, "anchor_relative_norm", 0.01))
+        self.fno_blocks.enable_anchored_low_rank(
+            last_n_blocks=int(_config_value(config, "fno_last_n_blocks", 2)),
+            num_particles=self.anchored_low_rank_num_particles,
+            rank=self.anchored_low_rank_rank,
+            anchor_relative_norm=relative_norm,
+            seed=seed,
+            adapt_spectral=bool(_config_value(config, "adapt_spectral", True)),
+            adapt_pointwise=bool(_config_value(config, "adapt_pointwise", True)),
+        )
+        if bool(_config_value(config, "adapt_output_gno", True)):
+            self.gno_out.enable_anchored_low_rank(
+                final_n_layers=2,
+                num_particles=self.anchored_low_rank_num_particles,
+                rank=self.anchored_low_rank_rank,
+                anchor_relative_norm=relative_norm,
+                seed=seed + 1_000_003,
+            )
+        if bool(_config_value(config, "adapt_output_projection", True)):
+            self.projection.enable_anchored_low_rank(
+                layer_indices=range(self.projection.n_layers),
+                num_particles=self.anchored_low_rank_num_particles,
+                rank=self.anchored_low_rank_rank,
+                anchor_relative_norm=relative_norm,
+                seed=seed + 2_000_003,
+            )
+        if bool(_config_value(config, "adapt_forcing_encoder", False)):
+            raise ValueError("adapt_forcing_encoder is outside the ALR-FGNO pilot scope.")
+
+    def anchored_low_rank_adapters(self):
+        for module in self.modules():
+            if isinstance(
+                module,
+                (AnchoredLowRankDenseAdapter, AnchoredLowRankSpectralAdapter),
+            ):
+                yield module
+
+    def anchored_low_rank_parameter_counts(self):
+        adapter_ids = {
+            id(parameter)
+            for adapter in self.anchored_low_rank_adapters()
+            for parameter in adapter.parameters()
+        }
+        adapter_trainable = sum(
+            parameter.numel()
+            for parameter in self.parameters()
+            if id(parameter) in adapter_ids and parameter.requires_grad
+        )
+        shared = sum(
+            parameter.numel()
+            for parameter in self.parameters()
+            if id(parameter) not in adapter_ids
+        )
+        anchor_buffers = sum(
+            buffer.numel()
+            for adapter in self.anchored_low_rank_adapters()
+            for buffer in adapter.buffers()
+        )
+        return {
+            "shared": int(shared),
+            "adapter_trainable": int(adapter_trainable),
+            "anchor_buffers": int(anchor_buffers),
+            "adapter_trainable_fraction": float(adapter_trainable / max(1, shared)),
+        }
+
+    def anchored_low_rank_offset_penalty(self):
+        penalties = [adapter.offset_penalty() for adapter in self.anchored_low_rank_adapters()]
+        if penalties:
+            return torch.stack(penalties).sum()
+        return next(self.parameters()).new_zeros(())
+
+    def set_anchored_low_rank_training_phase(self, *, adapters_only):
+        adapter_parameter_ids = {
+            id(parameter)
+            for adapter in self.anchored_low_rank_adapters()
+            for parameter in adapter.parameters()
+        }
+        for parameter in self.parameters():
+            if id(parameter) in adapter_parameter_ids:
+                parameter.requires_grad_(True)
+            else:
+                parameter.requires_grad_(not bool(adapters_only))
+
+    def latent_embedding(self, in_p, ada_in=None, particle_ids=None):
         """
         Internal helper: pass through self.lifting -> self.fno_blocks.
 
@@ -492,7 +608,12 @@ class GINO(BaseModel):
         # Lifting
         in_p = self.lifting(in_p)
         for idx in range(self.fno_blocks.n_layers):
-            in_p = self.fno_blocks(in_p, idx, ada_in_embed=ada_in_embed)
+            in_p = self.fno_blocks(
+                in_p,
+                idx,
+                ada_in_embed=ada_in_embed,
+                particle_ids=particle_ids,
+            )
 
         return in_p
 
@@ -504,6 +625,7 @@ class GINO(BaseModel):
         x=None,
         latent_features=None,
         ada_in=None,
+        particle_ids=None,
         return_features=False,
         feature_source="decoder_pre_projection",
         **kwargs
@@ -541,6 +663,8 @@ class GINO(BaseModel):
             batch_size = 1
         else:
             batch_size = x.shape[0]
+        if self.anchored_low_rank_enabled and particle_ids is None:
+            raise ValueError("particle_ids are required when ALR-FGNO is enabled.")
 
         # Possibly broadcast latent_features if batch=1
         if latent_features is not None:
@@ -574,7 +698,11 @@ class GINO(BaseModel):
             in_p = torch.cat((in_p, latent_features), dim=-1)
 
         # 3) FNO embedding
-        latent_embed = self.latent_embedding(in_p, ada_in=ada_in)
+        latent_embed = self.latent_embedding(
+            in_p,
+            ada_in=ada_in,
+            particle_ids=particle_ids,
+        )
 
         # Possibly apply tanh if out_gno_tanh in ['latent_embed','both']
         if self.out_gno_tanh in ['latent_embed', 'both']:
@@ -590,7 +718,8 @@ class GINO(BaseModel):
         out = self.gno_out(
             y=latent_queries.reshape(-1, latent_queries.shape[-1]),
             x=output_queries,
-            f_y=latent_embed
+            f_y=latent_embed,
+            particle_ids=particle_ids,
         )
         # => shape (b, c, n_out) => permute => (b, n_out, c)
         out = out.permute(0, 2, 1)
@@ -628,7 +757,7 @@ class GINO(BaseModel):
             logvar = torch.nan_to_num(logvar, nan=0.0, posinf=20.0, neginf=-30.0)
             out = torch.cat([mu, logvar], dim=-1)
         else:
-            out = self.projection(out).permute(0, 2, 1)
+            out = self.projection(out, particle_ids=particle_ids).permute(0, 2, 1)
 
             # Possibly apply tanh if out_gno_tanh == 'both'
             if self.out_gno_tanh == 'both':

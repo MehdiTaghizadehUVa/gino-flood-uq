@@ -12,6 +12,7 @@ from tltorch.factorized_tensors.core import FactorizedTensor
 from .einsum_utils import einsum_complexhalf
 from .base_spectral_conv import BaseSpectralConv
 from .resample import resample
+from .anchored_low_rank import AnchoredLowRankSpectralAdapter
 
 tl.set_backend("pytorch")
 use_opt_einsum("optimal")
@@ -348,6 +349,7 @@ class SpectralConv(BaseSpectralConv):
         self._contract = get_contract_fun(
             self.weight, implementation=implementation, separable=separable
         )
+        self.anchored_low_rank = None
 
         if bias:
             self.bias = nn.Parameter(
@@ -355,6 +357,30 @@ class SpectralConv(BaseSpectralConv):
             )
         else:
             self.bias = None
+
+    def enable_anchored_low_rank(
+        self,
+        *,
+        num_particles,
+        rank,
+        anchor_relative_norm,
+        seed,
+    ):
+        if self.separable:
+            raise ValueError("Anchored low-rank spectral adapters do not support separable kernels.")
+        reference_weight = (
+            self.weight if torch.is_tensor(self.weight) else self.weight.to_tensor()
+        )
+        self.anchored_low_rank = AnchoredLowRankSpectralAdapter(
+            in_channels=self.in_channels,
+            out_channels=self.out_channels,
+            n_modes=self.max_n_modes,
+            num_particles=num_particles,
+            rank=rank,
+            reference_weight=reference_weight,
+            anchor_relative_norm=anchor_relative_norm,
+            seed=seed,
+        )
 
     def transform(self, x, output_shape=None):
         in_shape = list(x.shape[2:])
@@ -391,7 +417,10 @@ class SpectralConv(BaseSpectralConv):
         self._n_modes = n_modes
 
     def forward(
-        self, x: torch.Tensor, output_shape: Optional[Tuple[int]] = None
+        self,
+        x: torch.Tensor,
+        output_shape: Optional[Tuple[int]] = None,
+        particle_ids: Optional[torch.Tensor] = None,
     ):
         """Generic forward pass for the Factorized Spectral Conv
 
@@ -483,7 +512,14 @@ class SpectralConv(BaseSpectralConv):
         else:
             slices_x[-1] = slice(None)
         
-        out_fft[slices_x] = self._contract(x[slices_x], weight, separable=self.separable)
+        contracted = self._contract(x[slices_x], weight, separable=self.separable)
+        if self.anchored_low_rank is not None:
+            contracted = contracted + self.anchored_low_rank(
+                x[slices_x],
+                particle_ids,
+                mode_slices=slices_w[2:],
+            )
+        out_fft[slices_x] = contracted
 
         if self.resolution_scaling_factor is not None and output_shape is None:
             mode_sizes = tuple([round(s * r) for (s, r) in zip(mode_sizes, self.resolution_scaling_factor)])

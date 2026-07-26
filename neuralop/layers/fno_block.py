@@ -270,18 +270,83 @@ class FNOBlocks(nn.Module):
             for norm, embedding in zip(self.norm, embeddings):
                 norm.set_embedding(embedding)
 
-    def forward(self, x, index=0, output_shape=None, ada_in_embed=None):
+    def enable_anchored_low_rank(
+        self,
+        *,
+        last_n_blocks,
+        num_particles,
+        rank,
+        anchor_relative_norm,
+        seed,
+        adapt_spectral=True,
+        adapt_pointwise=True,
+    ):
+        """Enable particle adapters only in the requested final FNO blocks."""
+        if self.complex_data:
+            raise ValueError("ALR-FGNO pilot adapters currently require real spatial features.")
+        count = int(last_n_blocks)
+        if count <= 0 or count > self.n_layers:
+            raise ValueError(
+                f"last_n_blocks must be in [1, {self.n_layers}], got {last_n_blocks}."
+            )
+        first = self.n_layers - count
+        for block_idx in range(first, self.n_layers):
+            block_seed = int(seed) + 100_003 * block_idx
+            if adapt_spectral:
+                self.convs[block_idx].enable_anchored_low_rank(
+                    num_particles=num_particles,
+                    rank=rank,
+                    anchor_relative_norm=anchor_relative_norm,
+                    seed=block_seed,
+                )
+            if adapt_pointwise:
+                channel_mlp = self.channel_mlp[block_idx]
+                channel_mlp.enable_anchored_low_rank(
+                    layer_indices=range(channel_mlp.n_layers),
+                    num_particles=num_particles,
+                    rank=rank,
+                    anchor_relative_norm=anchor_relative_norm,
+                    seed=block_seed + 10_007,
+                )
+
+    def forward(
+        self,
+        x,
+        index=0,
+        output_shape=None,
+        ada_in_embed=None,
+        particle_ids=None,
+    ):
         if self.preactivation:
-            return self.forward_with_preactivation(x, index, output_shape, ada_in_embed=ada_in_embed)
+            return self.forward_with_preactivation(
+                x,
+                index,
+                output_shape,
+                ada_in_embed=ada_in_embed,
+                particle_ids=particle_ids,
+            )
         else:
-            return self.forward_with_postactivation(x, index, output_shape, ada_in_embed=ada_in_embed)
+            return self.forward_with_postactivation(
+                x,
+                index,
+                output_shape,
+                ada_in_embed=ada_in_embed,
+                particle_ids=particle_ids,
+            )
 
     def _norm_forward(self, norm_layer, x, ada_in_embed=None):
         if ada_in_embed is not None and isinstance(norm_layer, AdaIN):
             return norm_layer(x, embedding=ada_in_embed)
         return norm_layer(x)
 
-    def forward_with_postactivation(self, x, index=0, output_shape=None, ada_in_embed=None):
+    def forward_with_postactivation(
+        self,
+        x,
+        index=0,
+        output_shape=None,
+        ada_in_embed=None,
+        particle_ids=None,
+    ):
         x_skip_fno = self.fno_skips[index](x)
         x_skip_fno = self.convs[index].transform(x_skip_fno, output_shape=output_shape)
 
@@ -294,7 +359,9 @@ class FNOBlocks(nn.Module):
             else:
                 x = torch.tanh(x)
 
-        x_fno = self.convs[index](x, output_shape=output_shape)
+        x_fno = self.convs[index](
+            x, output_shape=output_shape, particle_ids=particle_ids
+        )
         #self.convs(x, index, output_shape=output_shape)
 
         if self.norm is not None:
@@ -305,7 +372,7 @@ class FNOBlocks(nn.Module):
         if (index < (self.n_layers - 1)):
             x = self.non_linearity(x)
 
-        x = self.channel_mlp[index](x) + x_skip_channel_mlp
+        x = self.channel_mlp[index](x, particle_ids=particle_ids) + x_skip_channel_mlp
 
         if self.norm is not None:
             x = self._norm_forward(self.norm[self.n_norms * index + 1], x, ada_in_embed=ada_in_embed)
@@ -315,7 +382,14 @@ class FNOBlocks(nn.Module):
 
         return x
 
-    def forward_with_preactivation(self, x, index=0, output_shape=None, ada_in_embed=None):
+    def forward_with_preactivation(
+        self,
+        x,
+        index=0,
+        output_shape=None,
+        ada_in_embed=None,
+        particle_ids=None,
+    ):
         # Apply non-linear activation (and norm)
         # before this block's convolution/forward pass:
         x = self.non_linearity(x)
@@ -335,7 +409,9 @@ class FNOBlocks(nn.Module):
             else:
                 x = torch.tanh(x)
 
-        x_fno = self.convs[index](x, output_shape=output_shape)
+        x_fno = self.convs[index](
+            x, output_shape=output_shape, particle_ids=particle_ids
+        )
 
         x = x_fno + x_skip_fno
 
@@ -345,7 +421,7 @@ class FNOBlocks(nn.Module):
         if self.norm is not None:
             x = self._norm_forward(self.norm[self.n_norms * index + 1], x, ada_in_embed=ada_in_embed)
 
-        x = self.channel_mlp[index](x) + x_skip_channel_mlp
+        x = self.channel_mlp[index](x, particle_ids=particle_ids) + x_skip_channel_mlp
 
         return x
 

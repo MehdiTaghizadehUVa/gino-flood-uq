@@ -2,6 +2,8 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 
+from .anchored_low_rank import AnchoredLowRankDenseAdapter
+
 
 class ChannelMLP(nn.Module):
     """ChannelMLP applies an arbitrary number of layers of 
@@ -59,7 +61,36 @@ class ChannelMLP(nn.Module):
             else:
                 self.fcs.append(nn.Conv1d(self.hidden_channels, self.hidden_channels, 1))
 
-    def forward(self, x):
+        self.anchored_low_rank = nn.ModuleDict()
+
+    def enable_anchored_low_rank(
+        self,
+        *,
+        layer_indices,
+        num_particles,
+        rank,
+        anchor_relative_norm,
+        seed,
+    ):
+        """Attach particle-indexed adapters without replacing shared weights."""
+        indices = sorted({int(i) for i in layer_indices})
+        if any(i < 0 or i >= self.n_layers for i in indices):
+            raise ValueError(
+                f"ChannelMLP adapter indices must be in [0, {self.n_layers - 1}], got {indices}."
+            )
+        for i in indices:
+            fc = self.fcs[i]
+            self.anchored_low_rank[str(i)] = AnchoredLowRankDenseAdapter(
+                in_features=fc.in_channels,
+                out_features=fc.out_channels,
+                num_particles=num_particles,
+                rank=rank,
+                reference_weight=fc.weight.detach().squeeze(-1),
+                anchor_relative_norm=anchor_relative_norm,
+                seed=int(seed) + 1009 * i,
+            )
+
+    def forward(self, x, particle_ids=None):
         reshaped = False
         size = list(x.shape)
         if x.ndim > 3:  
@@ -70,7 +101,11 @@ class ChannelMLP(nn.Module):
             reshaped = True
 
         for i, fc in enumerate(self.fcs):
-            x = fc(x)
+            layer_input = x
+            x = fc(layer_input)
+            adapter = self.anchored_low_rank[str(i)] if str(i) in self.anchored_low_rank else None
+            if adapter is not None:
+                x = x + adapter(layer_input, particle_ids, channels_last=False)
             if i < self.n_layers - 1:
                 x = self.non_linearity(x)
             if self.dropout is not None:
@@ -104,9 +139,41 @@ class LinearChannelMLP(torch.nn.Module):
         for j in range(self.n_layers):
             self.fcs.append(nn.Linear(layers[j], layers[j + 1]))
 
-    def forward(self, x):
+        self.anchored_low_rank = nn.ModuleDict()
+
+    def enable_anchored_low_rank(
+        self,
+        *,
+        layer_indices,
+        num_particles,
+        rank,
+        anchor_relative_norm,
+        seed,
+    ):
+        indices = sorted({int(i) for i in layer_indices})
+        if any(i < 0 or i >= self.n_layers for i in indices):
+            raise ValueError(
+                f"LinearChannelMLP adapter indices must be in [0, {self.n_layers - 1}], got {indices}."
+            )
+        for i in indices:
+            fc = self.fcs[i]
+            self.anchored_low_rank[str(i)] = AnchoredLowRankDenseAdapter(
+                in_features=fc.in_features,
+                out_features=fc.out_features,
+                num_particles=num_particles,
+                rank=rank,
+                reference_weight=fc.weight.detach(),
+                anchor_relative_norm=anchor_relative_norm,
+                seed=int(seed) + 1009 * i,
+            )
+
+    def forward(self, x, particle_ids=None):
         for i, fc in enumerate(self.fcs):
-            x = fc(x)
+            layer_input = x
+            x = fc(layer_input)
+            adapter = self.anchored_low_rank[str(i)] if str(i) in self.anchored_low_rank else None
+            if adapter is not None:
+                x = x + adapter(layer_input, particle_ids, channels_last=True)
             if i < self.n_layers - 1:
                 x = self.non_linearity(x)
             if self.dropout is not None:

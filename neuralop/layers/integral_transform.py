@@ -113,7 +113,8 @@ class IntegralTransform(nn.Module):
             x=None,
             f_y=None,
             weights=None,
-            weighting_fn=None
+            weighting_fn=None,
+            particle_ids=None,
     ):
         """Compute a kernel integral transform
 
@@ -193,8 +194,26 @@ class IntegralTransform(nn.Module):
             # Add the f(y) features
             agg_features = torch.cat([agg_features, in_features], dim=-1)
 
-        # Pass through MLP
-        rep_features = self.channel_mlp(agg_features)
+        # A particle-adapted linear kernel must be evaluated per batch item.
+        # The legacy unadapted path remains unchanged and shares one kernel field.
+        adapters = getattr(self.channel_mlp, "anchored_low_rank", None)
+        has_particle_adapters = bool(adapters)
+        if has_particle_adapters:
+            if not batched:
+                raise ValueError(
+                    "Particle-adapted integral transforms require batched f_y features."
+                )
+            if self.transform_type not in {"linear", "linear_kernelonly"}:
+                raise NotImplementedError(
+                    "ALR output-GNO adapters currently support linear integral transforms only."
+                )
+            kernel_features = agg_features.unsqueeze(0).expand(batch_size, -1, -1)
+            rep_features = self.channel_mlp(
+                kernel_features,
+                particle_ids=particle_ids,
+            )
+        else:
+            rep_features = self.channel_mlp(agg_features)
 
         # If transform type is not 'nonlinear_kernelonly',
         # multiply by input features (to get (b) or (d))
