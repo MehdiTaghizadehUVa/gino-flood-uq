@@ -438,6 +438,9 @@ class AnchoredLowRankFGNTrainer(FGNTrainer):
     def measure_frozen_base_rmse(self, validation_loader):
         """Measure the exact warm-started backbone with all adapters bypassed."""
 
+        self.model = self.model.to(self.device)
+        if self.data_processor is not None:
+            self.data_processor = self.data_processor.to(self.device)
         model = _unwrap_model(self.model)
         was_training = bool(model.training)
         was_active = bool(getattr(model, "anchored_low_rank_active", True))
