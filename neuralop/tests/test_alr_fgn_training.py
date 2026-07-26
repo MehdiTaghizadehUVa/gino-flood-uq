@@ -420,3 +420,46 @@ def test_alr_base_rmse_measurement_bypasses_adapters_and_restores_them():
 
     torch.testing.assert_close(torch.tensor(baseline), torch.tensor(0.1))
     assert model.anchored_low_rank_active is True
+
+
+def test_alr_validation_chunks_nested_members_without_changing_outputs():
+    model = _RecordingALRModel()
+    bootstrap = DirichletFamilyBootstrap(
+        family_ids=["F001", "F002"], num_particles=2, seed=24
+    )
+    trainer = AnchoredLowRankFGNTrainer(
+        model=model,
+        n_epochs=1,
+        device="cpu",
+        fgn_noise_dim=1,
+        crps_n_samples=2,
+        eval_aleatory_samples=3,
+        eval_member_chunk_size=2,
+        num_particles=2,
+        family_bootstrap=bootstrap,
+        use_progress_bar=False,
+    )
+    trainer._sample_common_latents = lambda **kwargs: torch.tensor(
+        [[[0.1], [0.2]], [[0.3], [0.4]], [[0.5], [0.6]]],
+        dtype=kwargs["dtype"],
+    )
+    sample = {
+        "x": torch.zeros(2, 1, 1),
+        "input_geom": torch.zeros(1, 1, 2),
+        "latent_queries": torch.zeros(1, 1, 1, 2),
+        "output_queries": torch.zeros(1, 1, 2),
+    }
+
+    chunked = trainer._forward_nested_x(sample, aleatory_samples=3)
+
+    assert chunked.shape == (2, 3, 2, 1, 1)
+    assert len(model.x_calls) == 3
+    assert all(call.shape[0] <= 4 for call in model.x_calls)
+    expected_particle_delta = torch.tensor([0.0, 0.2]).view(2, 1, 1, 1, 1)
+    expected_latent = trainer._sample_common_latents(
+        count=3, batch_size=2, dtype=sample["x"].dtype
+    ).view(1, 3, 2, 1, 1)
+    torch.testing.assert_close(
+        chunked,
+        0.1 + expected_particle_delta + expected_latent,
+    )

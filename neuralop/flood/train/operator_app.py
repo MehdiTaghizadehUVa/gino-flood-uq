@@ -1041,6 +1041,9 @@ def main():
                 eval_aleatory_samples=int(
                     _cfg_get(alr_training_cfg, "k_eval", 15)
                 ),
+                eval_member_chunk_size=int(
+                    _cfg_get(alr_training_cfg, "eval_member_chunk_size", 4)
+                ),
                 rmse_noninferiority_margin=float(
                     _cfg_get(
                         alr_training_cfg,

@@ -374,6 +374,7 @@ class AnchoredLowRankFGNTrainer(FGNTrainer):
         anchor_penalty_weight: float = 1.0e-3,
         adapter_warmup_epochs: int = 5,
         eval_aleatory_samples: int | None = None,
+        eval_member_chunk_size: int | None = None,
         rmse_noninferiority_margin: float = 0.001,
         target_normalizer=None,
         water_depth_index: int = 0,
@@ -397,6 +398,15 @@ class AnchoredLowRankFGNTrainer(FGNTrainer):
             2,
             int(eval_aleatory_samples or self.crps_n_samples),
         )
+        total_eval_members = self.num_particles * self.eval_aleatory_samples
+        if eval_member_chunk_size is None:
+            self.eval_member_chunk_size = total_eval_members
+        else:
+            if int(eval_member_chunk_size) <= 0:
+                raise ValueError("eval_member_chunk_size must be positive.")
+            self.eval_member_chunk_size = min(
+                int(eval_member_chunk_size), total_eval_members
+            )
         self.target_normalizer = target_normalizer
         self.water_depth_index = int(water_depth_index)
         self.rmse_noninferiority_margin = float(rmse_noninferiority_margin)
@@ -527,24 +537,43 @@ class AnchoredLowRankFGNTrainer(FGNTrainer):
             latent_bank=latent_bank,
             num_particles=self.num_particles,
         )
-        kwargs = {
-            "x": nested.values,
-            "input_geom": sample["input_geom"],
-            "latent_queries": sample["latent_queries"],
-            "output_queries": sample["output_queries"],
-            "ada_in": nested.latents,
-            "particle_ids": nested.particle_ids,
-        }
-        if self.mixed_precision:
-            with torch.autocast(device_type=self.autocast_device_type):
+        total_members = self.num_particles * int(aleatory_samples)
+        values = nested.values.reshape(
+            total_members, batch_size, *nested.values.shape[1:]
+        )
+        latents = nested.latents.reshape(
+            total_members, batch_size, *nested.latents.shape[1:]
+        )
+        particle_ids = nested.particle_ids.reshape(total_members, batch_size)
+        outputs = []
+        chunk_size = min(self.eval_member_chunk_size, total_members)
+        for start in range(0, total_members, chunk_size):
+            stop = min(start + chunk_size, total_members)
+            flat_count = (stop - start) * batch_size
+            kwargs = {
+                "x": values[start:stop].reshape(flat_count, *values.shape[2:]),
+                "input_geom": sample["input_geom"],
+                "latent_queries": sample["latent_queries"],
+                "output_queries": sample["output_queries"],
+                "ada_in": latents[start:stop].reshape(
+                    flat_count, *latents.shape[2:]
+                ),
+                "particle_ids": particle_ids[start:stop].reshape(flat_count),
+            }
+            if self.mixed_precision:
+                with torch.autocast(device_type=self.autocast_device_type):
+                    out = self.model(**kwargs)
+            else:
                 out = self.model(**kwargs)
-        else:
-            out = self.model(**kwargs)
-        return out.reshape(
+            outputs.append(
+                out.reshape(stop - start, batch_size, *out.shape[1:])
+            )
+        output = torch.cat(outputs, dim=0)
+        return output.reshape(
             self.num_particles,
             int(aleatory_samples),
             batch_size,
-            *out.shape[1:],
+            *output.shape[2:],
         )
 
     def _forward_nested_ar_step(self, sample, *, histories, boundary, latent_bank):
