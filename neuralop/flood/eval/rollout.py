@@ -33,6 +33,7 @@ from neuralop.flood.eval.impact_metrics import (
     normalize_impact_metrics_config,
 )
 from neuralop.flood.eval.alr_fgn import ALRMemberLayout, forward_alr_rollout_step
+from neuralop.flood.train.alr_fgn import clamp_nested_feedback
 from neuralop.flood.eval.mc_dropout import (
     enable_mc_dropout_only,
     mc_dropout_seed_context,
@@ -851,6 +852,20 @@ def _rollout_prediction_per_hydrograph(
                 event_forward_seconds += time.perf_counter() - forward_started
 
             structural_dry_mask = sample.get("structural_dry_mask")
+            if alr_layout is not None:
+                nested_prediction = pred_stack.reshape(
+                    alr_layout.num_particles,
+                    alr_layout.aleatory_samples,
+                    1,
+                    *pred_stack.shape[-2:],
+                )
+                nested_prediction = clamp_nested_feedback(
+                    nested_prediction,
+                    structural_dry_mask=structural_dry_mask,
+                    target_normalizer=target_norm,
+                    water_depth_index=target_variables.index("wd"),
+                )
+                pred_stack = nested_prediction.reshape_as(pred_stack)
             inv_pred_ens = target_norm.inverse_transform(pred_stack.squeeze(1))
             inv_pred_ens = apply_structural_dry_zero_mask(
                 inv_pred_ens,

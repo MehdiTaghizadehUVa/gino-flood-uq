@@ -191,6 +191,7 @@ def test_hydrograph_alr_rollout_writes_reconstructable_nested_member_metadata(tm
     assert model.calls == 2
     artifact = load_forecast_artifact(artifact_dir / "ALR_H0.calibration_artifact.h5")
     assert artifact["pred_members_wd"].shape == (4, 2, n_cells)
+    assert float(artifact["pred_members_wd"].min()) >= 0.0
     assert artifact["member_epistemic_id"] == [0, 0, 1, 1]
     assert artifact["member_aleatory_id"] == [0, 1, 0, 1]
     assert artifact["metadata"]["alr_num_particles"] == 2
