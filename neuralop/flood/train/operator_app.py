@@ -58,6 +58,11 @@ from neuralop.flood.eval.mc_dropout import validate_mc_dropout_config
 from neuralop.flood.train.debug import overfit_sanity_check, verify_training_gradient_flow
 from neuralop.flood.train.deterministic import DeterministicARTrainer
 from neuralop.flood.train.fgn import FGNTrainer
+from neuralop.flood.train.alr_fgn import (
+    AnchoredLowRankFGNTrainer,
+    DirichletFamilyBootstrap,
+    split_alr_family_indices,
+)
 from neuralop.flood.train.gaussian import GaussianNLLTrainer
 from neuralop.flood.train.rollout import rollout_prediction
 from neuralop.flood.utils.runtime_core import (
@@ -104,6 +109,69 @@ def _resolve_training_normalizer_path(config):
         else:
             normalizer_path = Path(config.data.root) / normalizer_path
     return normalizer_path.resolve()
+
+
+def _resolve_alr_config(config):
+    """Expose the research ALR namespaces to the existing GINO config path."""
+
+    model_root = _cfg_get(config, "model", None)
+    model_cfg = _cfg_get(model_root, "anchored_low_rank", None)
+    if model_cfg is None:
+        model_cfg = _cfg_get(config.gino, "anchored_low_rank", None)
+    enabled = bool(_cfg_get(model_cfg, "enabled", False))
+    if not enabled:
+        return False, model_cfg, None
+    training_root = _cfg_get(config, "training", None)
+    training_cfg = _cfg_get(training_root, "anchored_low_rank", None)
+    if training_cfg is None:
+        raise ValueError(
+            "model.anchored_low_rank.enabled=true requires training.anchored_low_rank."
+        )
+    warmup_epochs = int(_cfg_get(training_cfg, "adapter_warmup_epochs", 5))
+    joint_epochs = int(_cfg_get(training_cfg, "joint_finetune_epochs", 25))
+    if warmup_epochs < 0:
+        raise ValueError("adapter_warmup_epochs must be nonnegative.")
+    if joint_epochs <= 0:
+        raise ValueError("joint_finetune_epochs must be positive.")
+    num_particles = int(_cfg_get(model_cfg, "num_particles", 4))
+    k_train = int(_cfg_get(training_cfg, "k_train", 2))
+    k_eval = int(_cfg_get(training_cfg, "k_eval", 15))
+    if num_particles <= 1:
+        raise ValueError("ALR-FGNO requires at least two particles.")
+    if k_train < 2 or k_eval < 2:
+        raise ValueError("ALR-FGNO requires k_train and k_eval to be at least two.")
+    setattr(config.gino, "anchored_low_rank", model_cfg)
+    setattr(config.gino, "fgn_latent_temporal_mode", "persistent")
+    setattr(config.opt, "fgn_ar_state_update", "member_feedback")
+    setattr(config.opt, "crps_n_samples", k_train)
+    setattr(config.opt, "alr_eval_n_samples", num_particles * k_eval)
+    setattr(config.opt, "n_epochs", warmup_epochs + joint_epochs)
+    return True, model_cfg, training_cfg
+
+
+def _load_alr_stage1_backbone(model, checkpoint_path):
+    """Warm-start shared FGNO weights while retaining newly initialized adapters."""
+
+    path = Path(str(checkpoint_path)).expanduser()
+    if path.is_dir():
+        best = path / "best_model_state_dict.pt"
+        last = path / "model_state_dict.pt"
+        path = best if best.exists() else last
+    if not path.is_file():
+        raise FileNotFoundError(f"Stage-1 FGNO checkpoint not found: {path}")
+    state = torch.load(path, map_location="cpu")
+    if not isinstance(state, dict):
+        raise TypeError(f"Expected a model state dictionary at {path}.")
+    incompatible = model.load_state_dict(state.copy(), strict=False)
+    unexpected = list(incompatible.unexpected_keys)
+    missing = list(incompatible.missing_keys)
+    invalid_missing = [key for key in missing if "anchored_low_rank" not in key]
+    if unexpected or invalid_missing:
+        raise RuntimeError(
+            "Stage-1 warm start is incompatible with ALR-FGNO: "
+            f"unexpected={unexpected}, non_adapter_missing={invalid_missing}."
+        )
+    return path, missing
 
 
 def should_run_training_verification(
@@ -192,6 +260,7 @@ def _prepare_structural_dry_artifact_for_training(
 
 def main():
     config, device, is_logger = load_config_and_setup()
+    alr_enabled, alr_model_cfg, alr_training_cfg = _resolve_alr_config(config)
 
     # Logging: file (rotating) + console, config-driven level and path
     log_level = _cfg_get(config, "log_level", "INFO")
@@ -213,7 +282,7 @@ def main():
         log_file=str(log_path),
         logger_name="flood_train",
     )
-    logger.info("Config loaded; device=%s", device)
+    logger.info("Config loaded; device=%s; alr_fgno=%s", device, alr_enabled)
 
     # Reproducibility: set all RNG seeds and deterministic CuDNN (override setup() for full reproducibility)
     seed = _cfg_get(config.distributed, "seed", 123)
@@ -306,6 +375,11 @@ def main():
         **data_boundary_kwargs,
     )
     normalizer_path = _resolve_training_normalizer_path(config)
+    if alr_enabled and normalizer_path is None:
+        raise ValueError(
+            "ALR-FGNO warm starts must reuse the Stage-1 normalizers; "
+            "configure data.normalizer_path."
+        )
     structural_dry_policy, structural_dry_artifact = _prepare_structural_dry_artifact_for_training(
         config,
         dataset=full_dataset,
@@ -315,6 +389,11 @@ def main():
         global_rank=global_rank,
     )
     n_samples_max = _cfg_get(config.data, "n_samples_max", None)
+    if alr_enabled and n_samples_max is not None:
+        raise ValueError(
+            "ALR-FGNO uses family-level limits; remove data.n_samples_max and use "
+            "training.anchored_low_rank.train_family_limit."
+        )
     if n_samples_max is not None:
         total_avail = len(full_dataset)
         n_samples_max = int(n_samples_max)  # CLI may pass str
@@ -323,11 +402,37 @@ def main():
         logger.info("Limited to %s samples (n_samples_max=%s)", n_use, n_samples_max)
 
     total_len = len(full_dataset)
-    train_sz = max(1, int(0.9 * total_len))
-    test_sz = total_len - train_sz
-    train_data_raw, test_data_raw_temp = random_split(
-        full_dataset, [train_sz, test_sz], generator=make_split_generator(split_seed)
-    )
+    alr_family_split = None
+    if alr_enabled:
+        alr_family_split = split_alr_family_indices(
+            full_dataset,
+            validation_family_count=int(
+                _cfg_get(alr_training_cfg, "validation_family_count", 50)
+            ),
+            seed=int(_cfg_get(alr_training_cfg, "family_split_seed", split_seed)),
+            train_family_limit=_cfg_get(
+                alr_training_cfg, "train_family_limit", None
+            ),
+        )
+        train_data_raw = Subset(full_dataset, alr_family_split.train_indices)
+        test_data_raw_temp = Subset(
+            full_dataset, alr_family_split.validation_indices
+        )
+        train_sz = len(train_data_raw)
+        test_sz = len(test_data_raw_temp)
+        logger.info(
+            "ALR family split: fit_families=%s validation_families=%s fit_windows=%s validation_windows=%s",
+            len(alr_family_split.train_family_ids),
+            len(alr_family_split.validation_family_ids),
+            train_sz,
+            test_sz,
+        )
+    else:
+        train_sz = max(1, int(0.9 * total_len))
+        test_sz = total_len - train_sz
+        train_data_raw, test_data_raw_temp = random_split(
+            full_dataset, [train_sz, test_sz], generator=make_split_generator(split_seed)
+        )
 
     logger.info("Dataset: total=%s, train=%s, test (one-step)=%s", total_len, train_sz, test_sz)
 
@@ -351,7 +456,12 @@ def main():
     )
     force_load_cached_normalizers = bool(
         _cfg_get(config.data, "force_load_normalizers", False)
-    )
+    ) or alr_enabled
+    if alr_enabled:
+        logger.info(
+            "ALR-FGNO is reusing the configured Stage-1 normalizer artifact: %s",
+            normalizer_path,
+        )
     # The operator trainer detects "I am resuming" the same way it always has:
     # by the presence of a resume_from_dir in the checkpoint config. We don't
     # require the file to actually be present yet — the lifecycle's conservative
@@ -475,10 +585,94 @@ def main():
     # Model
     model = get_model(config)
 
+    alr_bootstrap = None
+    if alr_enabled:
+        if _cfg_get(config.checkpoint, "resume_from_dir", None) is not None and _cfg_get(
+            alr_training_cfg, "stage1_checkpoint_dir", None
+        ) is not None:
+            raise ValueError(
+                "Use either checkpoint.resume_from_dir for ALR resume or "
+                "training.anchored_low_rank.stage1_checkpoint_dir for warm start, not both."
+            )
+        stage1_checkpoint = _cfg_get(
+            alr_training_cfg, "stage1_checkpoint_dir", None
+        )
+        if stage1_checkpoint is not None:
+            loaded_path, missing = _load_alr_stage1_backbone(model, stage1_checkpoint)
+            logger.info(
+                "Warm-started ALR-FGNO shared backbone from %s (%s adapter keys initialized).",
+                loaded_path,
+                len(missing),
+            )
+        elif _cfg_get(config.checkpoint, "resume_from_dir", None) is None:
+            raise ValueError(
+                "A fresh ALR-FGNO run requires training.anchored_low_rank.stage1_checkpoint_dir."
+            )
+
+        counts = model.anchored_low_rank_parameter_counts()
+        if counts["adapter_trainable_fraction"] >= 0.25:
+            raise RuntimeError(
+                "ALR-FGNO pilot parameter gate failed: adapter fraction "
+                f"{counts['adapter_trainable_fraction']:.4f} is not below 0.25."
+            )
+        bootstrap_mode = str(
+            _cfg_get(alr_training_cfg, "bootstrap", "dirichlet_family")
+        ).strip().lower()
+        if bootstrap_mode != "dirichlet_family":
+            raise ValueError(
+                "ALR-FGNO pilot supports bootstrap='dirichlet_family' only."
+            )
+        alr_bootstrap = DirichletFamilyBootstrap(
+            family_ids=alr_family_split.train_family_ids,
+            num_particles=int(_cfg_get(alr_model_cfg, "num_particles", 4)),
+            seed=int(_cfg_get(alr_training_cfg, "bootstrap_seed", 20260724)),
+        )
+        model.add_module("alr_family_bootstrap", alr_bootstrap)
+        logger.info(
+            "ALR-FGNO parameter gate passed: shared=%s adapter_trainable=%s fraction=%.4f anchors=%s",
+            counts["shared"],
+            counts["adapter_trainable"],
+            counts["adapter_trainable_fraction"],
+            counts["anchor_buffers"],
+        )
+
     # Optimizer/scheduler
-    optimizer = AdamW(model.parameters(),
-                      lr=config.opt.learning_rate,
-                      weight_decay=config.opt.weight_decay)
+    if alr_enabled:
+        adapter_ids = {
+            id(parameter)
+            for adapter in model.anchored_low_rank_adapters()
+            for parameter in adapter.parameters()
+        }
+        adapter_parameters = [
+            parameter for parameter in model.parameters() if id(parameter) in adapter_ids
+        ]
+        shared_parameters = [
+            parameter for parameter in model.parameters() if id(parameter) not in adapter_ids
+        ]
+        optimizer = AdamW(
+            [
+                {
+                    "params": adapter_parameters,
+                    "lr": float(
+                        _cfg_get(alr_training_cfg, "adapter_learning_rate", 1.0e-4)
+                    ),
+                    "group_name": "alr_adapters",
+                },
+                {
+                    "params": shared_parameters,
+                    "lr": float(
+                        _cfg_get(alr_training_cfg, "backbone_learning_rate", 1.0e-5)
+                    ),
+                    "group_name": "shared_backbone",
+                },
+            ],
+            weight_decay=config.opt.weight_decay,
+        )
+        model.set_anchored_low_rank_training_phase(adapters_only=True)
+    else:
+        optimizer = AdamW(model.parameters(),
+                          lr=config.opt.learning_rate,
+                          weight_decay=config.opt.weight_decay)
 
     if config.opt.scheduler == 'ReduceLROnPlateau':
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
@@ -537,6 +731,10 @@ def main():
         _cfg_get(config.opt, "fgn_ar_state_update", "mean_feedback")
     )
     setattr(config.opt, "fgn_ar_state_update", fgn_ar_state_update)
+    if alr_enabled and (not use_fgn or training_loss_name != "crps"):
+        raise ValueError(
+            "ALR-FGNO requires gino.use_fgn_noise=true and opt.training_loss='crps'."
+        )
 
     mc_dropout_cfg = validate_mc_dropout_config(config, require_training_loss_l2=True)
     if mc_dropout_cfg.enabled:
@@ -650,13 +848,18 @@ def main():
         }
     elif use_fgn and training_loss_name == "crps":
         crps_n_samples = max(2, _safe_int(_cfg_get(config.opt, "crps_n_samples", 2), 2))
+        eval_crps_n_samples = (
+            int(_cfg_get(config.opt, "alr_eval_n_samples", crps_n_samples))
+            if alr_enabled
+            else crps_n_samples
+        )
         crps_channel_weights = _cfg_get(config.opt, "crps_channel_weights", None)
         eval_losses = {
             "l2": test_loss_fn,
             "crps": FloodMaskedCRPSLoss(
                 policy=structural_policy_name,
                 base_loss=CRPSLoss(
-                    n_samples=crps_n_samples,
+                    n_samples=eval_crps_n_samples,
                     channel_weights=crps_channel_weights,
                     reduction="mean",
                 ),
@@ -692,7 +895,7 @@ def main():
             eval_losses["crps_full_domain"] = FloodMaskedCRPSLoss(
                 policy="legacy_full_domain",
                 base_loss=CRPSLoss(
-                    n_samples=crps_n_samples,
+                    n_samples=eval_crps_n_samples,
                     channel_weights=crps_channel_weights,
                     reduction="mean",
                 ),
@@ -748,7 +951,7 @@ def main():
         ar_truncation_steps = max(1, _safe_int(_cfg_get(config.opt, "ar_truncation_steps", 1), 1))
         crps_sample_chunk_size = max(1, _safe_int(_cfg_get(config.opt, "crps_sample_chunk_size", 1), 1))
         use_activation_checkpointing = bool(_cfg_get(config.opt, "use_activation_checkpointing", False))
-        trainer = FGNTrainer(
+        trainer_kwargs = dict(
             model=model,
             n_epochs=config.opt.n_epochs,
             data_processor=data_processor,
@@ -791,6 +994,24 @@ def main():
             fgn_latent_temporal_mode=fgn_latent_temporal_mode,
             fgn_ar_state_update=fgn_ar_state_update,
         )
+        if alr_enabled:
+            trainer = AnchoredLowRankFGNTrainer(
+                num_particles=int(_cfg_get(alr_model_cfg, "num_particles", 4)),
+                family_bootstrap=alr_bootstrap,
+                anchor_penalty_weight=float(
+                    _cfg_get(alr_model_cfg, "anchor_penalty_weight", 1.0e-3)
+                ),
+                adapter_warmup_epochs=int(
+                    _cfg_get(alr_training_cfg, "adapter_warmup_epochs", 5)
+                ),
+                eval_aleatory_samples=int(
+                    _cfg_get(alr_training_cfg, "k_eval", 15)
+                ),
+                target_normalizer=normalizers.get("target"),
+                **trainer_kwargs,
+            )
+        else:
+            trainer = FGNTrainer(**trainer_kwargs)
     elif output_distribution == "gaussian" and training_loss_name == "gaussian_nll":
         trainer = GaussianNLLTrainer(
             model=model,
@@ -893,6 +1114,17 @@ def main():
             fgn_ar_state_update,
             crps_n_samples,
             fgn_noise_dim,
+        )
+    if alr_enabled:
+        logger.info(
+            "ALR-FGNO settings: particles=%s rank=%s k_train=%s k_eval=%s "
+            "adapter_warmup_epochs=%s joint_finetune_epochs=%s",
+            _cfg_get(alr_model_cfg, "num_particles", 4),
+            _cfg_get(alr_model_cfg, "rank", 4),
+            _cfg_get(alr_training_cfg, "k_train", 2),
+            _cfg_get(alr_training_cfg, "k_eval", 15),
+            _cfg_get(alr_training_cfg, "adapter_warmup_epochs", 5),
+            _cfg_get(alr_training_cfg, "joint_finetune_epochs", 25),
         )
 
     checkpoint_resume_dir = _cfg_get(config.checkpoint, "resume_from_dir", None)
@@ -1033,6 +1265,11 @@ def main():
 
     # ----------------- Optional: rollout evaluation on new data -----------------------
     run_rollout = _cfg_get(config.rollout, "run_after_training", False)
+    if alr_enabled and run_rollout:
+        raise ValueError(
+            "The legacy run_after_training rollout does not preserve ALR particle IDs. "
+            "Set rollout.run_after_training=false and use the ALR evaluation entrypoint."
+        )
     if not run_rollout:
         if is_logger:
             logger.info("Skipping rollout (run_after_training: false).")
