@@ -134,8 +134,10 @@ def _resolve_alr_config(config):
     joint_epochs = int(_cfg_get(training_cfg, "joint_finetune_epochs", 25))
     if warmup_epochs < 0:
         raise ValueError("adapter_warmup_epochs must be nonnegative.")
-    if joint_epochs <= 0:
-        raise ValueError("joint_finetune_epochs must be positive.")
+    if joint_epochs < 0:
+        raise ValueError("joint_finetune_epochs must be nonnegative.")
+    if warmup_epochs + joint_epochs <= 0:
+        raise ValueError("ALR-FGNO requires at least one training epoch.")
     num_particles = int(_cfg_get(model_cfg, "num_particles", 4))
     k_train = int(_cfg_get(training_cfg, "k_train", 2))
     k_eval = int(_cfg_get(training_cfg, "k_eval", 15))

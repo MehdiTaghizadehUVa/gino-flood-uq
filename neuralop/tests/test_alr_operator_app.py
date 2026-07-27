@@ -80,7 +80,11 @@ def test_disabled_alr_config_does_not_mutate_stage1_settings():
 
 @pytest.mark.parametrize(
     ("warmup", "joint", "message"),
-    [(-1, 25, "adapter_warmup_epochs"), (5, 0, "joint_finetune_epochs")],
+    [
+        (-1, 25, "adapter_warmup_epochs"),
+        (5, -1, "joint_finetune_epochs"),
+        (0, 0, "at least one training epoch"),
+    ],
 )
 def test_alr_config_rejects_invalid_epoch_schedule(warmup, joint, message):
     config = _config()
@@ -130,3 +134,14 @@ def test_eval_alr_layout_rejects_multiple_shared_backbones():
 
     with pytest.raises(ValueError, match="exactly one"):
         _resolve_eval_alr_layout(config, [model, model])
+
+
+def test_alr_config_supports_adapter_only_schedule():
+    config = _config()
+    config.training.anchored_low_rank.adapter_warmup_epochs = 15
+    config.training.anchored_low_rank.joint_finetune_epochs = 0
+
+    enabled, _, _ = _resolve_alr_config(config)
+
+    assert enabled is True
+    assert config.opt.n_epochs == 15
