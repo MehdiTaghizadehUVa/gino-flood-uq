@@ -137,6 +137,21 @@ def _resolve_eval_alr_layout(config, models) -> ALRMemberLayout | None:
     return ALRMemberLayout(particles, int(rollout_k))
 
 
+def _configure_eval_alr_particle_contrast(config, models) -> float:
+    """Apply an evaluation-only scale to centered effective ALR updates."""
+    scale = float(_opt(config, "rollout", "alr_particle_contrast_scale", 1.0))
+    alr_models = [
+        model for model in models if bool(getattr(model, "anchored_low_rank_enabled", False))
+    ]
+    if not alr_models:
+        if scale != 1.0:
+            raise ValueError("ALR particle contrast requires an ALR-enabled checkpoint.")
+        return scale
+    for model in alr_models:
+        model.set_anchored_low_rank_particle_contrast_scale(scale)
+    return scale
+
+
 def main() -> int:
     """Run post-training one-step and/or rollout evaluation."""
     args = _parse_args()
@@ -260,6 +275,13 @@ def main() -> int:
     with _PhaseTimer(logger, "Loading model checkpoint(s)"):
         models = _load_models_from_runs(config, device, checkpoint_runs, logger)
     alr_layout = _resolve_eval_alr_layout(config, models)
+    alr_particle_contrast = _configure_eval_alr_particle_contrast(config, models)
+    if alr_layout is not None:
+        logger.info(
+            "ALR effective particle contrast scale=%g%s",
+            alr_particle_contrast,
+            " (sensitivity diagnostic)" if alr_particle_contrast != 1.0 else "",
+        )
     inverse_test = _opt(config, None, "inverse_test", True)
     if normalizers.get("target") is not None:
         normalizers["target"] = normalizers["target"].to(device)

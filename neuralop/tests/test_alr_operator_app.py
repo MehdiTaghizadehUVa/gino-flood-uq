@@ -5,7 +5,10 @@ import pytest
 import torch
 
 from neuralop.flood.train.operator_app import _resolve_alr_config
-from neuralop.flood.eval.operator_app import _resolve_eval_alr_layout
+from neuralop.flood.eval.operator_app import (
+    _configure_eval_alr_particle_contrast,
+    _resolve_eval_alr_layout,
+)
 
 
 def _config(*, enabled=True, training=True):
@@ -30,6 +33,7 @@ def _config(*, enabled=True, training=True):
         gino=SimpleNamespace(),
         opt=SimpleNamespace(),
         inverse_test=True,
+        rollout=SimpleNamespace(alr_particle_contrast_scale=1.0),
     )
 
 
@@ -134,6 +138,24 @@ def test_eval_alr_layout_rejects_multiple_shared_backbones():
 
     with pytest.raises(ValueError, match="exactly one"):
         _resolve_eval_alr_layout(config, [model, model])
+
+
+def test_eval_configures_effective_particle_contrast_on_alr_model():
+    config = _config()
+    config.rollout.alr_particle_contrast_scale = 5.0
+
+    class Model:
+        anchored_low_rank_enabled = True
+
+        def set_anchored_low_rank_particle_contrast_scale(self, scale):
+            self.scale = scale
+
+    model = Model()
+
+    scale = _configure_eval_alr_particle_contrast(config, [model])
+
+    assert scale == 5.0
+    assert model.scale == 5.0
 
 
 def test_alr_config_supports_adapter_only_schedule():

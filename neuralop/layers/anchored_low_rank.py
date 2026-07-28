@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from collections.abc import Sequence
 
 import torch
@@ -92,6 +93,13 @@ class AnchoredLowRankDenseAdapter(nn.Module):
         self.offset_a = nn.Parameter(torch.zeros_like(anchor_a))
         self.offset_b = nn.Parameter(torch.zeros_like(anchor_b))
         self.active = True
+        self.particle_contrast_scale = 1.0
+
+    def set_particle_contrast_scale(self, scale: float) -> None:
+        scale = float(scale)
+        if not math.isfinite(scale) or scale < 0.0:
+            raise ValueError("particle contrast scale must be finite and nonnegative.")
+        self.particle_contrast_scale = scale
 
     def _normalize_anchors(self, a, b, *, reference_weight, relative_norm):
         delta = torch.einsum("mor,mri->moi", a, b) / float(self.rank)
@@ -131,6 +139,11 @@ class AnchoredLowRankDenseAdapter(nn.Module):
             device=x.device,
         )
         delta = self.explicit_delta_weight(ids).to(dtype=x.dtype)
+        if self.particle_contrast_scale != 1.0:
+            all_ids = torch.arange(self.num_particles, device=x.device)
+            all_delta = self.explicit_delta_weight(all_ids).to(dtype=x.dtype)
+            mean_delta = all_delta.mean(dim=0, keepdim=True)
+            delta = mean_delta + self.particle_contrast_scale * (delta - mean_delta)
         if channels_last:
             if x.shape[-1] != self.in_features:
                 raise ValueError(
@@ -197,6 +210,13 @@ class AnchoredLowRankSpectralAdapter(nn.Module):
         self.offset_a = nn.Parameter(torch.zeros_like(anchor_a))
         self.offset_b = nn.Parameter(torch.zeros_like(anchor_b))
         self.active = True
+        self.particle_contrast_scale = 1.0
+
+    def set_particle_contrast_scale(self, scale: float) -> None:
+        scale = float(scale)
+        if not math.isfinite(scale) or scale < 0.0:
+            raise ValueError("particle contrast scale must be finite and nonnegative.")
+        self.particle_contrast_scale = scale
 
     def explicit_delta_weight(
         self,
@@ -259,6 +279,15 @@ class AnchoredLowRankSpectralAdapter(nn.Module):
             mode_shape=None if mode_slices is not None else x.shape[2:],
             mode_slices=mode_slices,
         ).to(dtype=x.dtype)
+        if self.particle_contrast_scale != 1.0:
+            all_ids = torch.arange(self.num_particles, device=x.device)
+            all_delta = self.explicit_delta_weight(
+                all_ids,
+                mode_shape=None if mode_slices is not None else x.shape[2:],
+                mode_slices=mode_slices,
+            ).to(dtype=x.dtype)
+            mean_delta = all_delta.mean(dim=0, keepdim=True)
+            delta = mean_delta + self.particle_contrast_scale * (delta - mean_delta)
         if tuple(delta.shape[3:]) != tuple(x.shape[2:]):
             raise ValueError(
                 f"Adapter modes {tuple(delta.shape[3:])} do not match input modes {tuple(x.shape[2:])}."

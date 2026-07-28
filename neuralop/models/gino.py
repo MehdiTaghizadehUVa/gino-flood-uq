@@ -547,6 +547,11 @@ class GINO(BaseModel):
         for adapter in self.anchored_low_rank_adapters():
             adapter.active = self.anchored_low_rank_active
 
+    def set_anchored_low_rank_particle_contrast_scale(self, scale):
+        """Scale centered effective particle updates for sensitivity diagnostics."""
+        for adapter in self.anchored_low_rank_adapters():
+            adapter.set_particle_contrast_scale(scale)
+
     def set_anchored_low_rank_training_phase(self, *, adapters_only):
         adapter_parameter_ids = {
             id(parameter)

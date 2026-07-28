@@ -35,6 +35,29 @@ def test_dense_adapter_matches_explicit_particle_weights():
     torch.testing.assert_close(actual, expected)
 
 
+def test_dense_adapter_scales_centered_effective_particle_updates():
+    adapter = AnchoredLowRankDenseAdapter(
+        in_features=3,
+        out_features=2,
+        num_particles=3,
+        rank=2,
+        reference_weight=torch.ones(2, 3),
+        anchor_relative_norm=0.03,
+        seed=9,
+    )
+    x = torch.randn(3, 4, 3)
+    particle_ids = torch.arange(3)
+    raw_delta = adapter.explicit_delta_weight(particle_ids)
+
+    adapter.set_particle_contrast_scale(5.0)
+    actual = adapter(x, particle_ids, channels_last=True)
+
+    mean_delta = raw_delta.mean(dim=0, keepdim=True)
+    expected_delta = mean_delta + 5.0 * (raw_delta - mean_delta)
+    expected = torch.einsum("bni,boi->bno", x, expected_delta)
+    torch.testing.assert_close(actual, expected)
+
+
 def test_dense_adapter_keeps_anchors_frozen_and_isolates_particle_gradients():
     adapter = AnchoredLowRankDenseAdapter(
         in_features=3,
@@ -79,6 +102,31 @@ def test_spectral_adapter_matches_explicit_complex_weight_contraction():
     actual = adapter(x, particle_ids)
     delta = adapter.explicit_delta_weight(particle_ids, mode_shape=x.shape[2:])
     expected = torch.einsum("bi...,bio...->bo...", x, delta)
+    torch.testing.assert_close(actual, expected)
+
+
+def test_spectral_adapter_scales_centered_effective_particle_updates():
+    reference_weight = torch.randn(2, 2, 3, 2, dtype=torch.cfloat)
+    adapter = AnchoredLowRankSpectralAdapter(
+        in_channels=2,
+        out_channels=2,
+        n_modes=(3, 2),
+        num_particles=3,
+        rank=2,
+        reference_weight=reference_weight,
+        anchor_relative_norm=0.02,
+        seed=15,
+    )
+    x = torch.randn(3, 2, 3, 2, dtype=torch.cfloat)
+    particle_ids = torch.arange(3)
+    raw_delta = adapter.explicit_delta_weight(particle_ids, mode_shape=x.shape[2:])
+
+    adapter.set_particle_contrast_scale(4.0)
+    actual = adapter(x, particle_ids)
+
+    mean_delta = raw_delta.mean(dim=0, keepdim=True)
+    expected_delta = mean_delta + 4.0 * (raw_delta - mean_delta)
+    expected = torch.einsum("bi...,bio...->bo...", x, expected_delta)
     torch.testing.assert_close(actual, expected)
 
 
@@ -366,6 +414,26 @@ def test_gino_alr_particles_modify_operator_and_respect_parameter_gate():
     counts = model.anchored_low_rank_parameter_counts()
     assert counts["adapter_trainable"] > 0
     assert counts["adapter_trainable_fraction"] < 0.25
+
+
+def test_gino_sets_particle_contrast_scale_on_every_adapter():
+    model = _tiny_gino(
+        anchored_low_rank={
+            "enabled": True,
+            "num_particles": 2,
+            "rank": 2,
+            "anchor_relative_norm": 0.03,
+            "anchor_seed": 49,
+            "fno_last_n_blocks": 2,
+        }
+    )
+
+    model.set_anchored_low_rank_particle_contrast_scale(7.0)
+
+    assert all(
+        adapter.particle_contrast_scale == 7.0
+        for adapter in model.anchored_low_rank_adapters()
+    )
 
 
 def test_gino_alr_requires_particle_ids():
