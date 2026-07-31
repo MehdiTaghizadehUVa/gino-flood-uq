@@ -40,10 +40,10 @@ export function LocationEvidence({ locations }: { locations: Location[] }) {
         </figure>
         <figure className="case-study-figure location-chart">
           {/* eslint-disable-next-line @next/next/no-img-element */}
-          <img src={caseStudyAsset(selected.panelSrc)} alt={`${selected.label} depth ensemble, exceedance probability, and arrival-time distribution`} width={1700} height={520} loading="lazy" />
-          <EvidenceCaption
-            title="Depth range, exceedance probability, and arrival timing"
-            insight="Depth range, calibrated exceedance probability, and arrival timing reveal what a central map cannot show at one location."
+        <img src={caseStudyAsset(selected.panelSrc)} alt={`${selected.label} possible depths, chance of passing 0.30 meters, and arrival-time range`} width={1700} height={520} loading="lazy" />
+        <EvidenceCaption
+          title="Possible depths, chance of passing 0.30 m, and arrival timing"
+          insight="The depth range, checked probability, and arrival-time distribution show what an average map cannot reveal at one location."
             method="The figure summarizes all 60 production members so the central response and forecast range remain visible together."
           />
         </figure>

@@ -106,12 +106,27 @@ for (const internalPhrase of [
   assert.ok(!visibleToneSource.includes(internalPhrase), `Internal implementation language found: ${internalPhrase}`);
 }
 
-assert.ok(pageSource.includes("Request a pilot"), "Request a pilot must be the primary conversion action.");
+assert.ok(
+  pageSource.includes("Discuss a collaboration"),
+  "Discuss a collaboration must be the primary contact action.",
+);
 assert.ok(pageSource.includes("Explore the Portsmouth demo"), "The demo must be identified as the Portsmouth deployment.");
 assert.ok(contentSource.includes("expert-reviewed"), "Monitoring copy must preserve human review.");
 assert.ok(
-  allMarketingSource.includes("Tested consistently across three held-out historical storms."),
-  "Historical validation must lead with buyer-facing evidence."
+  allMarketingSource.includes("Tested on three historical storms not used for training."),
+  "Historical validation must explain held-out evidence in plain language."
+);
+assert.ok(contentSource.includes("often called an ensemble"), "Ensemble must be introduced in plain language.");
+assert.ok(contentSource.includes("Model uncertainty (epistemic)"), "Epistemic uncertainty must retain a plain-language label.");
+assert.ok(contentSource.includes("Outcome variability (aleatoric)"), "Aleatoric uncertainty must retain a plain-language label.");
+assert.match(
+  pageSource,
+  /Calibration\s+means checking and adjusting/,
+  "Calibration must be explained at first use."
+);
+assert.ok(
+  pageSource.includes("water-level and rainfall inputs"),
+  "Forcing must be introduced through its physical inputs."
 );
 
 const manifest = JSON.parse(caseStudyManifestSource);

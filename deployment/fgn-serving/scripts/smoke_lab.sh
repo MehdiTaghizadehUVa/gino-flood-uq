@@ -106,11 +106,15 @@ http_expect "https://${FGN_SITE_HOSTNAME}/" "200" \
   "Know where flooding may go." "" 8 5 15
 log "checking public marketing media."
 http_expect "https://${FGN_SITE_HOSTNAME}/marketing/hero-poster.jpg" "200" "" "" 8 5 15
-log "checking protected demo and administration routes."
-http_expect "https://${FGN_SITE_HOSTNAME}/demo" "302" "" "/oauth2/sign_in" 8 5 15
+log "checking public guest console and protected private routes."
+http_expect "https://${FGN_SITE_HOSTNAME}/demo" "200" \
+  "Sign in to launch analysis" "" 8 5 15
+http_expect "https://${FGN_SITE_HOSTNAME}/api/forcing-template" "200" "" "" 8 5 15
+http_expect "https://${FGN_SITE_HOSTNAME}/demo/runs/not-a-public-run" "302" "" "/oauth2/sign_in" 8 5 15
 http_expect "https://${FGN_SITE_HOSTNAME}/admin" "302" "" "/oauth2/sign_in" 8 5 15
 log "checking protected API boundary."
 http_expect "https://${FGN_SITE_HOSTNAME}/api/health" "302,401" "" "" 8 5 15
+http_expect "https://${FGN_SITE_HOSTNAME}/api/runs" "302,401" "" "" 8 5 15
 
 log "checking Compose service state."
 compose ps --status running api worker-gpu frontend redis postgres proxy >/dev/null

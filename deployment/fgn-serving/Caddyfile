@@ -10,6 +10,22 @@
 			}
 		}
 
+		@public_read_api {
+			method GET
+			path /api/model-bundle /api/forcing-template
+		}
+		handle @public_read_api {
+			reverse_proxy api:8000
+		}
+
+		@public_validation_api {
+			method POST
+			path /api/forcing/validate
+		}
+		handle @public_validation_api {
+			reverse_proxy api:8000
+		}
+
 		handle /api/* {
 			forward_auth oauth2-proxy:4180 {
 				uri /oauth2/auth
@@ -21,6 +37,11 @@
 				}
 			}
 			reverse_proxy api:8000
+		}
+
+		@public_demo path /demo /demo/
+		handle @public_demo {
+			reverse_proxy frontend:3000
 		}
 
 		@public path / /_next/* /marketing/* /favicon.ico /robots.txt /sitemap.xml

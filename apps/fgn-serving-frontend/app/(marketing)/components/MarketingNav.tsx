@@ -1,6 +1,6 @@
 import Image from "next/image";
 import { ArrowUpRight } from "lucide-react";
-import { marketingNav, PILOT_MAILTO } from "../content";
+import { COLLABORATION_MAILTO, marketingNav } from "../content";
 
 export function MarketingNav() {
   return (
@@ -24,8 +24,8 @@ export function MarketingNav() {
         <a className="text-link" href="/demo">
           Portsmouth demo
         </a>
-        <a className="primary-cta compact" href={PILOT_MAILTO}>
-          Request a pilot <ArrowUpRight size={15} aria-hidden="true" />
+        <a className="primary-cta compact" href={COLLABORATION_MAILTO}>
+          Discuss a collaboration <ArrowUpRight size={15} aria-hidden="true" />
         </a>
       </div>
       <details className="marketing-mobile-menu">
@@ -35,7 +35,7 @@ export function MarketingNav() {
             <a key={item.href} href={item.href}>{item.label}</a>
           ))}
           <a href="/demo">Portsmouth demo</a>
-          <a href={PILOT_MAILTO}>Request a pilot</a>
+          <a href={COLLABORATION_MAILTO}>Discuss a collaboration</a>
         </nav>
       </details>
     </header>

@@ -1,6 +1,6 @@
 type NumberedItem = { number: string; title: string; body: string };
 
-export function NumberedGrid({ items, columns = 3 }: { items: readonly NumberedItem[]; columns?: 2 | 3 }) {
+export function NumberedGrid({ items, columns = 3 }: { items: readonly NumberedItem[]; columns?: 2 | 3 | 4 }) {
   return (
     <div className={`numbered-grid columns-${columns}`}>
       {items.map((item) => (

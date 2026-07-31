@@ -24,7 +24,8 @@ import {
   deploymentSteps,
   evidenceRegistry,
   monitoringLoop,
-  PILOT_MAILTO,
+  plainLanguageGuide,
+  COLLABORATION_MAILTO,
   portsmouthCaseStudy,
   serviceOutcomes,
   servicePillars,
@@ -36,10 +37,10 @@ import {
 const structuredData = {
   "@context": "https://schema.org",
   "@type": "Service",
-  name: "FloodUQ managed probabilistic coastal flood modeling",
-  serviceType: "Domain-specific coastal flood uncertainty modeling",
+  name: "FloodUQ coastal flood probability and uncertainty modeling",
+  serviceType: "Domain-specific coastal flood scenario modeling",
   description:
-    "A managed coastal flood intelligence service for rapid scenario evaluation with calibrated probabilities, explainable uncertainty, and monitored model behavior.",
+    "A managed service for comparing coastal flood scenarios, estimating flood probability and timing, and showing how closely plausible forecasts agree.",
   url: "https://flooduq.app",
   provider: {
     "@type": "Organization",
@@ -96,7 +97,7 @@ export default function MarketingPage() {
           />
           <div className="hero-scrim" aria-hidden="true" />
           <div className="hero-content">
-            <p className="hero-kicker">Managed probabilistic coastal flood modeling</p>
+            <p className="hero-kicker">Coastal flood scenarios with probability and confidence</p>
             <h1 id="hero-title" className="hero-logo-heading">
               <span className="visually-hidden">FloodUQ</span>
               <Image
@@ -113,12 +114,12 @@ export default function MarketingPage() {
               Know where flooding may go.<br />Know how certain the model is.
             </p>
             <p className="hero-copy">
-              Compare coastal flood scenarios quickly, evaluate calibrated exceedance probabilities, understand why
-              forecasts diverge, and identify where new high-fidelity evidence will add the most value.
+              Compare water-level and rainfall scenarios quickly, see the chance that water passes a chosen depth,
+              understand why plausible forecasts differ, and identify where detailed simulation may add the most value.
             </p>
             <div className="hero-actions">
-              <a className="primary-cta" href={PILOT_MAILTO}>
-                Request a pilot <ArrowUpRight size={17} aria-hidden="true" />
+              <a className="primary-cta" href={COLLABORATION_MAILTO}>
+                Discuss a collaboration <ArrowUpRight size={17} aria-hidden="true" />
               </a>
               <a className="secondary-cta" href="/demo">
                 <Play size={16} fill="currentColor" aria-hidden="true" /> Explore the Portsmouth demo
@@ -144,22 +145,27 @@ export default function MarketingPage() {
           title={<>A single flood map hides<br /><span>the decision risk.</span></>}
           intro={(
             <p>
-              A central estimate shows one expected outcome. Better scenario decisions also require probability,
-              timing, uncertainty, and a clear signal when the model is outside familiar evidence.
+              An expected-depth map shows the average outcome. A fuller picture also shows when flooding may arrive,
+              how often a chosen depth is passed, how widely plausible forecasts differ, and whether the inputs resemble
+              the evidence used to build the model.
             </p>
           )}
           className="problem-section"
         >
           <DecisionRiskStory questions={decisionQuestions} />
+          <div className="plain-language-guide">
+            <MicroLabel>How we use these terms</MicroLabel>
+            <NumberedGrid items={plainLanguageGuide} columns={4} />
+          </div>
         </Section>
 
         <Section
           eyebrow="Service outcomes"
-          title={<>See the probability, timing, and uncertainty<br /><span>behind every scenario.</span></>}
+          title={<>See where, when, and how confidently<br /><span>flooding may develop.</span></>}
           intro={(
             <p>
-              Compare forcing scenarios, inspect individual locations, and trace every conclusion back to the evidence
-              that produced it.
+              Compare water-level and rainfall inputs, inspect individual locations, and trace every result back to the
+              model and reference evidence that produced it.
             </p>
           )}
           className="products-section"
@@ -184,8 +190,8 @@ export default function MarketingPage() {
           <div className="service-audit-band">
             <MicroLabel>Evidence that stays connected</MicroLabel>
             <p>
-              Review local forecast traces, compare raw and calibrated probabilities, and trace each result to its
-              forcing, model version, calibration, and monitoring record.
+              Review local forecast traces, compare the model's original percentages with checked percentages, and
+              trace each result to its scenario inputs, model version, probability adjustment, and review record.
             </p>
           </div>
         </Section>
@@ -195,8 +201,8 @@ export default function MarketingPage() {
           title={<>Explore more alternatives<br /><span>within the same study cycle.</span></>}
           intro={(
             <p>
-              Direct neural-operator inference reduces the cost of generating probabilistic scenarios, making it
-              practical to test changing assumptions instead of stopping at one deterministic map.
+              FloodUQ generates a group of plausible maps directly, reducing the cost of testing changing assumptions
+              instead of stopping at one flood map.
             </p>
           )}
           className="speed-section"
@@ -209,12 +215,13 @@ export default function MarketingPage() {
 
         <Section
           id="calibration"
-          eyebrow="Calibrated confidence"
-          title={<>Turn ensemble counts into<br /><span>probabilities you can evaluate.</span></>}
+          eyebrow="Probability checks"
+          title={<>Make forecast percentages<br /><span>easier to interpret.</span></>}
           intro={(
             <p>
-              Threshold-specific calibration aligns raw exceedance frequencies with held-out reference simulations,
-              while preserving the original ensemble signal for comparison.
+              A forecast group, often called an ensemble, votes on how often water passes a selected depth. Calibration
+              means checking and adjusting that original percentage using detailed simulations that were not used to
+              train the model.
             </p>
           )}
           className="calibration-section"
@@ -224,12 +231,13 @@ export default function MarketingPage() {
 
         <Section
           id="uncertainty"
-          eyebrow="Explainable uncertainty"
-          title={<>See the spread.<br /><span>Know what is driving it.</span></>}
+          eyebrow="Why forecasts differ"
+          title={<>See the range.<br /><span>Know what is driving it.</span></>}
           intro={(
             <p>
-              FloodUQ preserves its nested ensemble structure so epistemic uncertainty is not confused with
-              aleatoric uncertainty retained among plausible members from the same model.
+              FloodUQ separates model uncertainty (epistemic), which is disagreement between independently trained
+              models, from outcome variability (aleatoric), which is the range of plausible results retained within one
+              model.
             </p>
           )}
           className="method-section"
@@ -243,8 +251,8 @@ export default function MarketingPage() {
           title={<>Fast forecasts are more useful<br /><span>when uncertainty stays visible.</span></>}
           intro={(
             <p>
-              FloodUQ complements high-fidelity physics with rapid calibrated ensembles, interpretable uncertainty
-              sources, and monitoring that identifies when a scenario needs stronger evidence.
+              FloodUQ complements detailed physics simulations with fast groups of plausible forecasts, checked
+              probabilities, clear explanations of forecast disagreement, and checks for unfamiliar scenarios.
             </p>
           )}
           className="comparison-section"
@@ -258,8 +266,8 @@ export default function MarketingPage() {
           title={<>Know when a scenario<br /><span>needs more evidence.</span></>}
           intro={(
             <p>
-              FloodUQ flags unfamiliar or high-disagreement scenarios for expert review, helping teams direct new
-              high-fidelity simulations toward the largest evidence gaps.
+              FloodUQ flags scenarios with unfamiliar inputs or unusually wide forecast differences for expert review,
+              helping teams direct new detailed simulations toward the largest evidence gaps.
             </p>
           )}
           className="monitoring-section"
@@ -270,7 +278,7 @@ export default function MarketingPage() {
         <Section
           id="evidence"
           eyebrow="Portsmouth, Virginia / Deployment proof"
-          title={<>From historical forcing to<br /><span>calibrated flood probabilities.</span></>}
+          title={<>From historical water levels and rainfall to<br /><span>checked flood probabilities.</span></>}
           intro={<p>{portsmouthCaseStudy.intro}</p>}
           className="case-study-section"
         >
@@ -283,8 +291,8 @@ export default function MarketingPage() {
           title={<>A proven path from your coastline<br /><span>to a working FloodUQ service.</span></>}
           intro={(
             <p>
-              Each deployment is built from the coastline's own terrain, forcing scenarios, reference simulations,
-              validation criteria, and decision needs.
+              Each deployment is built from the coastline's own terrain, water-level and rainfall scenarios, detailed
+              reference simulations, evaluation criteria, and decision needs.
             </p>
           )}
           className="deployment-section"
@@ -299,7 +307,7 @@ export default function MarketingPage() {
           intro={(
             <p>
               FloodUQ helps resilience agencies, infrastructure operators, engineering partners, and risk teams move
-              from isolated model runs to comparable probabilistic evidence.
+              from isolated model runs to comparable ranges, probabilities, and timing evidence.
             </p>
           )}
           className="solutions-section"
@@ -311,14 +319,14 @@ export default function MarketingPage() {
           <div className="demo-section-inner">
             <div className="demo-copy">
               <p className="marketing-eyebrow">Portsmouth product demo</p>
-              <h2>See calibrated flood uncertainty<br /><span>in action.</span></h2>
+              <h2>See flood probabilities and forecast agreement<br /><span>in action.</span></h2>
               <p>
-                Use the Portsmouth deployment to submit a forcing scenario, follow the forecast, inspect calibrated
-                maps and local uncertainty, and see how unfamiliar scenarios are identified for review.
+                Use the Portsmouth deployment to submit water-level and rainfall inputs, follow the forecast, inspect
+                expected-depth and probability maps, and see where plausible forecasts agree or differ.
               </p>
               <div className="hero-actions">
-                <a className="primary-cta" href={PILOT_MAILTO}>
-                  Request a pilot <ArrowUpRight size={17} aria-hidden="true" />
+                <a className="primary-cta" href={COLLABORATION_MAILTO}>
+                  Discuss a collaboration <ArrowUpRight size={17} aria-hidden="true" />
                 </a>
                 <a className="secondary-cta" href="/demo">
                   Explore the Portsmouth demo <ArrowRight size={17} aria-hidden="true" />
@@ -332,11 +340,11 @@ export default function MarketingPage() {
             <div className="terminal" aria-label="FloodUQ managed service workflow">
               <div className="terminal-bar"><span /><span /><span /><strong>flooduq | managed coastal intelligence</strong></div>
               <div className="terminal-body">
-                <p><span className="terminal-prompt">01</span> submit a forcing scenario</p>
-                <p className="terminal-output"><Check size={14} /> input quality and model familiarity assessed</p>
-                <p><span className="terminal-prompt">02</span> generate calibrated flood evidence</p>
-                <p className="terminal-output"><Check size={14} /> depth, probability, timing, extent, and uncertainty ready</p>
-                <p><span className="terminal-prompt">03</span> review confidence and evidence gaps</p>
+                <p><span className="terminal-prompt">01</span> submit water-level and rainfall inputs</p>
+                <p className="terminal-output"><Check size={14} /> input quality and similarity to model-building evidence checked</p>
+                <p><span className="terminal-prompt">02</span> generate flood depth and probability results</p>
+                <p className="terminal-output"><Check size={14} /> depth, chance, timing, affected area, and forecast range ready</p>
+                <p><span className="terminal-prompt">03</span> review forecast agreement and evidence gaps</p>
                 <p className="terminal-output"><Check size={14} /> priority scenarios preserved for expert review</p>
                 <p className="terminal-cursor">ready to compare <span>|</span></p>
               </div>
@@ -346,12 +354,12 @@ export default function MarketingPage() {
 
         <section className="final-cta" data-reveal aria-labelledby="final-cta-title">
           <div>
-            <p className="marketing-eyebrow">Start with a domain-specific pilot</p>
+            <p className="marketing-eyebrow">Collaborate on a domain-specific deployment</p>
             <h2 id="final-cta-title">Bring your coastline, reference evidence, and study questions.</h2>
-            <p>Together, we will define the domain, reference simulations, decision thresholds, validation plan, and service configuration.</p>
+            <p>Together, we will define the domain, detailed reference simulations, depth thresholds, evaluation plan, and service configuration.</p>
           </div>
-          <a className="primary-cta" href={PILOT_MAILTO}>
-            Request a pilot <ArrowUpRight size={17} aria-hidden="true" />
+          <a className="primary-cta" href={COLLABORATION_MAILTO}>
+            Discuss a collaboration <ArrowUpRight size={17} aria-hidden="true" />
           </a>
         </section>
 

@@ -464,6 +464,10 @@ html[data-theme="marketing"] svg {
   grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
+.numbered-grid.columns-4 {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
 .numbered-grid.columns-2 {
   grid-template-columns: repeat(2, minmax(0, 1fr));
 }
@@ -484,6 +488,18 @@ html[data-theme="marketing"] svg {
   border-right: 0;
 }
 
+.numbered-grid.columns-4 .numbered-item:nth-child(n + 2) {
+  padding-left: 28px;
+}
+
+.numbered-grid.columns-4 .numbered-item:nth-child(3n) {
+  border-right: 1px solid var(--marketing-border);
+}
+
+.numbered-grid.columns-4 .numbered-item:nth-child(4n) {
+  border-right: 0;
+}
+
 .numbered-item > span {
   color: var(--marketing-accent);
   font-family: var(--font-marketing-mono), monospace;
@@ -496,6 +512,25 @@ html[data-theme="marketing"] svg {
   font-family: var(--font-marketing-display), Inter, sans-serif;
   font-size: 27px;
   font-weight: 650;
+}
+
+.plain-language-guide {
+  margin-top: clamp(54px, 8vw, 96px);
+  padding-top: 26px;
+  border-top: 1px solid var(--marketing-border-strong);
+}
+
+.plain-language-guide > .micro-label {
+  display: block;
+  margin-bottom: 22px;
+}
+
+.plain-language-guide .numbered-item {
+  min-height: 220px;
+}
+
+.plain-language-guide .numbered-item h3 {
+  margin-top: 42px;
 }
 
 .numbered-item p {
@@ -2104,6 +2139,13 @@ html[data-theme="marketing"] svg {
   font-size: clamp(28px, 3vw, 46px);
 }
 
+.uncertainty-equation-intro {
+  margin: 22px 0 0;
+  color: var(--marketing-secondary);
+  font-size: 16px;
+  line-height: 1.55;
+}
+
 .uncertainty-equation .variance-term {
   opacity: 1;
   transition: opacity 420ms ease;
@@ -2647,6 +2689,7 @@ body[data-reveal-ready="true"] [data-reveal]:not([data-reveal-visible="true"]) {
 
   .comparison-grid,
   .product-gallery,
+  .numbered-grid.columns-4,
   .numbered-grid.columns-3,
   .numbered-grid.columns-2,
   .math-band,

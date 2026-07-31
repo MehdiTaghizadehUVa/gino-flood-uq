@@ -151,7 +151,7 @@ def test_model_bundle_returns_public_metadata(env):
 
 
 def test_forcing_template_is_directly_valid(env):
-    env["provider"].current = _alice()
+    env["provider"].current = None
     template = env["client"].get("/api/forcing-template")
     assert template.status_code == 200
     validation = env["client"].post(
@@ -160,6 +160,33 @@ def test_forcing_template_is_directly_valid(env):
     )
     assert validation.status_code == 200
     assert validation.json()["valid"] is True
+
+
+def test_guest_can_validate_forcing_without_authentication(env):
+    env["provider"].current = None
+
+    validation = env["client"].post(
+        "/api/forcing/validate",
+        files={"file": ("forcing.csv", _valid_csv(), "text/csv")},
+    )
+
+    assert validation.status_code == 200
+    assert validation.json()["valid"] is True
+    assert list(env["repository"].list_all()) == []
+
+
+def test_guest_forcing_validation_rejects_oversized_csv_without_persistence(env):
+    env["provider"].current = None
+
+    validation = env["client"].post(
+        "/api/forcing/validate",
+        files={"file": ("forcing.csv", b"x" * (2 * 1024 * 1024 + 1), "text/csv")},
+    )
+
+    assert validation.status_code == 200
+    assert validation.json()["valid"] is False
+    assert "2 MiB validation limit" in validation.json()["messages"][0]
+    assert list(env["repository"].list_all()) == []
 
 
 def test_user_can_persist_disclaimer_acknowledgement(env):

@@ -35,6 +35,33 @@ def test_local_build_override_keeps_manual_debug_builds_available() -> None:
     assert "context: ../../apps/fgn-serving-frontend" in override
 
 
+def test_proxy_exposes_guest_demo_but_keeps_private_run_surfaces_protected() -> None:
+    caddy = _read(DEPLOY_DIR / "Caddyfile")
+
+    public_read_api = caddy.index("@public_read_api")
+    public_validation_api = caddy.index("@public_validation_api")
+    public_demo = caddy.index("@public_demo")
+    protected_api = caddy.index("handle /api/*")
+    protected_fallback = caddy.rindex("handle {")
+
+    assert "path /demo /demo/" in caddy
+    assert "path /api/model-bundle /api/forcing-template" in caddy
+    assert "path /api/forcing/validate" in caddy
+    assert public_read_api < protected_api
+    assert public_validation_api < protected_api
+    assert public_demo < protected_fallback
+    assert "path /demo/*" not in caddy
+
+
+def test_lab_smoke_checks_guest_and_private_access_boundaries() -> None:
+    smoke = _read(DEPLOY_DIR / "scripts" / "smoke_lab.sh")
+
+    assert 'http_expect "https://${FGN_SITE_HOSTNAME}/demo" "200"' in smoke
+    assert 'http_expect "https://${FGN_SITE_HOSTNAME}/demo/runs/not-a-public-run" "302"' in smoke
+    assert 'http_expect "https://${FGN_SITE_HOSTNAME}/api/forcing-template" "200"' in smoke
+    assert 'http_expect "https://${FGN_SITE_HOSTNAME}/api/runs" "302,401"' in smoke
+
+
 def test_lab_deploy_workflow_targets_self_hosted_gpu_runner() -> None:
     workflow = _read(WORKFLOW_DIR / "fgn-serving-deploy-lab.yml")
 

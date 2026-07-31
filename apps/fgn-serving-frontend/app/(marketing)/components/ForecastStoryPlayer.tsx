@@ -13,6 +13,13 @@ const SPEEDS = [
   { label: "1.5×", rate: 1.5 }
 ] as const;
 
+function displayLabel(product: CaseStudyProduct) {
+  if (product.id === "meanDepth") return "Expected water depth";
+  if (product.id === "probability") return "Chance depth passes 0.30 m";
+  if (product.id === "intervalWidth") return "Width of the 90% forecast range";
+  return product.label;
+}
+
 export function ForecastStoryPlayer({
   eventLabel,
   products,
@@ -50,11 +57,11 @@ export function ForecastStoryPlayer({
       indexForTime(peakMeanDepthTimeIndex)
     );
     return [
-      { label: "Initial mean-depth field", body: "The forecast opens from its forcing-conditioned water-depth history.", frameIndex: initial },
-      { label: "Coastal depth response", body: "Mean water depth begins increasing along the connected coastal response pathways.", frameIndex: earlyResponse },
-      { label: "Depth field expands inland", body: "The ensemble-mean depth pattern develops across a broader part of the modeled domain.", frameIndex: inlandExpansion },
-      { label: "Peak mean depth", body: "The area-weighted mean water depth reaches its event maximum across the modeled floodplain.", frameIndex: peakDepth },
-      { label: "Depth recession", body: "Mean water depth recedes across the retained forecast horizon.", frameIndex: recession }
+      { label: "Starting water-depth estimate", body: "The forecast begins from a water-depth history selected using similar water-level and rainfall inputs.", frameIndex: initial },
+      { label: "Coastal depth begins to rise", body: "Expected water depth increases first along connected coastal pathways.", frameIndex: earlyResponse },
+      { label: "Expected depth spreads inland", body: "The average depth across plausible forecasts develops across a broader part of the modeled area.", frameIndex: inlandExpansion },
+      { label: "Highest expected depth", body: "The area-weighted average water depth reaches its highest point for this event.", frameIndex: peakDepth },
+      { label: "Water begins to recede", body: "Expected water depth falls across the remaining forecast period.", frameIndex: recession }
     ];
   }, [peakMeanDepthTimeIndex, products]);
   const activeStep = milestoneIndexFromFrame(
@@ -118,7 +125,7 @@ export function ForecastStoryPlayer({
               aria-pressed={item.id === product.id}
               onClick={() => setProductId(item.id)}
             >
-              {item.label}
+              {displayLabel(item)}
             </button>
           ))}
         </div>
@@ -136,7 +143,7 @@ export function ForecastStoryPlayer({
             playsInline
             preload="auto"
             poster={caseStudyAsset(product.animation.posterSrc || posterSrc)}
-            aria-label={`${eventLabel} ${product.label} forecast animation`}
+            aria-label={`${eventLabel} ${displayLabel(product)} forecast animation`}
             width={1400}
             height={1080}
             onLoadedMetadata={(event) => {
@@ -202,8 +209,8 @@ export function ForecastStoryPlayer({
           </div>
           <EvidenceCaption
             title="Follow the forecast from onset through recession"
-            insight="Track where the selected product emerges, concentrates, and recedes across the full Irene 2011 horizon."
-            method="Each source state is a 15-minute model lead. Adjacent rendered states are blended for smooth playback, while the timeline and controls remain anchored to the original forecast leads."
+            insight="Track where the selected flood measure appears, grows, and recedes across Irene 2011."
+            method="The model produces a new state every 15 minutes. The video blends adjacent displayed states for smooth playback, while the timeline remains tied to the original forecast times."
           />
         </figure>
       </div>

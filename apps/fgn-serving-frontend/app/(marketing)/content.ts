@@ -1,7 +1,7 @@
 import evidence from "./evidence.json";
 
-export const PILOT_MAILTO =
-  "mailto:jrj6wm@virginia.edu?subject=FloodUQ%20managed%20deployment%20pilot";
+export const COLLABORATION_MAILTO =
+  "mailto:jrj6wm@virginia.edu?subject=FloodUQ%20research%20and%20deployment%20collaboration";
 
 export type NumberedContentItem = {
   number: string;
@@ -60,47 +60,70 @@ export const marketingNav = [
 
 export const servicePillars = [
   {
-    title: "Faster scenario exploration",
-    body: "Compare coastal-stage and precipitation scenarios without running a new high-fidelity ensemble for every alternative."
+    title: "Test more scenarios, sooner",
+    body: "Compare changes in coastal water level and rainfall without rebuilding a detailed physics simulation for every alternative."
   },
   {
-    title: "Calibrated probabilities",
-    body: "Evaluate depth-threshold probabilities that are calibrated and tested against held-out reference simulations."
+    title: "Probabilities checked against reference cases",
+    body: "See the chance that water passes a chosen depth, adjusted and evaluated using reference simulations not used for training."
   },
   {
-    title: "Diagnosable uncertainty",
-    body: "See whether uncertainty is driven by model disagreement or variability among plausible outcomes."
+    title: "See why forecasts differ",
+    body: "Separate disagreement between trained models from variation among plausible outcomes produced by the same model."
   },
   {
-    title: "Evidence-aware monitoring",
-    body: "Flag unfamiliar or high-disagreement scenarios for expert review and targeted high-fidelity simulation."
+    title: "Know when conditions are unfamiliar",
+    body: "Flag unusual or high-disagreement scenarios for expert review and targeted detailed simulation."
+  }
+] as const;
+
+export const plainLanguageGuide: readonly NumberedContentItem[] = [
+  {
+    number: "01",
+    title: "Scenario inputs",
+    body: "The coastal water level and rainfall supplied through time. Modelers often call these inputs forcing."
+  },
+  {
+    number: "02",
+    title: "Forecast group",
+    body: "A collection of plausible model outcomes, often called an ensemble, used to show a range instead of one answer."
+  },
+  {
+    number: "03",
+    title: "Checked probability",
+    body: "A forecast percentage adjusted using separate reference cases so it better reflects how often a depth was actually exceeded."
+  },
+  {
+    number: "04",
+    title: "Uncertainty",
+    body: "How widely plausible forecasts differ. A narrow range means stronger agreement; a wide range means more review may be useful."
   }
 ] as const;
 
 export const decisionQuestions: readonly NumberedContentItem[] = [
   { number: "01", title: "Where?", body: "Identify where water may reach, how deep it may become, and how much of the study area may be affected." },
   { number: "02", title: "When?", body: "Track onset, peak timing, recession, and duration across the forecast horizon." },
-  { number: "03", title: "How likely?", body: "Evaluate calibrated probabilities for the depth thresholds that matter to the study." },
-  { number: "04", title: "Why uncertain?", body: "Distinguish model disagreement from variability among plausible forecast outcomes." },
-  { number: "05", title: "When is more evidence needed?", body: "Identify scenarios that fall outside familiar forcing or forecast behavior before they are treated as routine." }
+  { number: "03", title: "How likely?", body: "See the checked probability that water depth rises above a level chosen for the study." },
+  { number: "04", title: "Why do forecasts differ?", body: "Separate differences between trained models from variation among plausible outcomes from the same model." },
+  { number: "05", title: "When is more evidence needed?", body: "Identify water-level and rainfall scenarios unlike the evidence used to build the model before treating them as routine." }
 ] as const;
 
 export const serviceOutcomes = [
   {
     src: "/marketing/portsmouth/overview/probability.webp",
-    alt: "Calibrated coastal water-depth exceedance probability map from the Portsmouth deployment",
+    alt: "Map showing the checked probability that coastal water depth passes the selected level in Portsmouth",
     width: 1115,
     height: 929,
-    label: "Probability and extent",
-    body: "See where a study threshold may be exceeded and how the expected flood footprint changes through time."
+    label: "Chance and affected area",
+    body: "See where water may pass a chosen depth and how the expected flood footprint changes through time."
   },
   {
     src: "/marketing/portsmouth/overview/interval_width.webp",
-    alt: "Spatial uncertainty-width map from the Portsmouth deployment",
+    alt: "Map showing where plausible Portsmouth flood forecasts differ most",
     width: 1115,
     height: 929,
-    label: "Uncertainty and disagreement",
-    body: "Find locations where forecasts diverge and determine which source of uncertainty deserves attention."
+    label: "Forecast agreement",
+    body: "Find locations where plausible forecasts stay close together or spread apart, then see what causes the difference."
   },
   {
     src: "/marketing/portsmouth/overview/arrival_time.webp",
@@ -115,110 +138,110 @@ export const serviceOutcomes = [
 export const speedPrinciples: readonly NumberedContentItem[] = [
   {
     number: "01",
-    title: "Direct ensemble inference",
-    body: "FGNO generates spatial forecast members directly, avoiding the iterative sampling required by diffusion-based surrogates."
+    title: "Generate plausible forecasts directly",
+    body: "FloodUQ creates each member of a forecast group directly. Diffusion-based AI methods instead refine each member through many repeated steps."
   },
   {
     number: "02",
     title: "More alternatives in one study cycle",
-    body: "Rapid ensemble generation makes it practical to compare forcing alternatives, sensitivity cases, and updated assumptions."
+    body: "Rapid forecast-group generation makes it practical to compare water-level and rainfall alternatives, sensitivity cases, and updated assumptions."
   },
   {
     number: "03",
     title: "Performance backed by evidence",
-    body: "Speed and skill claims are tied to a named deployment, equal ensemble budgets, measured hardware, and held-out events."
+    body: "Speed and accuracy claims are tied to a named deployment, equal numbers of plausible forecasts, measured hardware, and storms not used for training."
   }
 ] as const;
 
 export const calibrationNotes: readonly NumberedContentItem[] = [
   {
     number: "01",
-    title: "Compare before and after calibration",
-    body: "Review raw ensemble frequencies beside calibrated probabilities to see exactly how the evidence changes."
+    title: "Start with the model vote",
+    body: "The share of plausible forecasts above a chosen depth provides the raw percentage before any adjustment."
   },
   {
     number: "02",
-    title: "Calibrated for the threshold in question",
-    body: "Each depth threshold uses its own mapping fitted and evaluated on held-out reference simulations."
+    title: "Check and adjust the percentage",
+    body: "Each chosen depth uses its own correction, learned and evaluated with detailed reference simulations not used to train the forecast model."
   },
   {
     number: "03",
-    title: "Traceable from input to result",
-    body: "Each result retains the forcing, model version, calibration version, ensemble settings, and monitoring record used to create it."
+    title: "Keep the original and adjusted values",
+    body: "Each result retains the scenario inputs, original model vote, adjusted probability, model version, and review record."
   }
 ] as const;
 
 export const uncertaintySources: readonly NumberedContentItem[] = [
   {
     number: "01",
-    title: "Epistemic uncertainty",
-    body: "Variation across independently trained model means represents uncertainty in learned structure and parameters, helping prioritize model review or new reference evidence."
+    title: "Model uncertainty (epistemic)",
+    body: "Independently trained models can give different central forecasts. Larger differences suggest that model choices or additional reference evidence deserve review."
   },
   {
     number: "02",
-    title: "Aleatoric uncertainty",
-    body: "Variation among latent forecast members from the same model represents the retained event variability within that learned forecast representation."
+    title: "Outcome variability (aleatoric)",
+    body: "One trained model can still produce a range of plausible outcomes. This range represents event variability retained within that model's forecast."
   }
 ] as const;
 
 export const comparisonMethods: readonly ComparisonMethod[] = [
-  { id: "physics", label: "High-fidelity physics", qualifier: "Reference authority" },
-  { id: "diffusion", label: "Diffusion surrogate", qualifier: "Iterative probabilistic sampling" },
-  { id: "rawEnsemble", label: "Raw ML ensemble", qualifier: "Fast member aggregation" },
-  { id: "flooduq", label: "FloodUQ", qualifier: "Managed calibrated UQ service" }
+  { id: "physics", label: "Detailed physics model", qualifier: "High-detail reference simulation" },
+  { id: "diffusion", label: "Diffusion AI model", qualifier: "Repeatedly refines each forecast" },
+  { id: "rawEnsemble", label: "Unadjusted AI forecast group", qualifier: "Combines several model outputs" },
+  { id: "flooduq", label: "FloodUQ", qualifier: "Managed probability and uncertainty service" }
 ] as const;
 
 export const comparisonRows: readonly ComparisonRow[] = [
   {
     dimension: "Best role",
-    physics: "High-fidelity simulation and reference-data generation.",
-    diffusion: "Stochastic surrogate generation where iterative sampling cost is acceptable.",
-    rawEnsemble: "Rapid spread estimates from multiple model outputs.",
-    flooduq: "Rapid scenario studies with calibrated, decomposed, and monitored uncertainty."
+    physics: "Detailed simulation and trusted reference-data generation.",
+    diffusion: "AI-based forecast generation when repeated refinement time is acceptable.",
+    rawEnsemble: "Rapid estimates of forecast range from several model outputs.",
+    flooduq: "Rapid scenario studies with checked probabilities, separated uncertainty sources, and unfamiliar-condition monitoring."
   },
   {
-    dimension: "Ensemble generation",
-    physics: "Repeated numerical simulations can make large ensembles costly.",
-    diffusion: "Each member requires an iterative denoising trajectory.",
-    rawEnsemble: "Direct inference, depending on ensemble construction.",
-    flooduq: "Direct FGNO inference across nested model and member structure."
+    dimension: "Creating a range of forecasts",
+    physics: "Repeated detailed simulations can make large forecast groups costly.",
+    diffusion: "Each plausible forecast is refined through many repeated steps.",
+    rawEnsemble: "Usually creates each model output directly.",
+    flooduq: "Creates plausible spatial forecasts directly using several trained models and members per model."
   },
   {
-    dimension: "Probability calibration",
-    physics: "Not inherently a calibrated surrogate probability product.",
-    diffusion: "Requires a separate calibration design and evaluation.",
-    rawEnsemble: "Raw frequency may not match held-out event frequency.",
-    flooduq: "Threshold-specific mappings evaluated on held-out reference simulations."
+    dimension: "Checking forecast percentages",
+    physics: "Provides reference outcomes rather than an automatically checked AI probability.",
+    diffusion: "Needs a separate process to check and adjust forecast percentages.",
+    rawEnsemble: "The raw model vote may not match how often flooding occurs in separate test cases.",
+    flooduq: "Checks and adjusts each selected depth probability using separate reference simulations."
   },
   {
-    dimension: "Uncertainty interpretation",
-    physics: "Depends on the forcing and parameter ensemble design.",
-    diffusion: "Generated spread is available, but source separation is not automatic.",
-    rawEnsemble: "Combined spread can obscure why models disagree.",
-    flooduq: "Epistemic and aleatoric uncertainty components are reported separately."
+    dimension: "Explaining why forecasts differ",
+    physics: "Depends on how input and parameter alternatives are designed.",
+    diffusion: "Shows a range, but does not automatically separate its sources.",
+    rawEnsemble: "A combined range can hide why model outputs differ.",
+    flooduq: "Reports model uncertainty (epistemic) separately from outcome variability (aleatoric)."
   },
   {
-    dimension: "Model familiarity",
+    dimension: "Recognizing unfamiliar conditions",
     physics: "Applicability is governed through the physics setup and assumptions.",
-    diffusion: "Monitoring must be added around the surrogate.",
-    rawEnsemble: "Monitoring is usually external to the prediction workflow.",
-    flooduq: "Pre-run screening, post-run diagnostics, and candidate capture are integrated."
+    diffusion: "Checks for unfamiliar conditions must be added separately.",
+    rawEnsemble: "Checks for unfamiliar conditions are usually separate from prediction.",
+    flooduq: "Checks scenario inputs before a run, reviews forecast behavior afterward, and preserves priority cases for experts."
   }
 ] as const;
 
 export const monitoringLoop: readonly NumberedContentItem[] = [
-  { number: "01", title: "Screen", body: "Assess whether a new forcing scenario resembles the evidence used to build the deployed model." },
-  { number: "02", title: "Detect", body: "Identify unusual inputs, elevated forecast disagreement, and calibration behavior that warrants attention." },
+  { number: "01", title: "Screen", body: "Check whether new water-level and rainfall inputs resemble the evidence used to build the deployed model." },
+  { number: "02", title: "Detect", body: "Identify unusual inputs, forecasts that disagree strongly, and probability adjustments that warrant attention." },
   { number: "03", title: "Review", body: "Route strong signals into an expert-reviewed queue so attention stays focused on the scenarios with the greatest evidence gap." },
-  { number: "04", title: "Simulate", body: "Prioritize selected scenarios for HEC-RAS simulation and direct error analysis." },
-  { number: "05", title: "Stage an update", body: "Turn reviewed evidence into a controlled, versioned candidate for future model or calibration updates." }
+  { number: "04", title: "Simulate", body: "Prioritize selected scenarios for HEC-RAS, a detailed hydraulic simulation used as reference evidence, and directly measure error." },
+  { number: "05", title: "Stage an update", body: "Turn reviewed evidence into a controlled, versioned candidate for future model or probability-correction updates." }
 ] as const;
 
 export const deploymentSteps: readonly NumberedContentItem[] = [
-  { number: "01", title: "Define the decision need", body: "Align the coastal domain, forcing scenarios, depth thresholds, forecast horizon, and decisions the service must support." },
+  { number: "01", title: "Define the decision need", body: "Align the coastline, water-level and rainfall scenarios, selected depths, time horizon, and decisions the service must support." },
   { number: "02", title: "Build the reference evidence", body: "Assemble terrain, historical or designed events, and aligned high-fidelity simulations for training and evaluation." },
-  { number: "03", title: "Train the domain model", body: "Fit the neural-operator ensemble and forcing-conditioned initial-state library to the target coastline." },
-  { number: "04", title: "Calibrate and validate", body: "Measure held-out performance, calibrate threshold probabilities, and document the validated operating range." },
+  { number: "03", title: "Train the coastline model", body: "Train the fast spatial forecast models and their starting-water conditions for the target coastline." },
+  { number: "04", title: "Check probabilities and accuracy", body: "Test performance on events excluded from training, adjust selected-depth probabilities, and document where the model has been evaluated." },
   { number: "05", title: "Launch the service", body: "Deliver a secure console or API for repeatable scenario runs, comparison, reporting, and review." },
   { number: "06", title: "Monitor the evidence gap", body: "Track unfamiliar and high-disagreement scenarios so new high-fidelity simulations are directed where they add the most value." }
 ] as const;
@@ -227,7 +250,7 @@ export const useCases: readonly NumberedContentItem[] = [
   {
     number: "01",
     title: "Coastal resilience studies",
-    body: "Compare adaptation and planning scenarios through calibrated depth, probability, timing, extent, and uncertainty products."
+    body: "Compare adaptation and planning scenarios through expected depth, checked probability, timing, affected area, and forecast-agreement products."
   },
   {
     number: "02",
@@ -237,28 +260,28 @@ export const useCases: readonly NumberedContentItem[] = [
   {
     number: "03",
     title: "Engineering and risk partnerships",
-    body: "Extend established coastal modeling programs with rapid probabilistic scenarios, calibrated uncertainty, and traceable evidence."
+    body: "Extend established coastal modeling programs with rapid probability-based scenarios, visible forecast agreement, and traceable evidence."
   }
 ] as const;
 
 export const portsmouthCaseStudy = {
   label: "Portsmouth, Virginia deployment proof",
-  title: "From historical forcing to calibrated flood probabilities.",
-  intro: "Portsmouth demonstrates how FloodUQ turns coastal forcing into calibrated probability, timing, extent, and uncertainty products. The evidence is local; the deployment process is designed to be repeated with each coastline's own terrain and reference simulations.",
+  title: "From historical water levels and rainfall to checked flood probabilities.",
+  intro: "Portsmouth demonstrates how FloodUQ turns coastal water-level and rainfall inputs into expected depth, checked probability, timing, affected-area, and forecast-agreement products. The evidence is local; the deployment process is designed to be repeated with each coastline's own terrain and reference simulations.",
   deploymentStats: [
-    { value: "3 x 20", label: "model and latent member structure" },
+    { value: "3 x 20", label: "trained models and plausible outcomes per model" },
     { value: "5,904", label: "coastal mesh cells" },
     { value: "94", label: "quarter-hour forecast steps" },
     { value: "14.2 min", label: "full RTX 4090 workflow with artifacts" }
   ],
   runtimeBars: [
-    { label: "FGNO rollout", value: 7.7, display: "7.7 min", tone: "blue" },
+    { label: "FloodUQ forecast generation", value: 7.7, display: "7.7 min", tone: "blue" },
     { label: "Scrubbable map frames", value: 4.4, display: "4.4 min", tone: "cyan" },
     { label: "Maps and animations", value: 1.9, display: "1.9 min", tone: "green" },
-    { label: "Calibration and summaries", value: 0.2, display: "< 0.2 min", tone: "amber" }
+    { label: "Probability checks and summaries", value: 0.2, display: "< 0.2 min", tone: "amber" }
   ],
-  fullWorkflowNote: "Measured July 14, 2026 for one 60-member, 94-step run on the lab RTX 4090, from validated forcing through calibrated summaries, maps, animations, and location inspection. Runtime varies with hardware, queue state, and requested products.",
-  historicalNote: "Held-out historical cases include Ophelia 2023, Isabel 2003, and Irene 2011. Maps show exceedance probability and interval width; trajectories include HEC-RAS reference behavior."
+  fullWorkflowNote: "Measured July 14, 2026 for one run with 60 plausible forecasts and 94 time steps on the lab RTX 4090, from validated water-level and rainfall inputs through checked probabilities, maps, animations, and location inspection. Runtime varies with hardware, queue state, and requested products.",
+  historicalNote: "Historical test cases not used for training include Ophelia 2023, Isabel 2003, and Irene 2011. Maps show the chance of passing a selected depth and the width of the forecast range; time plots include HEC-RAS detailed-simulation reference behavior."
 } as const;
 
 export const calibrationCurve = [

@@ -21,7 +21,8 @@ export function UncertaintyStory({
       data-active-step={activeStep}
     >
       <div className="scroll-story-visual uncertainty-story-visual">
-        <MicroLabel>Total forecast variance</MicroLabel>
+        <MicroLabel>Why plausible forecasts differ</MicroLabel>
+        <p className="uncertainty-equation-intro">Total forecast variation is separated into two parts:</p>
         <div className="math-expression uncertainty-equation" dangerouslySetInnerHTML={{ __html: equationHtml }} />
         <div className="uncertainty-source-key" aria-live="polite">
           {sources.map((source, index) => (

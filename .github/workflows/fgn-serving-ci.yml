@@ -80,6 +80,7 @@ jobs:
           npm ci
           npm run validate:marketing
           npm run test:marketing-scroll
+          npm run test:guest-demo
           npm run build
           npm run start -- --hostname 127.0.0.1 --port 3000 >/tmp/fgn-frontend.log 2>&1 &
           frontend_pid=$!

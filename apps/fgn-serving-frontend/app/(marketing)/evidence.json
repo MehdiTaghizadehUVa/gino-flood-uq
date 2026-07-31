@@ -1,45 +1,45 @@
 {
   "caseStudy": "Portsmouth, Virginia",
   "benchmark": {
-    "label": "Held-out probabilistic skill-cost benchmark",
-    "sample": "50 held-out coastal events",
-    "ensembleBudget": "20 members per method",
+    "label": "Speed and forecast-quality comparison on unseen events",
+    "sample": "50 coastal events not used for training",
+    "ensembleBudget": "20 plausible forecasts per method",
     "hardware": "NVIDIA A100",
-    "timingScope": "Forward-only inference per event",
-    "skillMetrics": "Fair CRPS in meters and Brier error for WD > 0.30 m",
+    "timingScope": "Model forecast generation only, per event",
+    "skillMetrics": "Depth-distribution error (fair CRPS) and probability error (Brier) for water above 0.30 m",
     "figure": "/marketing/skill-cost-pareto-title-free.png"
   },
   "claims": [
     {
       "id": "diffusion-speedup",
       "value": "44.5x",
-      "label": "faster than the tested diffusion surrogate",
-      "scope": "Portsmouth held-out benchmark at a 20-member ensemble budget",
-      "sample": "50 held-out coastal events; timing measured over 10 events",
+      "label": "faster forecast generation than the tested diffusion AI model",
+      "scope": "Portsmouth comparison using 20 plausible forecasts from each method",
+      "sample": "50 coastal events not used for training; timing measured over 10 events",
       "hardware": "NVIDIA A100",
-      "measurement": "29.76 s FGNO versus 1324.71 s diffusion, forward-only inference per event",
+      "measurement": "29.76 s FloodUQ model versus 1324.71 s diffusion model, forecast generation only per event",
       "sourceArtifact": "coastal_uq_model_comparison/skill_cost_pareto_3x20_50events_optimized_20260613_034635/skill_cost_metrics_by_size.csv",
       "measured": true
     },
     {
       "id": "crps-reduction",
       "value": "75.4%",
-      "label": "lower fair CRPS than the tested diffusion surrogate",
-      "scope": "Portsmouth held-out benchmark at a 20-member ensemble budget",
-      "sample": "50 held-out coastal events",
+      "label": "lower depth-distribution error than the tested diffusion AI model",
+      "scope": "Portsmouth comparison using 20 plausible forecasts from each method; fair CRPS, where lower is better",
+      "sample": "50 coastal events not used for training",
       "hardware": "NVIDIA A100",
-      "measurement": "0.01833 m FGNO versus 0.07446 m diffusion fair CRPS",
+      "measurement": "0.01833 m FloodUQ model versus 0.07446 m diffusion model using fair CRPS",
       "sourceArtifact": "coastal_uq_model_comparison/skill_cost_pareto_3x20_50events_optimized_20260613_034635/skill_cost_metrics_by_size.csv",
       "measured": true
     },
     {
       "id": "brier-reduction",
       "value": "91.4%",
-      "label": "lower exceedance Brier error than the tested diffusion surrogate",
-      "scope": "Portsmouth held-out benchmark at a 20-member ensemble budget",
-      "sample": "50 held-out coastal events",
+      "label": "lower probability error than the tested diffusion AI model",
+      "scope": "Portsmouth comparison using 20 plausible forecasts from each method; Brier error for water above 0.30 m, where lower is better",
+      "sample": "50 coastal events not used for training",
       "hardware": "NVIDIA A100",
-      "measurement": "0.00367 FGNO versus 0.04289 diffusion Brier error for WD > 0.30 m",
+      "measurement": "0.00367 FloodUQ model versus 0.04289 diffusion model probability error for water above 0.30 m",
       "sourceArtifact": "coastal_uq_model_comparison/skill_cost_pareto_3x20_50events_optimized_20260613_034635/skill_cost_metrics_by_size.csv",
       "measured": true
     }

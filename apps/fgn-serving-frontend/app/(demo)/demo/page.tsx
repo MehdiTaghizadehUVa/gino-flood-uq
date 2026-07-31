@@ -7,6 +7,13 @@ import { MetricCard } from "../../components/MetricCard";
 import { PageHeader } from "../../components/PageHeader";
 import { ResearchNotice } from "../../components/ResearchNotice";
 import { SAMPLE_SCENARIOS, type SampleScenario } from "../../sampleScenarios";
+import {
+  GUEST_SUBMISSION_DRAFT_KEY,
+  GUEST_SUBMISSION_DRAFT_VERSION,
+  MAX_GUEST_DRAFT_CSV_CHARS,
+  buildSubmissionSignInPath,
+  parseGuestSubmissionDraft,
+} from "./guestSubmission.mjs";
 
 type User = {
   email: string;
@@ -117,6 +124,9 @@ type RunStatus =
   | "DELETED";
 
 type HomeWorkspace = "new" | "runs";
+type AuthState = "checking" | "guest" | "authenticated";
+
+const SUBMISSION_SIGN_IN_PATH = buildSubmissionSignInPath();
 
 const DESCRIPTOR_LABELS: Record<string, string> = {
   stage_max: "Peak coastal stage",
@@ -252,20 +262,20 @@ function mapArtifactLabel(artifactId: string) {
   const withoutExt = artifactId.replace(/\.(png|gif)$/, "");
   const probabilityMatch = withoutExt.match(/p_gt_([0-9]+)p([0-9]+)m/);
   const probabilityLabel = probabilityMatch
-    ? `P(WD > ${Number(`${probabilityMatch[1]}.${probabilityMatch[2]}`).toFixed(2)} m)`
+    ? `Chance Depth Passes ${Number(`${probabilityMatch[1]}.${probabilityMatch[2]}`).toFixed(2)} m`
     : null;
   const label = withoutExt
-    .replace(/^calibrated_/, "Calibrated ")
-    .replace(/^raw_/, "Raw ")
+    .replace(/^calibrated_/, "Checked ")
+    .replace(/^raw_/, "Original ")
     .replace(/_t\d+$/, "")
-    .replace("mean_wd_animation", "Mean WD Animation")
-    .replace(/p_gt_[0-9]+p[0-9]+m/, probabilityLabel ?? "Exceedance Probability")
-    .replace("iqr", "IQR Width")
-    .replace("p95", "P95 WD")
-    .replace("spread", "Spread")
-    .replace("mean", "Mean WD")
+    .replace("mean_wd_animation", "Expected Depth Animation")
+    .replace(/p_gt_[0-9]+p[0-9]+m/, probabilityLabel ?? "Depth-Threshold Probability")
+    .replace("iqr", "Middle 50% Range")
+    .replace("p95", "95th-Percentile Depth")
+    .replace("spread", "Forecast Range")
+    .replace("mean", "Expected Depth")
     .replaceAll("_", " ");
-  return label.replace(/\b\w/g, (char) => char.toUpperCase()).replace("P(Wd", "P(WD");
+  return label.replace(/\b\w/g, (char) => char.toUpperCase());
 }
 
 function preferredMapId(artifacts: Artifact[]) {
@@ -527,7 +537,7 @@ function ExceedanceBars({
   calibrated: boolean;
 }) {
   if (entries.length === 0) {
-    return <p className="chart-empty">No exceedance probabilities reported for this run.</p>;
+    return <p className="chart-empty">No depth-threshold probabilities were reported for this run.</p>;
   }
   const rowH = 26;
   const padL = 56;
@@ -541,7 +551,7 @@ function ExceedanceBars({
   // encodes the consequence; the bar length encodes likelihood.
   const colorFor = (thr: number) => (thr >= 0.5 ? "#8b1e3f" : thr >= 0.3 ? "#c2410c" : thr >= 0.1 ? "#d89000" : "#0b766d");
   return (
-    <svg className="chart" viewBox={`0 0 ${width} ${height}`} role="img" aria-label="Exceedance probabilities by depth threshold">
+    <svg className="chart" viewBox={`0 0 ${width} ${height}`} role="img" aria-label="Probability that water passes each depth threshold">
       {entries.map((entry, i) => {
         const y = padT + i * rowH + 4;
         const w = Math.max(2, entry.probability * innerW);
@@ -559,7 +569,7 @@ function ExceedanceBars({
         );
       })}
       <text x={padL} y={height - 2} fontSize="9" fill="#6a7d84">
-        {calibrated ? "isotonic-calibrated probabilities" : "raw ensemble frequencies"}
+        {calibrated ? "checked probabilities" : "original forecast-group percentages"}
       </text>
     </svg>
   );
@@ -657,14 +667,14 @@ function ForcingPreviewPanel({
       <div className="preview-head">
         <div>
           <p className="eyebrow">Input preview</p>
-          <h3>Forecast-window forcing</h3>
-          <p className="preview-subtitle">Spin-up/history rows are hidden from this preview.</p>
+          <h3>Water-level and rainfall inputs during the forecast</h3>
+          <p className="preview-subtitle">Earlier rows used to establish the starting state are not shown here.</p>
         </div>
         <span className="chart-pill calibrated">
           {plottedPoints.length} steps
         </span>
       </div>
-      <table className="preview-stats" aria-label="Forcing summary">
+      <table className="preview-stats" aria-label="Water-level and rainfall input summary">
         <tbody>
           <tr>
             <th scope="row">Forecast rows</th>
@@ -694,7 +704,7 @@ function ForcingPreviewPanel({
           )}
         </tbody>
       </table>
-      <svg className="forcing-preview-chart" viewBox={`0 0 ${width} ${height}`} role="img" aria-label="Stage and precipitation forcing preview">
+      <svg className="forcing-preview-chart" viewBox={`0 0 ${width} ${height}`} role="img" aria-label="Coastal water-level and rainfall preview">
         <rect x={0} y={0} width={width} height={height} fill="#ffffff" />
         <rect x={padL} y={stageY0} width={innerW} height={panelH} fill="#ffffff" stroke="#cbd5e1" />
         <rect x={padL} y={precipY0} width={innerW} height={panelH} fill="#ffffff" stroke="#cbd5e1" />
@@ -859,7 +869,7 @@ function StageLineChart({ series, markerT }: { series: ForcingSeries | null; mar
       ? series.leadHours.reduce((best, t, i) => (Math.abs(t - markerT) < Math.abs(series.leadHours[best] - markerT) ? i : best), 0)
       : null;
   return (
-    <svg className="player-chart" viewBox={`0 0 ${width} ${height}`} role="img" aria-label="Coastal stage forcing">
+    <svg className="player-chart" viewBox={`0 0 ${width} ${height}`} role="img" aria-label="Coastal water-level input">
       <rect x={0} y={0} width={width} height={height} fill="#ffffff" />
       <text x={padL} y={17} fontSize="13" fontWeight={700} fill="#102027">
         Coastal stage forcing
@@ -932,7 +942,7 @@ function RainfallBars({ series, markerT }: { series: ForcingSeries | null; marke
   const yFor = (y: number) => padT + (1 - y / yMax) * innerH;
   const barW = Math.max(2.2, (innerW / Math.max(series.leadHours.length, 1)) * 0.68);
   return (
-    <svg className="player-chart" viewBox={`0 0 ${width} ${height}`} role="img" aria-label="Rainfall forcing">
+    <svg className="player-chart" viewBox={`0 0 ${width} ${height}`} role="img" aria-label="Rainfall input">
       <rect x={0} y={0} width={width} height={height} fill="#ffffff" />
       <text x={padL} y={17} fontSize="13" fontWeight={700} fill="#102027">
         Precipitation forcing
@@ -1010,21 +1020,21 @@ const SCRUB_PRODUCT_META: Record<
   { label: string; short: string; description: string; unitTone: "depth" | "spread" | "prob" }
 > = {
   mean: {
-    label: "Mean depth",
-    short: "Mean",
-    description: "Ensemble-mean water depth per cell at this lead time.",
+    label: "Expected water depth",
+    short: "Expected depth",
+    description: "Average water depth across the full group of plausible forecasts at this time.",
     unitTone: "depth",
   },
   spread: {
-    label: "Ensemble spread",
-    short: "Spread",
-    description: "Ensemble standard deviation per cell — wider spread = lower confidence.",
+    label: "Forecast range",
+    short: "Forecast range",
+    description: "How far plausible water-depth forecasts spread apart at each location; wider spread means less agreement.",
     unitTone: "spread",
   },
   p_gt_0p30m: {
-    label: "P(WD > 0.30 m)",
-    short: "P>0.30m",
-    description: "Calibrated probability of exceeding 0.30 m at this cell at this lead time.",
+    label: "Chance depth passes 0.30 m",
+    short: "Chance > 0.30 m",
+    description: "Checked probability that water depth passes 0.30 m at each location and time.",
     unitTone: "prob",
   },
 };
@@ -1166,7 +1176,7 @@ function TimePlayer({
           <p className="player-eyebrow">Forecast animation</p>
           <h3 className="player-title">
             {runLabel}{" "}
-            <span className="player-sub">· calibrated {SCRUB_PRODUCT_META[product].label.toLowerCase()}</span>
+            <span className="player-sub">· checked {SCRUB_PRODUCT_META[product].label.toLowerCase()}</span>
           </h3>
           <p className="player-product-hint">{SCRUB_PRODUCT_META[product].description}</p>
         </div>
@@ -1287,6 +1297,7 @@ function buildScenarioCsv(bundle: Bundle | null, scenario: SampleScenario) {
 
 export default function Page() {
   const [workspaceMode, setWorkspaceMode] = useState<HomeWorkspace>("new");
+  const [authState, setAuthState] = useState<AuthState>("checking");
   const [user, setUser] = useState<User | null>(null);
   const [bundle, setBundle] = useState<Bundle | null>(null);
   const [runs, setRuns] = useState<RunRow[]>([]);
@@ -1312,6 +1323,7 @@ export default function Page() {
   const [validation, setValidation] = useState<ValidationState | null>(null);
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState(false);
+  const restoredDraftRef = useRef(false);
 
   useEffect(() => {
     const syncWorkspaceMode = () => setWorkspaceMode(workspaceFromLocation());
@@ -1338,14 +1350,45 @@ export default function Page() {
     });
   }, []);
 
+  useEffect(() => {
+    let cancelled = false;
+    async function bootstrapGuestOrUserSession() {
+      try {
+        const [sessionRes, bundleRes] = await Promise.all([
+          fetch("/oauth2/auth", { cache: "no-store" }),
+          fetch("/api/model-bundle", { cache: "no-store" }),
+        ]);
+        if (cancelled) return;
+        if (bundleRes.ok) setBundle(await bundleRes.json());
+        setAuthState(sessionRes.ok ? "authenticated" : "guest");
+      } catch (exc) {
+        if (cancelled) return;
+        setAuthState("guest");
+        setMessage(`The public console loaded, but session status could not be checked: ${String(exc)}`);
+      }
+    }
+    bootstrapGuestOrUserSession();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   const refresh = useCallback(async () => {
+    if (authState !== "authenticated") return;
     const [meRes, bundleRes, runsRes] = await Promise.all([
-      fetch("/api/me", { cache: "no-store" }),
+      fetch("/api/me", { cache: "no-store", redirect: "manual" }),
       fetch("/api/model-bundle", { cache: "no-store" }),
-      fetch("/api/runs", { cache: "no-store" }),
+      fetch("/api/runs", { cache: "no-store", redirect: "manual" }),
     ]);
-    if (meRes.ok) setUser(await meRes.json());
     if (bundleRes.ok) setBundle(await bundleRes.json());
+    if (!meRes.ok) {
+      setUser(null);
+      setRuns([]);
+      if (meRes.status === 401 || meRes.status === 0) setAuthState("guest");
+      else setMessage(`Signed in, but compute access returned HTTP ${meRes.status}.`);
+      return;
+    }
+    setUser(await meRes.json());
     if (runsRes.ok) {
       const nextRuns: RunRow[] = await runsRes.json();
       setRuns(nextRuns);
@@ -1354,13 +1397,26 @@ export default function Page() {
       // dependency-free and the polling effect doesn't churn.
       setSelectedRunId((prev) => prev ?? nextRuns[0]?.run_id ?? null);
     }
-  }, []);
+  }, [authState]);
 
   useEffect(() => {
     if (!bundle) return;
     setEnsembleCount((current) => current || String(bundle.n_checkpoints));
     setMembersPerEnsemble((current) => current || String(bundle.members_per_checkpoint));
   }, [bundle]);
+
+  useEffect(() => {
+    if (authState !== "guest") return;
+    setUser(null);
+    setRuns([]);
+    setSelectedRunId(null);
+    setSelectedRun(null);
+    setArtifacts([]);
+    setActiveMapId(null);
+    setCalibratedSummary(null);
+    setComparisonSummary(null);
+    setSelectedForDelete(new Set());
+  }, [authState]);
 
   const loadRun = useCallback(async (runId: string) => {
     const [runRes, artifactRes] = await Promise.all([
@@ -1431,6 +1487,7 @@ export default function Page() {
   // Recursive setTimeout (not setInterval) so we can recompute the cadence
   // after each tick without restarting the effect.
   useEffect(() => {
+    if (authState !== "authenticated") return;
     let cancelled = false;
     let handle: ReturnType<typeof setTimeout> | null = null;
 
@@ -1482,7 +1539,7 @@ export default function Page() {
         document.removeEventListener("visibilitychange", onVisibility);
       }
     };
-  }, [refresh, loadRun]);
+  }, [authState, refresh, loadRun]);
 
   // Side effect of changing selection: clear stale per-run state, then prime
   // the new run's data immediately so users don't wait for the next poll tick.
@@ -1537,6 +1594,29 @@ export default function Page() {
     },
     [forecastSteps],
   );
+
+  useEffect(() => {
+    if (authState !== "authenticated" || restoredDraftRef.current) return;
+    restoredDraftRef.current = true;
+    const raw = window.sessionStorage.getItem(GUEST_SUBMISSION_DRAFT_KEY);
+    if (!raw) return;
+    window.sessionStorage.removeItem(GUEST_SUBMISSION_DRAFT_KEY);
+    const draft = parseGuestSubmissionDraft(raw);
+    if (!draft) {
+      setMessage("The saved guest scenario could not be restored. Please select the CSV again.");
+      return;
+    }
+    const restoredFile = new File([draft.csv], draft.fileName, { type: draft.fileType });
+    setFile(restoredFile);
+    setLabel(draft.label);
+    setForecastSteps(draft.forecastSteps);
+    setThresholds(draft.thresholds);
+    setEnsembleCount(draft.ensembleCount);
+    setMembersPerEnsemble(draft.membersPerEnsemble);
+    setRequestAnimation(draft.requestAnimation);
+    setMessage("Signed in. Your scenario is restored; review the settings and launch the analysis.");
+    validateFile(restoredFile, draft.forecastSteps).catch(() => undefined);
+  }, [authState, validateFile]);
 
   // Lifted before any artifact derivations so scrubFrames can use it. The
   // worker emits one calibrated_mean_scrub_t{NNN}.png per forecast step, and
@@ -1598,11 +1678,11 @@ export default function Page() {
   const exceedanceArea = exceedanceAreaEntries(calibratedSummary);
   const primaryExceedanceArea = preferredExceedanceAreaEntry(exceedanceArea);
   const figureArtifacts = [
-    { id: "forcing_hydrograph.svg", title: "Forcing Hydrograph" },
+    { id: "forcing_hydrograph.svg", title: "Water-Level and Rainfall Inputs" },
     { id: "uq_extent_by_time.svg", title: "Expected Flooded-Area Fraction" },
-    { id: "uq_exceedance_bars.svg", title: "Peak Exceedance Footprint" },
-    { id: "uq_uncertainty_width.svg", title: "Uncertainty Width" },
-    { id: "calibration_effect.svg", title: "Calibration Shift" },
+    { id: "uq_exceedance_bars.svg", title: "Peak Depth-Threshold Footprint" },
+    { id: "uq_uncertainty_width.svg", title: "Forecast Range Through Time" },
+    { id: "calibration_effect.svg", title: "Probability Adjustment" },
   ].filter((figure) => artifacts.some((artifact) => artifact.artifact_id === figure.id));
 
   async function acknowledgeDisclaimer() {
@@ -1629,17 +1709,65 @@ export default function Page() {
     await validateFile(nextFile, String(generated.forecastSteps));
   }
 
+  async function signInForSubmission() {
+    if (!file) return;
+    setBusy(true);
+    try {
+      const csv = await file.text();
+      if (csv.length > MAX_GUEST_DRAFT_CSV_CHARS) {
+        setMessage("This CSV is too large to preserve securely across sign-in. Reduce it below 2 MiB and try again.");
+        setBusy(false);
+        return;
+      }
+      window.sessionStorage.setItem(
+        GUEST_SUBMISSION_DRAFT_KEY,
+        JSON.stringify({
+          version: GUEST_SUBMISSION_DRAFT_VERSION,
+          fileName: file.name,
+          fileType: file.type || "text/csv",
+          csv,
+          label,
+          forecastSteps,
+          thresholds,
+          ensembleCount,
+          membersPerEnsemble,
+          requestAnimation,
+        }),
+      );
+      window.location.assign(SUBMISSION_SIGN_IN_PATH);
+    } catch (exc) {
+      setMessage(`Could not preserve the scenario for sign-in: ${String(exc)}`);
+      setBusy(false);
+    }
+  }
+
   async function submitRun() {
     if (!file) {
-      setMessage("Choose or generate a forcing CSV first.");
-      return;
-    }
-    if (!user?.disclaimer_acknowledged) {
-      setMessage("Acknowledge the model-use notice before submitting.");
+      setMessage("Choose or generate a scenario CSV first.");
       return;
     }
     if (validation && !validation.valid) {
       setMessage(`Fix validation errors first: ${validation.messages.join("; ")}`);
+      return;
+    }
+    if (!validation) {
+      setMessage("Wait for CSV validation to finish before continuing.");
+      return;
+    }
+    if (authState === "checking") {
+      setMessage("Checking sign-in status. Please try again in a moment.");
+      return;
+    }
+    if (authState === "guest") {
+      await signInForSubmission();
+      return;
+    }
+    if (!user) {
+      setMessage("Your Google session is active, but compute access is not available for this account.");
+      return;
+    }
+    if (!user.disclaimer_acknowledged) {
+      setMessage("Acknowledge the model-use notice before submitting.");
       return;
     }
     setBusy(true);
@@ -1772,26 +1900,30 @@ export default function Page() {
   }
 
   return (
-    <AppShell active={workspaceMode === "runs" ? "runs" : "home"} userEmail={user?.email}>
+    <AppShell
+      active={workspaceMode === "runs" ? "runs" : "home"}
+      userEmail={user?.email}
+      guestMode={authState === "guest"}
+    >
       <div className="shell">
         <PageHeader
-          kicker="FloodUQ modeling platform"
-          title="Coastal flood uncertainty, calibrated and reproducible."
+          kicker="Coastal flood scenario workspace"
+          title="Explore possible flooding and how closely forecasts agree."
           subtitle={
             bundle ? (
               <>
-                Launch fixed-domain FGN ensemble analyses from coastal stage and precipitation forcings. Review
-                calibrated probability, spread, and depth products with run-level provenance and downloadable artifacts.
+                Run a group of plausible coastal flood forecasts from water-level and rainfall inputs. Review expected
+                depth, the chance of passing chosen depths, forecast agreement, and the record behind each result.
                 <br />
-                Active bundle: {bundle.domain_name} · up to {bundle.total_members} members · {bundle.max_forecast_steps}
+                Active model: {bundle.domain_name} · up to {bundle.total_members} plausible forecasts · {bundle.max_forecast_steps}
                 -step forecast horizon
                 {bundle.initial_condition ? (
                   <>
                     <br />
                     Initial condition policy:{" "}
                     {bundle.initial_condition.default_mode === "forcing_conditioned_baseline"
-                      ? `forcing-conditioned baseline selected from train/calibration references (${bundle.initial_condition.k_neighbors ?? 5} neighbors)`
-                      : "dry diagnostic baseline"}
+                      ? `starting water depth selected from similar model-building cases (${bundle.initial_condition.k_neighbors ?? 5} neighbors)`
+                      : "zero-water diagnostic starting state"}
                   </>
                 ) : null}
               </>
@@ -1800,21 +1932,25 @@ export default function Page() {
             )
           }
           actions={
-            <>
-              <span>{user?.email ?? "Authentication required"}</span>
+            user ? (
+              <>
+              <span>{user.email}</span>
               <a className="signout" href="/oauth2/sign_out">Sign out</a>
-            </>
+              </>
+            ) : (
+              <span>{authState === "checking" ? "Checking sign-in status" : "Guest exploration"}</span>
+            )
           }
         />
 
         <section className="home-hero" aria-labelledby="home-hero-title">
           <div className="home-hero-copy">
-            <p className="eyebrow">Physics-informed coastal UQ</p>
-            <h2 id="home-hero-title">From forcing scenario to audit-ready flood uncertainty products.</h2>
+            <p className="eyebrow">Coastal flood probability workspace</p>
+            <h2 id="home-hero-title">From water-level and rainfall inputs to clear flood-probability maps.</h2>
             <p>
-              FloodUQ packages the trained coastal FGN benchmark into a controlled, auditable workflow:
-              validate a forcing file, launch a calibrated ensemble run, inspect uncertainty products, and
-              preserve the artifacts needed for review or downstream analysis.
+              FloodUQ checks a scenario file, generates a group of plausible forecasts, and presents expected depth,
+              the chance of passing selected depths, timing, and forecast agreement. Each result keeps the technical
+              record needed for review or later analysis.
             </p>
             <div className="hero-actions" aria-label="Primary actions">
               <button className="button primary" type="button" onClick={() => navigateWorkspace("new")}>
@@ -1825,37 +1961,37 @@ export default function Page() {
               </button>
             </div>
             <div className="hero-capabilities" aria-label="Platform capabilities">
-              <span><Waves size={14} aria-hidden="true" /> Coastal FGN benchmark</span>
-              <span><Activity size={14} aria-hidden="true" /> Calibrated UQ products</span>
-              <span><Database size={14} aria-hidden="true" /> Reproducible artifacts</span>
-              <span><ShieldCheck size={14} aria-hidden="true" /> Governed service access</span>
+              <span><Waves size={14} aria-hidden="true" /> Portsmouth coastal model</span>
+              <span><Activity size={14} aria-hidden="true" /> Checked probabilities and forecast ranges</span>
+              <span><Database size={14} aria-hidden="true" /> Traceable result files</span>
+              <span><ShieldCheck size={14} aria-hidden="true" /> Managed compute access</span>
             </div>
           </div>
           <aside className="workflow-card" aria-label="Analysis workflow">
             <div className="workflow-card-head">
               <span>Analysis workflow</span>
-              <strong>{bundle ? `${bundle.total_members}-member ensemble` : "Model bundle loading"}</strong>
+              <strong>{bundle ? `${bundle.total_members} plausible forecasts` : "Model loading"}</strong>
             </div>
             <ol className="workflow-steps">
               <li>
                 <span>01</span>
                 <div>
-                  <strong>Validate forcings</strong>
-                  <p>Check stage and precipitation format, horizon, and monitored reference range before queuing.</p>
+                  <strong>Check scenario inputs</strong>
+                  <p>Check water-level and rainfall format, forecast length, and similarity to model-building evidence.</p>
                 </div>
               </li>
               <li>
                 <span>02</span>
                 <div>
-                  <strong>Run calibrated ensemble inference</strong>
-                  <p>Execute the fixed-domain FGN bundle with controlled member counts and stored provenance.</p>
+                  <strong>Generate a range of forecasts</strong>
+                  <p>Run the Portsmouth model with a controlled number of plausible outcomes and a stored technical record.</p>
                 </div>
               </li>
               <li>
                 <span>03</span>
                 <div>
-                  <strong>Inspect UQ evidence</strong>
-                  <p>Open maps, animations, per-cell traces, monitoring diagnostics, and downloadable artifacts.</p>
+                  <strong>Review probability and agreement</strong>
+                  <p>Open expected-depth maps, chance maps, animations, location traces, scenario checks, and downloads.</p>
                 </div>
               </li>
             </ol>
@@ -1865,7 +2001,9 @@ export default function Page() {
         <ResearchNotice title="Model use and governance.">
           Review outputs within the documented domain, calibration, validation, and data-quality context.
           Preserve expert review and local governance when using results for planning or asset evaluation.
-          {!user?.disclaimer_acknowledged && (
+          {authState === "guest" ? (
+            <span>You can configure and validate a scenario now. Google sign-in is requested only when you launch shared compute.</span>
+          ) : !user?.disclaimer_acknowledged && (
             <button type="button" onClick={acknowledgeDisclaimer} disabled={busy}>
               Acknowledge
             </button>
@@ -1873,15 +2011,26 @@ export default function Page() {
         </ResearchNotice>
 
         <section className="metric-grid home-metrics">
-          <MetricCard label="Analyses" value={runs.length} detail="Runs in your analysis history" icon={<ListChecks size={17} />} />
-          <MetricCard label="Queue" value={queuedCount} detail="Validated work waiting to start" icon={<RefreshCw size={17} />} />
-          <MetricCard label="Active inference" value={runningCount} detail="One GPU job runs at a time" icon={<Cpu size={17} />} />
-          <MetricCard
-            label="Latest analysis"
-            value={latestRun ? latestRun.status : "-"}
-            detail={latestRun ? latestRun.label || latestRun.run_id.slice(0, 12) : "No runs yet"}
-            icon={<Activity size={17} />}
-          />
+          {authState === "guest" ? (
+            <>
+              <MetricCard label="Access" value="Public" detail="Explore without connecting a Google account" icon={<Waves size={17} />} />
+              <MetricCard label="Scenario setup" value="Available" detail="Load a representative event or upload a CSV" icon={<ListChecks size={17} />} />
+              <MetricCard label="Input checks" value="Available" detail="Check format, forecast length, and similarity to model-building evidence" icon={<ShieldCheck size={17} />} />
+              <MetricCard label="Shared compute" value="Sign in" detail="Authentication begins only when you launch" icon={<Cpu size={17} />} />
+            </>
+          ) : (
+            <>
+              <MetricCard label="Analyses" value={runs.length} detail="Runs in your analysis history" icon={<ListChecks size={17} />} />
+              <MetricCard label="Queue" value={queuedCount} detail="Validated work waiting to start" icon={<RefreshCw size={17} />} />
+              <MetricCard label="Active inference" value={runningCount} detail="One GPU job runs at a time" icon={<Cpu size={17} />} />
+              <MetricCard
+                label="Latest analysis"
+                value={latestRun ? latestRun.status : "-"}
+                detail={latestRun ? latestRun.label || latestRun.run_id.slice(0, 12) : "No runs yet"}
+                icon={<Activity size={17} />}
+              />
+            </>
+          )}
         </section>
 
       <section className={`workspace workspace-${workspaceMode}`} id={workspaceMode === "runs" ? "runs" : "new-run"}>
@@ -1912,15 +2061,15 @@ export default function Page() {
                   disabled={busy}
                   aria-label={`Load ${scenario.name} scenario: ${scenario.description}`}
                 >
-                  <span className="scenario-kicker">{scenario.testCaseId} · preloaded historical forcing</span>
+                  <span className="scenario-kicker">{scenario.testCaseId} · preloaded historical inputs</span>
                   <strong>{scenario.name}</strong>
                   <span className="scenario-desc">{scenario.description}</span>
                   <span className="scenario-meta">
                     <span>{scenario.stage.length} rows</span>
                     <span>{scenarioSteps} forecast steps</span>
                     <span>{durationHours.toFixed(1)} h</span>
-                    <span>stage max {stageMax.toFixed(2)} m</span>
-                    <span>rain sum {rainTotal.toFixed(1)} mm</span>
+                    <span>peak water level {stageMax.toFixed(2)} m</span>
+                    <span>total rain {rainTotal.toFixed(1)} mm</span>
                   </span>
                 </button>
               );
@@ -1944,7 +2093,7 @@ export default function Page() {
               />
             </label>
             <label>
-              Checkpoint ensembles
+              Independently trained models
               <input
                 type="number"
                 min={1}
@@ -1956,7 +2105,7 @@ export default function Page() {
               />
             </label>
             <label>
-              Members / ensemble
+              Forecasts per model
               <input
                 type="number"
                 min={1}
@@ -1968,10 +2117,10 @@ export default function Page() {
               />
             </label>
             <p className="member-budget-note wide" id="member-budget-note">
-              Default/full UQ is {bundle?.n_checkpoints ?? 3} x {bundle?.members_per_checkpoint ?? 20} = {bundle?.total_members ?? 60} members. Smaller budgets run faster for exploratory checks.
+              The full setting uses {bundle?.n_checkpoints ?? 3} trained models x {bundle?.members_per_checkpoint ?? 20} plausible forecasts = {bundle?.total_members ?? 60} forecasts. Smaller settings run faster for exploratory checks.
             </p>
             <label className="wide">
-              Exceedance thresholds (m)
+              Water-depth thresholds to evaluate (m)
               <input value={thresholds} onChange={(event) => setThresholds(event.target.value)} />
             </label>
           </div>
@@ -1995,13 +2144,13 @@ export default function Page() {
           )}
 
           <div className="checks">
-            <label><input type="checkbox" checked={requestAnimation} onChange={(event) => setRequestAnimation(event.target.checked)} /> GIF animation</label>
-            <label><input type="checkbox" checked={requestFullHdf5} disabled readOnly /> Store ensemble HDF5 for cell inspection</label>
+            <label><input type="checkbox" checked={requestAnimation} onChange={(event) => setRequestAnimation(event.target.checked)} /> Save animated map (GIF)</label>
+            <label><input type="checkbox" checked={requestFullHdf5} disabled readOnly /> Store all plausible forecasts for location inspection</label>
           </div>
 
           {validation && (
             <div className={validation.valid ? "valid" : "invalid"}>
-              <strong>{validation.valid ? "Forcing file validated" : "Forcing validation failed"}</strong>
+              <strong>{validation.valid ? "Scenario file validated" : "Scenario validation failed"}</strong>
               {validation.messages.length > 0 && <span>{validation.messages.join("; ")}</span>}
               {validation.summary && (
                 <small>
@@ -2011,19 +2160,19 @@ export default function Page() {
               {validation.screening?.available && (
                 <div className="screening-card">
                   <strong>
-                    Reference-range screening:{" "}
+                    Scenario familiarity check:{" "}
                     {validation.screening.candidate_recommended
-                      ? "selected for review"
+                      ? "additional review recommended"
                       : (validation.screening.flags?.length ?? 0) > 0
-                        ? "diagnostics only"
-                        : "within monitored reference range"}
+                        ? "differences noted for context"
+                        : "similar to the model-building evidence"}
                   </strong>
                   <small>
-                    Reference diagnostic score{" "}
+                    Familiarity score{" "}
                     {typeof validation.screening.input_novelty_score === "number"
                       ? validation.screening.input_novelty_score.toFixed(2)
                       : "—"}{" "}
-                    · current coastal reference set
+                    · compared with the current coastal evidence set
                   </small>
                   {(validation.screening.flags ?? []).slice(0, 3).map((flag) => (
                     <small key={`${flag.code}-${flag.descriptor ?? ""}`}>{formatScreeningFlag(flag)}</small>
@@ -2033,8 +2182,23 @@ export default function Page() {
             </div>
           )}
 
-          <button className="button primary wide-button" type="button" onClick={submitRun} disabled={busy || !file}>
-            Launch Analysis
+          <button
+            className="button primary wide-button"
+            type="button"
+            onClick={submitRun}
+            disabled={
+              busy ||
+              !file ||
+              !validation?.valid ||
+              authState === "checking" ||
+              (authState === "authenticated" && !user)
+            }
+          >
+            {authState === "authenticated"
+              ? user
+                ? "Launch Analysis"
+                : "Loading account access"
+              : "Sign in to launch analysis"}
           </button>
           {message && <p className="message">{message}</p>}
         </aside>
@@ -2062,9 +2226,11 @@ export default function Page() {
                   All
                 </label>
               )}
-              <button type="button" className="button ghost" onClick={() => refresh()} disabled={busy}>
-                Refresh
-              </button>
+              {authState === "authenticated" ? (
+                <button type="button" className="button ghost" onClick={() => refresh()} disabled={busy}>
+                  Refresh
+                </button>
+              ) : null}
             </div>
           </div>
 
@@ -2146,7 +2312,17 @@ export default function Page() {
                 </li>
               );
             })}
-            {runs.length === 0 && <li className="empty">No analyses yet. Load a representative scenario or upload a forcing CSV to begin.</li>}
+            {authState === "guest" ? (
+              <li className="empty guest-queue-empty">
+                <strong>Your private analysis queue appears after Google sign-in.</strong>
+                <span>
+                  Configure and validate scenarios without signing in. Authentication begins only when you launch
+                  shared compute.
+                </span>
+              </li>
+            ) : runs.length === 0 ? (
+              <li className="empty">No analyses yet. Load a representative scenario or upload a scenario CSV to begin.</li>
+            ) : null}
           </ul>
         </section>
         )}
@@ -3112,6 +3288,12 @@ export default function Page() {
           font-size: 13px;
           text-align: center;
         }
+        .guest-queue-empty {
+          display: grid;
+          gap: 8px;
+          justify-items: center;
+        }
+        .guest-queue-empty strong { color: var(--text); }
         .comparison-tabs { display: flex; gap: 6px; overflow-x: auto; padding: 12px 0 4px; scrollbar-width: thin; }
         .comparison-tabs button {
           white-space: nowrap;

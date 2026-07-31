@@ -18,6 +18,7 @@ type AppShellProps = {
   active?: AppSection;
   children: ReactNode;
   userEmail?: string | null;
+  guestMode?: boolean;
 };
 
 const navItems: Array<{
@@ -25,20 +26,22 @@ const navItems: Array<{
   label: string;
   active: AppSection | null;
   icon: ReactNode;
+  requiresAuthentication?: boolean;
 }> = [
   { href: "/demo?workspace=new", label: "New analysis", active: "home", icon: <Home size={16} /> },
   { href: "/demo?workspace=runs#runs", label: "Analysis queue", active: "runs", icon: <ListChecks size={16} /> },
-  { href: "/admin", label: "Admin", active: "admin", icon: <ShieldCheck size={16} /> },
+  { href: "/admin", label: "Admin", active: "admin", icon: <ShieldCheck size={16} />, requiresAuthentication: true },
   {
     href: "/admin/monitoring",
     label: "Monitoring",
     active: "monitoring",
-    icon: <LineChart size={16} />
+    icon: <LineChart size={16} />,
+    requiresAuthentication: true,
   },
   { href: "/", label: "Product site", active: null, icon: <Globe2 size={16} /> }
 ];
 
-export function AppShell({ active = "home", children, userEmail }: AppShellProps) {
+export function AppShell({ active = "home", children, userEmail, guestMode = false }: AppShellProps) {
   return (
     <div className="app-shell">
       <aside className="app-sidebar" aria-label="Primary navigation">
@@ -58,7 +61,7 @@ export function AppShell({ active = "home", children, userEmail }: AppShellProps
           </div>
         </div>
         <nav className="app-nav">
-          {navItems.map((item) => (
+          {navItems.filter((item) => !guestMode || !item.requiresAuthentication).map((item) => (
             <a key={item.href} href={item.href} data-active={active === item.active} title={item.label}>
               {item.icon}
               <span>{item.label}</span>
@@ -66,9 +69,11 @@ export function AppShell({ active = "home", children, userEmail }: AppShellProps
           ))}
         </nav>
         <div className="app-sidebar-foot">
-          <strong>Managed access.</strong>
+          <strong>{guestMode ? "Public exploration." : "Managed access."}</strong>
           <br />
-          Calibrated uncertainty products for scenario evaluation, asset review, and planning.
+          {guestMode
+            ? "Configure and validate a scenario without signing in. Google sign-in is requested only for shared compute and private history."
+            : "Calibrated uncertainty products for scenario evaluation, asset review, and planning."}
           {userEmail ? (
             <>
               <br />
@@ -96,11 +101,13 @@ export function AppShell({ active = "home", children, userEmail }: AppShellProps
             <span className="command-chip research">Managed workspace</span>
             <span className="command-chip">
               <Activity size={12} aria-hidden="true" />
-              {userEmail ?? "Authentication required"}
+              {userEmail ?? (guestMode ? "Guest exploration" : "Authentication checking")}
             </span>
-            <a className="command-link" href="/oauth2/sign_out">
-              <LogOut size={13} aria-hidden="true" /> Sign out
-            </a>
+            {userEmail ? (
+              <a className="command-link" href="/oauth2/sign_out">
+                <LogOut size={13} aria-hidden="true" /> Sign out
+              </a>
+            ) : null}
           </div>
         </header>
         {children}

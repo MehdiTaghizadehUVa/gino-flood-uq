@@ -1,6 +1,6 @@
 import Image from "next/image";
 import { ArrowUpRight } from "lucide-react";
-import { PILOT_MAILTO } from "../content";
+import { COLLABORATION_MAILTO } from "../content";
 
 export function MarketingFooter() {
   return (
@@ -16,16 +16,16 @@ export function MarketingFooter() {
       </div>
       <div className="footer-grid">
         <div>
-          <strong>Coastal flood uncertainty you can compare, explain, and improve.</strong>
-          <p>A managed probabilistic modeling service developed at the University of Virginia.</p>
+          <strong>Coastal flood scenarios you can compare, explain, and improve.</strong>
+          <p>A managed service for flood probability and forecast agreement, developed at the University of Virginia.</p>
         </div>
         <div className="footer-links">
-          <a href={PILOT_MAILTO}>Request a pilot <ArrowUpRight size={14} /></a>
+          <a href={COLLABORATION_MAILTO}>Discuss a collaboration <ArrowUpRight size={14} /></a>
           <a href="/demo">Portsmouth demo</a>
         </div>
       </div>
       <div className="footer-legal">
-        <span>Rapid coastal scenario analysis with calibrated uncertainty and traceable evidence.</span>
+        <span>Fast coastal scenario analysis with checked probabilities and traceable evidence.</span>
         <span>© 2026 FloodUQ</span>
       </div>
     </footer>

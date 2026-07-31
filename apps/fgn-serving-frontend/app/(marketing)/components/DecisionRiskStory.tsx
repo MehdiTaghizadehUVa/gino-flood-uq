@@ -8,33 +8,33 @@ import { useScrollScene } from "./useScrollScene";
 const VISUALS = [
   {
     src: "/marketing/portsmouth/overview/mean_depth.webp",
-    alt: "Ensemble-mean coastal water-depth map from the Portsmouth deployment",
+    alt: "Expected coastal water-depth map from the Portsmouth deployment",
     label: "Expected water depth",
-    insight: "Orient the study around the central ensemble response."
+    insight: "See the average depth across the full group of plausible forecasts."
   },
   {
     src: "/marketing/portsmouth/overview/arrival_time.webp",
     alt: "Forecast arrival-time map from the Portsmouth deployment",
     label: "Arrival and persistence",
-    insight: "Move from a static footprint to the timing of the response."
+    insight: "See when water may arrive and how long flooding may persist."
   },
   {
     src: "/marketing/portsmouth/overview/probability.webp",
-    alt: "Calibrated coastal water-depth exceedance probability map from the Portsmouth deployment",
-    label: "Calibrated exceedance probability",
-    insight: "Ask how often a study threshold is exceeded across the ensemble."
+    alt: "Checked probability that coastal water depth passes a selected level in Portsmouth",
+    label: "Chance depth passes the selected level",
+    insight: "See what share of plausible forecasts pass a depth that matters to the study."
   },
   {
     src: "/marketing/portsmouth/overview/interval_width.webp",
     alt: "Spatial forecast interval-width map from the Portsmouth deployment",
-    label: "Forecast interval width",
-    insight: "Locate where plausible members remain widely separated."
+    label: "Width of the 90% forecast range",
+    insight: "Find where plausible outcomes are tightly grouped or far apart."
   },
   {
     src: "/marketing/portsmouth/overview/probability.webp",
-    alt: "Monitored calibrated exceedance-probability product from the Portsmouth deployment",
-    label: "Monitored forecast evidence",
-    insight: "Keep the input, forecast, calibration, and familiarity assessment connected."
+    alt: "Flood probability product linked to input and model checks in Portsmouth",
+    label: "Input and forecast checks",
+    insight: "Keep the scenario, forecast, probability adjustment, and familiarity check connected."
   }
 ] as const;
 
@@ -69,8 +69,8 @@ export function DecisionRiskStory({ questions }: { questions: readonly NumberedC
           </div>
           {activeStep === 4 ? (
             <div className="decision-monitoring-badge">
-              <span>REFERENCE SCREENING</span>
-              <strong>Forecast evidence remains traceable</strong>
+              <span>SCENARIO FAMILIARITY CHECK</span>
+              <strong>Inputs and results stay linked to their evidence</strong>
             </div>
           ) : null}
         </div>

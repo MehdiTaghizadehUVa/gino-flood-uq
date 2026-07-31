@@ -24,6 +24,9 @@ from neuralop.flood.serving.run_spec import (
 )
 
 
+MAX_PUBLIC_VALIDATION_BYTES = 2 * 1024 * 1024
+
+
 def _count_by(items, key_fn):
     counts: dict[str, int] = {}
     for item in items:
@@ -384,16 +387,16 @@ def create_app(orchestrator: RunOrchestrator, *, current_user: Callable[[], User
     async def validate_forcing(
         file: UploadFile = File(...),
         forecast_steps: int | None = Form(default=None),
-        user: User = Depends(_current_user),
     ):
-        _require_allowed(user)
         try:
-            data = await file.read()
+            data = await file.read(MAX_PUBLIC_VALIDATION_BYTES + 1)
+            if len(data) > MAX_PUBLIC_VALIDATION_BYTES:
+                raise ValueError("Forcing CSV exceeds the 2 MiB validation limit.")
             forcing = parse_forcing_csv(data, bundle=orchestrator.bundle, requested_forecast_steps=forecast_steps)
             screening = {"available": False}
             if orchestrator.monitoring_orchestrator is not None:
                 screening = orchestrator.monitoring_orchestrator.preview_forcing(
-                    user_id=user.user_id,
+                    user_id="public-validation",
                     forcing=forcing,
                     bundle_id=orchestrator.bundle.bundle_id,
                 ).screening_payload()

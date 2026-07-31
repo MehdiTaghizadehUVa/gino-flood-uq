@@ -45,24 +45,24 @@ export function CaseStudyEvidence({
         <figure className="skill-cost-figure">
           <Image
             src={evidence.benchmark.figure}
-            alt="Skill-cost comparison of FGNO, diffusion, and MC-dropout ensembles in the Portsmouth held-out benchmark"
+            alt="Forecast speed and quality comparison for FloodUQ, diffusion AI, and dropout-based forecast groups on Portsmouth events not used for training"
             width={4479}
             height={3339}
             sizes="(max-width: 900px) 100vw, 68vw"
           />
           <figcaption>
-            The measured 20-member point supports the headline comparison. Larger ensemble timings shown in the source
-            analysis are not used for marketing claims when they are extrapolated.
+            The headline comparison uses 20 plausible forecasts from each method. Larger forecast-group timings in the
+            source analysis are excluded when they were estimated rather than measured.
           </figcaption>
         </figure>
         <aside className="benchmark-methodology" aria-label="Benchmark scope">
-          <MicroLabel>Benchmark scope</MicroLabel>
+          <MicroLabel>What the comparison covers</MicroLabel>
           <dl>
             <div><dt>Events</dt><dd>{evidence.benchmark.sample}</dd></div>
-            <div><dt>Budget</dt><dd>{evidence.benchmark.ensembleBudget}</dd></div>
+            <div><dt>Forecasts</dt><dd>{evidence.benchmark.ensembleBudget}</dd></div>
             <div><dt>Hardware</dt><dd>{evidence.benchmark.hardware}</dd></div>
-            <div><dt>Timing</dt><dd>{evidence.benchmark.timingScope}</dd></div>
-            <div><dt>Skill</dt><dd>{evidence.benchmark.skillMetrics}</dd></div>
+            <div><dt>Speed measurement</dt><dd>{evidence.benchmark.timingScope}</dd></div>
+            <div><dt>Forecast-quality measures</dt><dd>{evidence.benchmark.skillMetrics}</dd></div>
           </dl>
           <p>Results are specific to this benchmark and do not guarantee the same ratios for another domain or hardware stack.</p>
         </aside>
@@ -71,7 +71,7 @@ export function CaseStudyEvidence({
       <div className="case-study-runtime">
         <div>
           <MicroLabel>Full service workflow</MicroLabel>
-          <h3>Inference is only one part of a delivered result.</h3>
+          <h3>Model forecast generation is only one part of a delivered result.</h3>
           <p>{caseStudy.fullWorkflowNote}</p>
         </div>
         <BenchmarkBars

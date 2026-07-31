@@ -10,30 +10,37 @@ export function UncertaintyDecomposition({ decomposition }: { decomposition: Dec
     <div className="decomposition-evidence">
       <div className="decomposition-summary">
         <div>
-          <span>Epistemic share at selected lead</span>
+          <span>Share from differences between trained models</span>
           <strong>{betweenPercent}%</strong>
         </div>
-        <div className="variance-share" aria-label={`${betweenPercent}% epistemic and ${100 - betweenPercent}% aleatoric variance`}>
+        <div className="variance-share" aria-label={`${betweenPercent}% model uncertainty and ${100 - betweenPercent}% outcome variability`}>
           <span style={{ width: `${betweenPercent}%` }} />
         </div>
         <p>
-          The selected lead, +{decomposition.leadHours.toFixed(2)} h, maximizes the area-weighted epistemic
-          uncertainty for this event. The share changes through time and should not be read as a causal attribution.
+          At +{decomposition.leadHours.toFixed(2)} h, differences between the independently trained models account
+          for {betweenPercent}% of the measured forecast variation. This share changes through time and describes the
+          forecast system; it does not identify a physical cause.
         </p>
       </div>
       <div className="decomposition-grid">
         {decomposition.maps.map((map) => (
           <figure key={map.id} className="case-study-figure">
             {/* eslint-disable-next-line @next/next/no-img-element */}
-            <img src={caseStudyAsset(map.src)} alt={`${map.label} over the Portsmouth terrain`} width={1400} height={1080} loading="lazy" />
+            <img
+              src={caseStudyAsset(map.src)}
+              alt={`${map.id === "betweenModel" ? "Differences between trained models" : "Variation within each model"} over the Portsmouth terrain`}
+              width={1400}
+              height={1080}
+              loading="lazy"
+            />
             <EvidenceCaption
-              title={map.label}
+              title={map.id === "betweenModel" ? "Differences between trained models (epistemic)" : "Variation within each model (aleatoric)"}
               insight={
                 map.id === "betweenModel"
-                  ? "Highlights epistemic uncertainty where independently trained model checkpoints produce different central responses."
-                  : "Highlights aleatoric uncertainty where latent members from the same checkpoint retain a wider range."
+                  ? "Model uncertainty (epistemic) is larger where independently trained models give different central forecasts."
+                  : "Outcome variability (aleatoric) is larger where one trained model retains a wider range of plausible forecasts."
               }
-              method="Both maps show standard deviation in meters on one shared scale. Epistemic uncertainty is estimated across checkpoint means; aleatoric uncertainty is estimated among latent members within each checkpoint. These components describe the deployed ensemble structure and do not prove model error."
+              method="Both maps use the same meter scale. Standard deviation measures spread: larger values mean the forecasts are farther apart. The left map compares the central forecast from each trained model; the right map measures variation among plausible forecasts from the same model."
             />
           </figure>
         ))}
