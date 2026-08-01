@@ -62,3 +62,10 @@ test("mobile narrative items reveal as they enter the viewport", () => {
   assert.match(marketingCss, /\[data-mobile-reveal-visible="true"\]/);
   assert.match(marketingCss, /translate3d\(0, 44px, 0\) scale\(0\.985\)/);
 });
+
+test("variance equation adapts to its analysis column without overflowing", () => {
+  assert.match(marketingCss, /container:\s*uncertainty-equation\s*\/\s*inline-size/);
+  assert.match(marketingCss, /@container uncertainty-equation \(max-width:\s*720px\)/);
+  assert.match(marketingCss, /\.variance-equation-compact\s*\{[\s\S]*?display:\s*none/);
+  assert.match(marketingCss, /overflow:\s*hidden/);
+});

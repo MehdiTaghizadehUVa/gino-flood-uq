@@ -2134,9 +2134,31 @@ html[data-theme="marketing"] svg {
 }
 
 .uncertainty-equation {
+  container: uncertainty-equation / inline-size;
+  width: 100%;
+  max-width: 100%;
   margin: auto 0;
-  overflow: visible;
-  font-size: clamp(28px, 3vw, 46px);
+  overflow: hidden;
+  font-size: clamp(21px, 3.7cqw, 40px);
+}
+
+.uncertainty-equation math {
+  max-width: 100%;
+}
+
+.variance-equation-compact {
+  display: none;
+}
+
+@container uncertainty-equation (max-width: 720px) {
+  .variance-equation-wide {
+    display: none;
+  }
+
+  .variance-equation-compact {
+    display: block;
+    font-size: clamp(17px, 5cqw, 32px);
+  }
 }
 
 .uncertainty-equation-intro {

@@ -371,7 +371,7 @@ for (const maskingPhrase of [
     `Public masking-language found: ${maskingPhrase}`
   );
 }
-assert.ok(pageSource.includes('<math display="block"'), "The variance decomposition must use semantic MathML.");
+assert.match(pageSource, /<math\b[^>]*\bdisplay="block"/, "The variance decomposition must use semantic MathML.");
 assert.ok(pageSource.includes("epistemic uncertainty"));
 assert.ok(pageSource.includes("aleatoric uncertainty"));
 assert.ok(!allMarketingSource.includes("MotionPreferenceToggle"), "Marketing motion must not require a visitor control.");

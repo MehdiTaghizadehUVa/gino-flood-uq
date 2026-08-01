@@ -49,7 +49,7 @@ const structuredData = {
 };
 
 const varianceDecompositionMath = String.raw`
-  <math display="block" aria-label="Total variance equals epistemic uncertainty plus aleatoric uncertainty">
+  <math class="variance-equation-wide" display="block" aria-label="Total variance equals epistemic uncertainty plus aleatoric uncertainty">
     <mrow>
       <mi mathvariant="normal">Var</mi><mo stretchy="false">(</mo><mi>H</mi><mo stretchy="false">)</mo><mo>=</mo>
       <munder class="variance-term epistemic-term">
@@ -80,6 +80,48 @@ const varianceDecompositionMath = String.raw`
         <mtext>aleatoric uncertainty</mtext>
       </munder>
     </mrow>
+  </math>
+  <math class="variance-equation-compact" display="block" aria-label="Total variance equals epistemic uncertainty plus aleatoric uncertainty">
+    <mtable columnalign="left" rowspacing="0.8em">
+      <mtr>
+        <mtd>
+          <mi mathvariant="normal">Var</mi><mo stretchy="false">(</mo><mi>H</mi><mo stretchy="false">)</mo><mo>=</mo>
+        </mtd>
+        <mtd>
+          <munder class="variance-term epistemic-term">
+            <munder accentunder="true">
+              <mrow>
+                <msub><mi mathvariant="normal">Var</mi><mi>Θ</mi></msub>
+                <mo>[</mo>
+                <msub><mi mathvariant="normal">E</mi><mi>Z</mi></msub>
+                <mo>(</mo><mi>H</mi><mo>|</mo><mi>Θ</mi><mo>)</mo>
+                <mo>]</mo>
+              </mrow>
+              <mo stretchy="true">⏟</mo>
+            </munder>
+            <mtext>epistemic uncertainty</mtext>
+          </munder>
+        </mtd>
+      </mtr>
+      <mtr>
+        <mtd><mspace width="4.6em" /><mo>+</mo></mtd>
+        <mtd>
+          <munder class="variance-term aleatoric-term">
+            <munder accentunder="true">
+              <mrow>
+                <msub><mi mathvariant="normal">E</mi><mi>Θ</mi></msub>
+                <mo>[</mo>
+                <msub><mi mathvariant="normal">Var</mi><mi>Z</mi></msub>
+                <mo>(</mo><mi>H</mi><mo>|</mo><mi>Θ</mi><mo>)</mo>
+                <mo>]</mo>
+              </mrow>
+              <mo stretchy="true">⏟</mo>
+            </munder>
+            <mtext>aleatoric uncertainty</mtext>
+          </munder>
+        </mtd>
+      </mtr>
+    </mtable>
   </math>
 `;
 
