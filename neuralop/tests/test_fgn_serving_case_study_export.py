@@ -222,6 +222,60 @@ def test_rendered_subthreshold_forecast_leaves_dem_pixels_unchanged(tmp_path):
     assert not np.array_equal(below_zero, visible)
 
 
+def test_selected_location_uses_a_distinct_target_marker(tmp_path):
+    terrain = TerrainContext(
+        image=np.zeros((80, 80), dtype=np.float32),
+        extent=(0.0, 10.0, 0.0, 10.0),
+        source_crs="EPSG:32618",
+        target_crs="EPSG:32618",
+        source_path="synthetic-dem.tif",
+        viewport=(0.0, 10.0, 0.0, 10.0),
+    )
+    geometry = np.asarray(
+        [[0.0, 0.0], [10.0, 0.0], [0.0, 10.0], [10.0, 10.0]],
+        dtype=np.float64,
+    )
+
+    def render(name: str, selected: bool) -> np.ndarray:
+        output = tmp_path / f"{name}.webp"
+        render_spatial_webp(
+            values=np.full(geometry.shape[0], 0.70, dtype=np.float64),
+            geometry_xy=geometry,
+            terrain=terrain,
+            output_path=output,
+            title="",
+            colorbar_label="",
+            cmap=probability_cmap(),
+            vmin=0.10,
+            vmax=1.0,
+            display_floor=0.10,
+            markers=[(5.0, 5.0, "A", selected)],
+            quality=100,
+            show_title=False,
+            show_colorbar=False,
+        )
+        with Image.open(output) as image:
+            return np.asarray(image.convert("RGB"), dtype=np.int16)
+
+    reference = render("reference-marker", selected=False)
+    selected = render("selected-marker", selected=True)
+    amber_reference = (
+        (reference[..., 0] > 210)
+        & (reference[..., 1] > 120)
+        & (reference[..., 1] < 210)
+        & (reference[..., 2] < 130)
+    )
+    amber_selected = (
+        (selected[..., 0] > 210)
+        & (selected[..., 1] > 120)
+        & (selected[..., 1] < 210)
+        & (selected[..., 2] < 130)
+    )
+
+    assert np.count_nonzero(amber_selected) > np.count_nonzero(amber_reference) + 40
+    assert np.count_nonzero(np.any(selected != reference, axis=2)) > 150
+
+
 def test_rendered_spatial_gradient_interpolates_node_values(tmp_path):
     terrain = TerrainContext(
         image=np.zeros((80, 80), dtype=np.float32),

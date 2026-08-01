@@ -1,5 +1,6 @@
 "use client";
 
+import { Crosshair } from "lucide-react";
 import { useState } from "react";
 import { caseStudyAsset } from "../caseStudyAsset";
 import type { CaseStudyManifest } from "./caseStudyTypes";
@@ -30,7 +31,10 @@ export function LocationEvidence({ locations }: { locations: Location[] }) {
             className={selected.id === location.id ? "active" : ""}
             onClick={() => setSelectedId(location.id)}
           >
-            <strong>{location.label}</strong>
+            <strong>
+              {selected.id === location.id ? <Crosshair aria-hidden="true" size={16} strokeWidth={2.4} /> : null}
+              {location.label}
+            </strong>
             <span>{displayInterpretation(location)}</span>
           </button>
         ))}

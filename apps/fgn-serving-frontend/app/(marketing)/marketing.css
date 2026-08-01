@@ -1404,8 +1404,15 @@ html[data-theme="marketing"] svg {
 }
 
 .location-selector strong {
+  display: inline-flex;
+  gap: 8px;
+  align-items: center;
   color: var(--marketing-accent);
   font-size: 13px;
+}
+
+.location-selector button.active strong {
+  color: #9a4f00;
 }
 
 .location-selector span {

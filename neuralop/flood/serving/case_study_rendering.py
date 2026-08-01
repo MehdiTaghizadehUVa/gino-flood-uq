@@ -286,26 +286,61 @@ def render_spatial_webp(
                     for collection in getattr(contour, "collections", []):
                         collection.set_path_effects([pe.Stroke(linewidth=3.0, foreground="#101820"), pe.Normal()])
             for marker_x, marker_y, label, selected in markers:
-                edge = "#7FD6FF" if selected else "#FFFFFF"
-                ax.scatter(
-                    [marker_x],
-                    [marker_y],
-                    s=82 if selected else 60,
-                    facecolor="#071B4D",
-                    edgecolor=edge,
-                    linewidth=2.0,
-                    zorder=6,
-                )
+                if selected:
+                    # A target marker communicates both selection and the exact
+                    # sampled coordinate. The white halo remains legible over
+                    # terrain, probability overlays, and dark flooded regions.
+                    ax.scatter(
+                        [marker_x],
+                        [marker_y],
+                        s=430,
+                        marker="+",
+                        color="#FFFFFF",
+                        linewidth=4.2,
+                        zorder=6,
+                    )
+                    ax.scatter(
+                        [marker_x],
+                        [marker_y],
+                        s=430,
+                        marker="+",
+                        color="#102A36",
+                        linewidth=2.0,
+                        zorder=7,
+                    )
+                    ax.scatter(
+                        [marker_x],
+                        [marker_y],
+                        s=230,
+                        facecolor="#FFB547",
+                        edgecolor="#FFFFFF",
+                        linewidth=3.0,
+                        zorder=8,
+                    )
+                    text_color = "#102A36"
+                    text_zorder = 9
+                else:
+                    ax.scatter(
+                        [marker_x],
+                        [marker_y],
+                        s=54,
+                        facecolor="#071B4D",
+                        edgecolor="#FFFFFF",
+                        linewidth=1.8,
+                        zorder=6,
+                    )
+                    text_color = "#FFFFFF"
+                    text_zorder = 7
                 ax.text(
                     marker_x,
                     marker_y,
                     label,
                     ha="center",
                     va="center",
-                    color="#FFFFFF",
-                    fontsize=7.5,
+                    color=text_color,
+                    fontsize=8.0 if selected else 7.0,
                     fontweight="bold",
-                    zorder=7,
+                    zorder=text_zorder,
                 )
             ax.set_xlim(viewport[0], viewport[1])
             ax.set_ylim(viewport[2], viewport[3])
