@@ -25,7 +25,7 @@ export function MarketingFooter() {
         </div>
       </div>
       <div className="footer-legal">
-        <span>Fast coastal scenario analysis with checked probabilities and traceable evidence.</span>
+        <span>Fast coastal scenario analysis with calibrated probabilities and traceable evidence.</span>
         <span>© 2026 FloodUQ</span>
       </div>
     </footer>

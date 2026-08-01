@@ -10,7 +10,7 @@ const jetbrainsMono = JetBrains_Mono({ subsets: ["latin"], variable: "--font-mar
 export const metadata: Metadata = {
   metadataBase: new URL("https://flooduq.app"),
   title: "FloodUQ | Coastal flood probability and uncertainty modeling",
-  description: "Compare coastal flood scenarios, estimate flood probability and timing, and see how closely plausible forecasts agree.",
+  description: "Compare coastal flood scenarios, estimate calibrated flood probability and timing, and see how closely plausible forecasts agree.",
   alternates: { canonical: "/" },
   icons: {
     icon: [{ url: "/marketing/brand/flooduq-app-icon.png", type: "image/png", sizes: "512x512" }],
@@ -27,7 +27,7 @@ export const metadata: Metadata = {
   twitter: {
     card: "summary_large_image",
     title: "FloodUQ | Coastal flood probability and uncertainty modeling",
-    description: "Fast coastal flood scenario comparison with checked probabilities and visible forecast agreement.",
+    description: "Fast coastal flood scenario comparison with calibrated probabilities and visible forecast agreement.",
     images: ["/marketing/og.jpg"]
   }
 };

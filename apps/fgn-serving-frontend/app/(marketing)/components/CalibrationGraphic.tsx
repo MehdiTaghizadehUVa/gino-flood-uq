@@ -19,8 +19,8 @@ export function CalibrationGraphic({ stage = 2 }: { stage?: number }) {
       data-curve-visible={layerState.curveVisible}
     >
       <svg viewBox={`0 0 ${WIDTH} ${HEIGHT}`} role="img" aria-labelledby="calibration-title calibration-desc">
-        <title id="calibration-title">Probability adjustment for water depth above 0.30 meters</title>
-        <desc id="calibration-desc">The model's original vote is on the horizontal axis and the checked probability is on the vertical axis.</desc>
+        <title id="calibration-title">Calibration curve for water depth above 0.30 meters</title>
+        <desc id="calibration-desc">The raw model probability is on the horizontal axis and the calibrated probability is on the vertical axis.</desc>
         {ticks.map((tick) => (
           <g key={tick}>
             <line className="chart-grid" x1={x(tick)} x2={x(tick)} y1={y(0)} y2={y(1)} />
@@ -34,11 +34,11 @@ export function CalibrationGraphic({ stage = 2 }: { stage?: number }) {
         {calibrationCurve.filter((_, index) => index % 2 === 0).map(([raw, calibrated]) => (
           <circle key={raw} className="chart-point" cx={x(raw)} cy={y(calibrated)} r="4" />
         ))}
-        <text className="chart-axis-label" x={WIDTH / 2} y={HEIGHT - 1} textAnchor="middle">Original model vote</text>
-        <text className="chart-axis-label" transform={`translate(14 ${HEIGHT / 2}) rotate(-90)`} textAnchor="middle">Checked probability</text>
+        <text className="chart-axis-label" x={WIDTH / 2} y={HEIGHT - 1} textAnchor="middle">Raw model probability</text>
+        <text className="chart-axis-label" transform={`translate(14 ${HEIGHT / 2}) rotate(-90)`} textAnchor="middle">Calibrated probability</text>
       </svg>
       <figcaption>
-        The dots show evidence from separate reference simulations. The line converts the model's original vote into a checked probability.
+        The dots summarize separate reference evidence. The curve maps the raw ensemble probability to the calibrated probability.
       </figcaption>
     </figure>
   );

@@ -7,6 +7,13 @@ import { EvidenceCaption } from "./EvidenceCaption";
 
 type Location = CaseStudyManifest["flagship"]["locations"][number];
 
+function displayInterpretation(location: Location) {
+  if (location.interpretation === "Early onset") return "Earlier arrival";
+  if (location.interpretation === "Elevated member spread") return "Wider forecast range";
+  if (location.interpretation === "Later response") return "Later arrival";
+  return location.interpretation;
+}
+
 export function LocationEvidence({ locations }: { locations: Location[] }) {
   const [selectedId, setSelectedId] = useState(locations[0]?.id ?? "");
   const selected = locations.find((location) => location.id === selectedId) ?? locations[0];
@@ -24,7 +31,7 @@ export function LocationEvidence({ locations }: { locations: Location[] }) {
             onClick={() => setSelectedId(location.id)}
           >
             <strong>{location.label}</strong>
-            <span>{location.interpretation}</span>
+            <span>{displayInterpretation(location)}</span>
           </button>
         ))}
       </div>
@@ -33,17 +40,17 @@ export function LocationEvidence({ locations }: { locations: Location[] }) {
           {/* eslint-disable-next-line @next/next/no-img-element */}
           <img src={caseStudyAsset(selected.mapSrc)} alt={`${selected.label} selected on the Irene probability map`} width={1400} height={1080} loading="lazy" />
           <EvidenceCaption
-            title={`${selected.label} / ${selected.interpretation}`}
+            title={`${selected.label} / ${displayInterpretation(selected)}`}
             insight="The marker connects a regional flood pattern to a representative local forecast."
             method={`Location ${selected.cellIndex.toLocaleString()} is selected reproducibly from forecast behavior at UTM easting ${selected.coordinates.easting.toLocaleString()} m and northing ${selected.coordinates.northing.toLocaleString()} m; it is not a named asset.`}
           />
         </figure>
         <figure className="case-study-figure location-chart">
           {/* eslint-disable-next-line @next/next/no-img-element */}
-        <img src={caseStudyAsset(selected.panelSrc)} alt={`${selected.label} possible depths, chance of passing 0.30 meters, and arrival-time range`} width={1700} height={520} loading="lazy" />
-        <EvidenceCaption
-          title="Possible depths, chance of passing 0.30 m, and arrival timing"
-          insight="The depth range, checked probability, and arrival-time distribution show what an average map cannot reveal at one location."
+          <img src={caseStudyAsset(selected.panelSrc)} alt={`${selected.label} possible depths, chance of passing 0.30 meters, and arrival-time range`} width={1700} height={520} loading="lazy" />
+          <EvidenceCaption
+            title="Possible depths, chance of passing 0.30 m, and arrival timing"
+            insight="The depth range, calibrated probability, and arrival-time distribution show what an average map cannot reveal at one location."
             method="The figure summarizes all 60 production members so the central response and forecast range remain visible together."
           />
         </figure>

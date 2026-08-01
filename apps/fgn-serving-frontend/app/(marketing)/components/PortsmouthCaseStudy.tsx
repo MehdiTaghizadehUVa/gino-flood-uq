@@ -10,12 +10,19 @@ import type { CaseStudyManifest } from "./caseStudyTypes";
 
 const manifest = manifestJson as unknown as CaseStudyManifest;
 
+function metricLabel(label: string) {
+  if (label === "Peak expected footprint above 0.30 m") return "Largest expected area above 0.30 m";
+  if (label === "Lead to peak expected footprint") return "Time to the largest expected area";
+  if (label === "Area-weighted 90% interval width at peak") return "Area-weighted 90% depth range at peak";
+  return label;
+}
+
 export function PortsmouthCaseStudy({ evidence }: { evidence: EvidenceRegistry }) {
   return (
     <div className="portsmouth-case-study">
       <div className="case-study-stats" aria-label="Irene 2011 evidence summary">
         {manifest.flagship.metrics.map((metric) => (
-          <div key={metric.label}><strong>{metric.value}</strong><span>{metric.label}</span></div>
+          <div key={metric.label}><strong>{metric.value}</strong><span>{metricLabel(metric.label)}</span></div>
         ))}
       </div>
 
@@ -50,12 +57,12 @@ export function PortsmouthCaseStudy({ evidence }: { evidence: EvidenceRegistry }
       </section>
 
       <section className="case-study-chapter" aria-labelledby="receipt-title">
-        <header><span>06 / PERFORMANCE RECORD</span><h3 id="receipt-title">See the evidence behind every performance claim.</h3><p>Runtime, forecast skill, model version, probability adjustment, hardware, and event source are presented together. This provenance record shows how each result was produced.</p></header>
+        <header><span>06 / PERFORMANCE RECORD</span><h3 id="receipt-title">See the evidence behind every performance claim.</h3><p>Runtime, forecast skill, model version, probability calibration, hardware, and event source are presented together. This provenance record shows how each result was produced.</p></header>
         <EvidenceReceipt manifest={manifest} evidence={evidence} />
       </section>
 
       <div className="case-study-conversion">
-        <div><span>PORTSMOUTH IS THE PROOF CASE</span><h3>Bring checked flood probabilities to your coastal domain.</h3><p>A collaboration can connect your terrain, water-level and rainfall scenarios, detailed reference simulations, depth thresholds, and evaluation needs in a practical deployment plan.</p></div>
+        <div><span>PORTSMOUTH IS THE PROOF CASE</span><h3>Bring calibrated flood probabilities to your coastal domain.</h3><p>A collaboration can connect your terrain, water-level and rainfall scenarios, detailed reference simulations, depth thresholds, and evaluation needs in a practical deployment plan.</p></div>
         <div className="marketing-actions"><a className="marketing-button primary" href="mailto:jrj6wm@virginia.edu?subject=FloodUQ%20research%20and%20deployment%20collaboration">Discuss a collaboration</a><a className="marketing-button secondary" href="/demo">Explore the Portsmouth demo</a></div>
       </div>
     </div>

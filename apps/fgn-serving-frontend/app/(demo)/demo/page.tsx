@@ -265,7 +265,7 @@ function mapArtifactLabel(artifactId: string) {
     ? `Chance Depth Passes ${Number(`${probabilityMatch[1]}.${probabilityMatch[2]}`).toFixed(2)} m`
     : null;
   const label = withoutExt
-    .replace(/^calibrated_/, "Checked ")
+    .replace(/^calibrated_/, "Calibrated ")
     .replace(/^raw_/, "Original ")
     .replace(/_t\d+$/, "")
     .replace("mean_wd_animation", "Expected Depth Animation")
@@ -569,7 +569,7 @@ function ExceedanceBars({
         );
       })}
       <text x={padL} y={height - 2} fontSize="9" fill="#6a7d84">
-        {calibrated ? "checked probabilities" : "original forecast-group percentages"}
+        {calibrated ? "calibrated probabilities" : "raw forecast-group probabilities"}
       </text>
     </svg>
   );
@@ -1034,7 +1034,7 @@ const SCRUB_PRODUCT_META: Record<
   p_gt_0p30m: {
     label: "Chance depth passes 0.30 m",
     short: "Chance > 0.30 m",
-    description: "Checked probability that water depth passes 0.30 m at each location and time.",
+    description: "Calibrated probability that water depth passes 0.30 m at each location and time.",
     unitTone: "prob",
   },
 };
@@ -1176,7 +1176,7 @@ function TimePlayer({
           <p className="player-eyebrow">Forecast animation</p>
           <h3 className="player-title">
             {runLabel}{" "}
-            <span className="player-sub">· checked {SCRUB_PRODUCT_META[product].label.toLowerCase()}</span>
+            <span className="player-sub">· calibrated {SCRUB_PRODUCT_META[product].label.toLowerCase()}</span>
           </h3>
           <p className="player-product-hint">{SCRUB_PRODUCT_META[product].description}</p>
         </div>
@@ -1682,7 +1682,7 @@ export default function Page() {
     { id: "uq_extent_by_time.svg", title: "Expected Flooded-Area Fraction" },
     { id: "uq_exceedance_bars.svg", title: "Peak Depth-Threshold Footprint" },
     { id: "uq_uncertainty_width.svg", title: "Forecast Range Through Time" },
-    { id: "calibration_effect.svg", title: "Probability Adjustment" },
+    { id: "calibration_effect.svg", title: "Calibration Effect" },
   ].filter((figure) => artifacts.some((artifact) => artifact.artifact_id === figure.id));
 
   async function acknowledgeDisclaimer() {
@@ -1962,7 +1962,7 @@ export default function Page() {
             </div>
             <div className="hero-capabilities" aria-label="Platform capabilities">
               <span><Waves size={14} aria-hidden="true" /> Portsmouth coastal model</span>
-              <span><Activity size={14} aria-hidden="true" /> Checked probabilities and forecast ranges</span>
+              <span><Activity size={14} aria-hidden="true" /> Calibrated probabilities and forecast ranges</span>
               <span><Database size={14} aria-hidden="true" /> Traceable result files</span>
               <span><ShieldCheck size={14} aria-hidden="true" /> Managed compute access</span>
             </div>

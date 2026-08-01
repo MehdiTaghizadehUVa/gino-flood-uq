@@ -25,8 +25,8 @@ export function HistoricalValidation({ historical }: { historical: Historical })
             <img src={caseStudyAsset(event.probabilitySrc)} alt={`${event.label} chance that maximum water depth passes 0.10 meters`} width={1400} height={1080} loading="lazy" />
             <EvidenceCaption
               title="Chance maximum depth passes 0.10 m"
-              insight="Shows where many plausible forecasts indicate flooding and how that footprint compares with the detailed hydraulic simulation."
-              method="The percentage is the share of checked forecasts whose maximum depth passes 0.10 m at each location. The white line marks the HEC-RAS reference footprint."
+              insight="Shows where the calibrated probability is elevated and how that footprint compares with the detailed hydraulic simulation."
+              method="The calibrated probability combines the forecast-member exceedance rate with the versioned calibration curve for 0.10 m. The white line marks the HEC-RAS reference footprint."
             />
           </figure>
           <figure className="case-study-figure">

@@ -10,16 +10,16 @@ export function UncertaintyDecomposition({ decomposition }: { decomposition: Dec
     <div className="decomposition-evidence">
       <div className="decomposition-summary">
         <div>
-          <span>Share from differences between trained models</span>
+          <span>Share attributed to epistemic uncertainty</span>
           <strong>{betweenPercent}%</strong>
         </div>
         <div className="variance-share" aria-label={`${betweenPercent}% model uncertainty and ${100 - betweenPercent}% outcome variability`}>
           <span style={{ width: `${betweenPercent}%` }} />
         </div>
         <p>
-          At +{decomposition.leadHours.toFixed(2)} h, differences between the independently trained models account
-          for {betweenPercent}% of the measured forecast variation. This share changes through time and describes the
-          forecast system; it does not identify a physical cause.
+          At +{decomposition.leadHours.toFixed(2)} h, epistemic uncertainty accounts for {betweenPercent}% of the
+          measured forecast variation. Here, epistemic uncertainty means disagreement between independently trained
+          models. This share changes through time and does not identify a physical cause.
         </p>
       </div>
       <div className="decomposition-grid">
@@ -28,13 +28,13 @@ export function UncertaintyDecomposition({ decomposition }: { decomposition: Dec
             {/* eslint-disable-next-line @next/next/no-img-element */}
             <img
               src={caseStudyAsset(map.src)}
-              alt={`${map.id === "betweenModel" ? "Differences between trained models" : "Variation within each model"} over the Portsmouth terrain`}
+              alt={`${map.id === "betweenModel" ? "Epistemic uncertainty" : "Aleatoric uncertainty"} over the Portsmouth terrain`}
               width={1400}
               height={1080}
               loading="lazy"
             />
             <EvidenceCaption
-              title={map.id === "betweenModel" ? "Differences between trained models (epistemic)" : "Variation within each model (aleatoric)"}
+              title={map.id === "betweenModel" ? "Epistemic uncertainty" : "Aleatoric uncertainty"}
               insight={
                 map.id === "betweenModel"
                   ? "Model uncertainty (epistemic) is larger where independently trained models give different central forecasts."

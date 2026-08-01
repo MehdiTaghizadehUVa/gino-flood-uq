@@ -154,29 +154,29 @@ type Summary = {
 type ProductKey = "p_gt_0p30m" | "iqr" | "p95" | "mean" | "spread";
 
 const PRODUCT_LABELS: Record<ProductKey, string> = {
-  p_gt_0p30m: "P(WD > 0.30 m)",
-  iqr: "WD IQR (m)",
-  p95: "WD p95 (m)",
-  mean: "Mean WD (m)",
-  spread: "Ensemble spread (m)",
+  p_gt_0p30m: "Chance depth passes 0.30 m",
+  iqr: "Middle 50% depth range (m)",
+  p95: "95th-percentile depth (m)",
+  mean: "Mean water depth (m)",
+  spread: "Forecast spread (m)",
 };
 
 const PRODUCT_CAPTIONS: Record<ProductKey, { caption: string; insight: string }> = {
   p_gt_0p30m: {
-    caption: "Calibrated exceedance-probability map at the selected lead time.",
-    insight: "Values are probabilities for WD above 0.30 m, so this map foregrounds risk of crossing a meaningful depth threshold rather than expected depth.",
+    caption: "Calibrated probability that water depth passes 0.30 m at the selected lead time.",
+    insight: "This map shows the chance of crossing the selected depth rather than the expected water depth.",
   },
   iqr: {
-    caption: "Interquartile depth spread at the selected lead time.",
-    insight: "Large IQR means the middle 50% of ensemble members disagree locally, which is a robust uncertainty-width diagnostic.",
+    caption: "Width of the middle 50% of plausible water depths at the selected lead time.",
+    insight: "A wider range means the central half of the plausible forecasts differ more at that location.",
   },
   p95: {
-    caption: "Upper-tail calibrated depth at the selected lead time.",
-    insight: "p95 highlights plausible high-end response under the ensemble, not a deterministic worst case.",
+    caption: "Calibrated 95th-percentile depth at the selected lead time.",
+    insight: "About 95% of plausible depths are at or below this value; it is not a deterministic worst case.",
   },
   mean: {
     caption: "Calibrated ensemble-mean water depth at the selected lead time.",
-    insight: "Mean depth is useful for expected response, but should be read with spread and probability maps for UQ context.",
+    insight: "Mean depth shows the expected response and should be read alongside probability and forecast-range maps.",
   },
   spread: {
     caption: "Ensemble standard-deviation map at the selected lead time.",
@@ -758,11 +758,10 @@ type ComparePayload = {
 
 function ReliabilityCurveCard({ data }: { data: ReliabilityCurves }) {
   // Two-curve reliability diagram + per-threshold histogram strip.
-  // X-axis = raw calibrated-ensemble exceedance probability per cell, binned;
-  // Y-axis = mean post-isotonic probability for cells in that raw bin.
-  // The 45-degree reference line means "calibration was a no-op". Deviations
-  // above/below the line tell the user where the model over- or
-  // under-confidently predicted exceedance for this run.
+  // X-axis = raw ensemble exceedance probability per cell, binned;
+  // Y-axis = mean calibrated probability for cells in that raw bin.
+  // The 45-degree reference is the identity mapping. Values above or below it
+  // show where the fitted calibration raises or lowers raw probabilities.
   const width = 720;
   const padL = 56;
   const padR = 18;
@@ -832,7 +831,7 @@ function ReliabilityCurveCard({ data }: { data: ReliabilityCurves }) {
 
       {/* Axis labels */}
       <text x={padL} y={padT - 4} fontSize={11} fontWeight={700} fill="#0f172a">
-        Calibrated P(WD &gt; threshold) vs raw P
+        Calibrated probability versus raw probability
       </text>
       <text x={padL + innerW / 2} y={padT + innerH + 22} fontSize={11} textAnchor="middle" fill="#475569">
         Raw ensemble probability (wettable cells, peak time)
@@ -1800,7 +1799,7 @@ export default function RunDetails() {
       id: "calibration_effect.svg",
       title: "Calibration Shift",
       caption: "Raw-to-calibrated changes in exceedance footprint and uncertainty summaries.",
-      insight: "Large shifts show where calibration materially changed the UQ story; they are adjustment diagnostics, not validation accuracy.",
+      insight: "Large shifts show where calibration materially changed the uncertainty interpretation; they are calibration diagnostics, not validation accuracy.",
     },
   ].filter((figure) => artifacts.some((artifact) => artifact.artifact_id === figure.id));
 
@@ -2026,8 +2025,8 @@ export default function RunDetails() {
       <p className="tab-intro">
         Results are organized into three questions — <strong>Hazard</strong> (what / where / when),
         {" "}<strong>Uncertainty</strong> (how confident, and where uncertainty concentrates), and
-        {" "}<strong>Drivers</strong> (forcing → response). Click any cell on the map to read its
-        ensemble depth fan, calibrated probability of exceedance, and arrival-time distribution
+        {" "}<strong>Drivers</strong> (water level and rainfall → flood response). Click any cell on the map to read its
+        plausible depth traces, calibrated probability of exceedance, and arrival-time distribution
         at that point.
       </p>
 
@@ -2037,13 +2036,13 @@ export default function RunDetails() {
             <header className="envelope-head">
               <h2>Uncertainty</h2>
               <span className="envelope-sub">
-                Calibration {reliability?.applied ? "applied" : "no-op"}
+                {reliability?.applied ? "Calibration applied" : "Calibration curve unavailable"}
                 {spreadSummary && ` · ${spreadSummary.n_groups} checkpoints`}
               </span>
             </header>
             <p className="tab-intro" style={{ margin: 0 }}>
               How confident is this forecast, and <em>where</em> is the uncertainty
-              concentrated? Maps below show the intra-ensemble spread metric and how
+              concentrated? Maps below show the overall forecast spread and how
               total variance splits into epistemic and aleatoric uncertainty. The reliability card shows what
               isotonic calibration actually did to exceedance probabilities on this
               run.
@@ -2090,18 +2089,18 @@ export default function RunDetails() {
               <header className="envelope-head">
                 <h2>Reliability</h2>
                 <span className="envelope-sub">
-                  raw vs isotonic-calibrated P(WD &gt; threshold), {reliability.n_wettable_cells} wettable cells at peak
+                  raw and calibrated probabilities by depth threshold, {reliability.n_wettable_cells} wettable cells at peak
                 </span>
               </header>
               <ReliabilityCurveCard data={reliability} />
               <FigureNote
                 caption="Isotonic reliability curves compare raw ensemble probabilities with calibrated probabilities over wettable cells at peak time."
-                insight="Use the curve shape to understand probability adjustment. A curve above identity increases exceedance probabilities; below identity decreases them."
+                insight="Use the calibration-curve shape to understand how raw exceedance probabilities are transformed. A curve above identity increases probabilities; below identity decreases them."
               />
               {!reliability.applied && (
                 <p className="muted" style={{ marginTop: 8 }}>
-                  Calibration was a no-op for this run (no isotonic curves). The
-                  curve collapses to the identity reference line.
+                  No fitted calibration curve was available for this run, so calibrated probabilities match the raw
+                  ensemble probabilities on the identity reference line.
                 </p>
               )}
               <div className="reliability-summary">
@@ -2113,7 +2112,7 @@ export default function RunDetails() {
                       <div key={curve.threshold_m} className="reliability-row">
                         <strong>&gt; {curve.threshold_m.toFixed(2)} m</strong>
                         <span>raw {(curve.raw_mean * 100).toFixed(1)}%</span>
-                        <span>cal {(curve.calibrated_mean * 100).toFixed(1)}%</span>
+                        <span>calibrated {(curve.calibrated_mean * 100).toFixed(1)}%</span>
                         <span className={delta > 0.005 ? "delta-up" : delta < -0.005 ? "delta-down" : "delta-flat"}>
                           {delta >= 0 ? "+" : ""}{(delta * 100).toFixed(1)} pp
                         </span>
@@ -2748,16 +2747,16 @@ export default function RunDetails() {
           </header>
           {cellSeriesLoading && <p className="muted">Loading ensemble trace…</p>}
           {cellSeriesError && (
-            <p className="error">Could not load cell timeseries: {cellSeriesError}</p>
+            <p className="error">Could not load the location time series: {cellSeriesError}</p>
           )}
           {cellSeries && (
             <div className="poi-grid">
               <figure className="chart-figure">
                 <PoiHydrograph series={cellSeries} />
                 <FigureCaption
-                  title="Depth fan"
-                  caption="All member traces with p05-p95 ribbon and p50 median at the selected cell."
-                  insight="This is the local UQ story: member clustering, outliers, and spread through time are visible at one physical point."
+                  title="Local depth forecast range"
+                  caption="All plausible depth traces with the central 90% range and median at the selected location."
+                  insight="This view shows how closely the local forecasts cluster, where outliers occur, and how the range changes through time."
                 />
               </figure>
               <figure className="chart-figure">
@@ -2772,7 +2771,7 @@ export default function RunDetails() {
                 <PoiArrivalHistogram series={cellSeries} />
                 <FigureCaption
                   title="Arrival-time distribution"
-                  caption="Member-wise first-wet timing distribution at the selected cell."
+                  caption="Distribution of the first wet time across plausible forecasts at the selected location."
                   insight="A tight histogram means members agree on onset timing; a broad histogram means local arrival timing is uncertain."
                 />
               </figure>

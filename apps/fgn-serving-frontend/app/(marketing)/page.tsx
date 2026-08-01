@@ -40,7 +40,7 @@ const structuredData = {
   name: "FloodUQ coastal flood probability and uncertainty modeling",
   serviceType: "Domain-specific coastal flood scenario modeling",
   description:
-    "A managed service for comparing coastal flood scenarios, estimating flood probability and timing, and showing how closely plausible forecasts agree.",
+    "A managed service for comparing coastal flood scenarios, estimating calibrated flood probabilities and timing, and showing how closely plausible forecasts agree.",
   url: "https://flooduq.app",
   provider: {
     "@type": "Organization",
@@ -97,7 +97,7 @@ export default function MarketingPage() {
           />
           <div className="hero-scrim" aria-hidden="true" />
           <div className="hero-content">
-            <p className="hero-kicker">Coastal flood scenarios with probability and confidence</p>
+            <p className="hero-kicker">Coastal flood scenarios with probability and uncertainty</p>
             <h1 id="hero-title" className="hero-logo-heading">
               <span className="visually-hidden">FloodUQ</span>
               <Image
@@ -145,9 +145,9 @@ export default function MarketingPage() {
           title={<>A single flood map hides<br /><span>the decision risk.</span></>}
           intro={(
             <p>
-              An expected-depth map shows the average outcome. A fuller picture also shows when flooding may arrive,
-              how often a chosen depth is passed, how widely plausible forecasts differ, and whether the inputs resemble
-              the evidence used to build the model.
+              An expected-depth map shows where water may go and how deep it may become. A fuller picture also shows
+              when water may arrive, the calibrated chance of crossing a selected depth, and where plausible forecasts
+              remain close together or spread apart.
             </p>
           )}
           className="problem-section"
@@ -161,7 +161,7 @@ export default function MarketingPage() {
 
         <Section
           eyebrow="Service outcomes"
-          title={<>See where, when, and how confidently<br /><span>flooding may develop.</span></>}
+          title={<>See where and when flooding may develop,<br /><span>with uncertainty kept visible.</span></>}
           intro={(
             <p>
               Compare water-level and rainfall inputs, inspect individual locations, and trace every result back to the
@@ -190,8 +190,8 @@ export default function MarketingPage() {
           <div className="service-audit-band">
             <MicroLabel>Evidence that stays connected</MicroLabel>
             <p>
-              Review local forecast traces, compare the model's original percentages with checked percentages, and
-              trace each result to its scenario inputs, model version, probability adjustment, and review record.
+              Review local forecast traces, compare raw model probabilities with calibrated probabilities, and trace
+              each result to its scenario inputs, model version, calibration version, and review record.
             </p>
           </div>
         </Section>
@@ -215,13 +215,13 @@ export default function MarketingPage() {
 
         <Section
           id="calibration"
-          eyebrow="Probability checks"
-          title={<>Make forecast percentages<br /><span>easier to interpret.</span></>}
+          eyebrow="Probability calibration"
+          title={<>Turn raw ensemble probabilities into<br /><span>calibrated probabilities.</span></>}
           intro={(
             <p>
-              A forecast group, often called an ensemble, votes on how often water passes a selected depth. Calibration
-              means checking and adjusting that original percentage using detailed simulations that were not used to
-              train the model.
+              A forecast group, often called an ensemble, estimates how often water passes a selected depth. Calibration
+              maps that raw estimate using detailed simulations that were not used to train the forecast model. Its
+              performance is then evaluated on held-out reference cases.
             </p>
           )}
           className="calibration-section"
@@ -251,7 +251,7 @@ export default function MarketingPage() {
           title={<>Fast forecasts are more useful<br /><span>when uncertainty stays visible.</span></>}
           intro={(
             <p>
-              FloodUQ complements detailed physics simulations with fast groups of plausible forecasts, checked
+              FloodUQ complements detailed physics simulations with fast groups of plausible forecasts, calibrated
               probabilities, clear explanations of forecast disagreement, and checks for unfamiliar scenarios.
             </p>
           )}
@@ -278,7 +278,7 @@ export default function MarketingPage() {
         <Section
           id="evidence"
           eyebrow="Portsmouth, Virginia / Deployment proof"
-          title={<>From historical water levels and rainfall to<br /><span>checked flood probabilities.</span></>}
+          title={<>From historical water levels and rainfall to<br /><span>calibrated flood probabilities.</span></>}
           intro={<p>{portsmouthCaseStudy.intro}</p>}
           className="case-study-section"
         >
@@ -341,7 +341,7 @@ export default function MarketingPage() {
               <div className="terminal-bar"><span /><span /><span /><strong>flooduq | managed coastal intelligence</strong></div>
               <div className="terminal-body">
                 <p><span className="terminal-prompt">01</span> submit water-level and rainfall inputs</p>
-                <p className="terminal-output"><Check size={14} /> input quality and similarity to model-building evidence checked</p>
+                <p className="terminal-output"><Check size={14} /> input quality and similarity to model-building evidence confirmed</p>
                 <p><span className="terminal-prompt">02</span> generate flood depth and probability results</p>
                 <p className="terminal-output"><Check size={14} /> depth, chance, timing, affected area, and forecast range ready</p>
                 <p><span className="terminal-prompt">03</span> review forecast agreement and evidence gaps</p>

@@ -12,7 +12,7 @@ export function EvidenceReceipt({
     ["Model version", manifest.provenance.bundleId],
     ["Code version", manifest.provenance.bundleGitCommit],
     ["Forecast-group design", manifest.provenance.ensemblePolicy],
-    ["Probability-adjustment method", manifest.provenance.calibrationMode],
+    ["Calibration method", manifest.provenance.calibrationMode],
     ["Starting-water-depth library", manifest.provenance.initialConditionLibraryId],
     ["Starting-water-depth evidence", manifest.provenance.initialConditionReferenceScope],
     ["Seed", manifest.provenance.seed],

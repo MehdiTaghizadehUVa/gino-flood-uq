@@ -22,6 +22,10 @@ const marketingSources = await Promise.all(
     .map((entry) => readFile(path.join(entry.parentPath, entry.name), "utf8"))
 );
 const allMarketingSource = marketingSources.join("\n");
+const decisionRiskSource = await readFile(
+  path.join(marketingRoot, "components", "DecisionRiskStory.tsx"),
+  "utf8"
+);
 const demoToneSource = (
   await Promise.all(
     [
@@ -106,6 +110,23 @@ for (const internalPhrase of [
   assert.ok(!visibleToneSource.includes(internalPhrase), `Internal implementation language found: ${internalPhrase}`);
 }
 
+for (const retiredCalibrationPhrase of [
+  "checked probability",
+  "checked probabilities",
+  "checked percentage",
+  "checked percentages",
+  "probability adjustment",
+  "probability correction",
+  "probability-correction",
+  "raw model votes",
+  "unadjusted ai forecast group"
+]) {
+  assert.ok(
+    !visibleToneSource.includes(retiredCalibrationPhrase),
+    `Retired calibration wording found: ${retiredCalibrationPhrase}`
+  );
+}
+
 assert.ok(
   pageSource.includes("Discuss a collaboration"),
   "Discuss a collaboration must be the primary contact action.",
@@ -121,12 +142,32 @@ assert.ok(contentSource.includes("Model uncertainty (epistemic)"), "Epistemic un
 assert.ok(contentSource.includes("Outcome variability (aleatoric)"), "Aleatoric uncertainty must retain a plain-language label.");
 assert.match(
   pageSource,
-  /Calibration\s+means checking and adjusting/,
+  /Calibration\s+maps that raw estimate using detailed simulations/,
   "Calibration must be explained at first use."
 );
 assert.ok(
   pageSource.includes("water-level and rainfall inputs"),
   "Forcing must be introduced through its physical inputs."
+);
+const decisionVisualPaths = Array.from(
+  decisionRiskSource.matchAll(/src: "(\/marketing\/portsmouth\/overview\/[^"]+)"/g),
+  (match) => match[1]
+);
+assert.equal(decisionVisualPaths.length, 4, "The decision story must use one visual per decision question.");
+assert.equal(
+  new Set(decisionVisualPaths).size,
+  decisionVisualPaths.length,
+  "Each decision question must use a distinct, aligned visual."
+);
+assert.deepEqual(
+  decisionVisualPaths,
+  [
+    "/marketing/portsmouth/overview/mean_depth.webp",
+    "/marketing/portsmouth/overview/arrival_time.webp",
+    "/marketing/portsmouth/overview/probability.webp",
+    "/marketing/portsmouth/overview/interval_width.webp"
+  ],
+  "Decision visuals must remain ordered as depth, arrival, calibrated probability, and forecast range."
 );
 
 const manifest = JSON.parse(caseStudyManifestSource);

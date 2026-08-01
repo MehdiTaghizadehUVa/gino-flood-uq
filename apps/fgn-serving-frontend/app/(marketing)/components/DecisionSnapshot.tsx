@@ -31,7 +31,7 @@ export function DecisionSnapshot({ products }: { products: { id: string; label: 
               title={displayLabel(product.id, product.label)}
               insight={
                 product.id === "probability"
-                  ? "Shows the share of plausible forecasts that pass the selected depth at each location."
+                  ? "Shows the calibrated probability that water passes the selected depth at each location."
                   : product.id === "meanDepth"
                     ? "Shows the average water depth across the full group of plausible forecasts."
                     : "Shows where plausible depths stay close together or remain widely separated."

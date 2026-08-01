@@ -15,26 +15,20 @@ const VISUALS = [
   {
     src: "/marketing/portsmouth/overview/arrival_time.webp",
     alt: "Forecast arrival-time map from the Portsmouth deployment",
-    label: "Arrival and persistence",
-    insight: "See when water may arrive and how long flooding may persist."
+    label: "Arrival time",
+    insight: "See when water is expected to first pass the selected depth."
   },
   {
     src: "/marketing/portsmouth/overview/probability.webp",
-    alt: "Checked probability that coastal water depth passes a selected level in Portsmouth",
-    label: "Chance depth passes the selected level",
-    insight: "See what share of plausible forecasts pass a depth that matters to the study."
+    alt: "Calibrated probability that coastal water depth passes a selected level in Portsmouth",
+    label: "Calibrated probability of passing the selected depth",
+    insight: "See the calibrated chance that water passes a depth threshold chosen for the study."
   },
   {
     src: "/marketing/portsmouth/overview/interval_width.webp",
     alt: "Spatial forecast interval-width map from the Portsmouth deployment",
     label: "Width of the 90% forecast range",
     insight: "Find where plausible outcomes are tightly grouped or far apart."
-  },
-  {
-    src: "/marketing/portsmouth/overview/probability.webp",
-    alt: "Flood probability product linked to input and model checks in Portsmouth",
-    label: "Input and forecast checks",
-    insight: "Keep the scenario, forecast, probability adjustment, and familiarity check connected."
   }
 ] as const;
 
@@ -67,12 +61,6 @@ export function DecisionRiskStory({ questions }: { questions: readonly NumberedC
             <span>{VISUALS[activeStep]?.label}</span>
             <strong>{VISUALS[activeStep]?.insight}</strong>
           </div>
-          {activeStep === 4 ? (
-            <div className="decision-monitoring-badge">
-              <span>SCENARIO FAMILIARITY CHECK</span>
-              <strong>Inputs and results stay linked to their evidence</strong>
-            </div>
-          ) : null}
         </div>
         <div className="scroll-scene-meter" aria-hidden="true"><span /></div>
       </div>
