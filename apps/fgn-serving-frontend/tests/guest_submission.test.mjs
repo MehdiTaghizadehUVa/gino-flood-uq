@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   GUEST_SUBMISSION_DRAFT_VERSION,
   MAX_GUEST_DRAFT_CSV_CHARS,
+  buildAnalysisQueueSignInPath,
   buildSubmissionSignInPath,
   parseGuestSubmissionDraft,
 } from "../app/(demo)/demo/guestSubmission.mjs";
@@ -12,6 +13,13 @@ test("submission sign-in returns to the configured demo draft", () => {
   assert.equal(
     buildSubmissionSignInPath(),
     "/oauth2/start?rd=%2Fdemo%3Fworkspace%3Dnew%26resume%3Dsubmit",
+  );
+});
+
+test("analysis queue sign-in returns directly to private run history", () => {
+  assert.equal(
+    buildAnalysisQueueSignInPath(),
+    "/oauth2/start?rd=%2Fdemo%3Fworkspace%3Druns",
   );
 });
 

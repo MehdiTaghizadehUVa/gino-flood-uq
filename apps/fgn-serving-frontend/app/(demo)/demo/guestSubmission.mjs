@@ -9,6 +9,13 @@ export function buildSubmissionSignInPath(
   return `/oauth2/start?${params.toString()}`;
 }
 
+export function buildAnalysisQueueSignInPath(
+  returnPath = "/demo?workspace=runs",
+) {
+  const params = new URLSearchParams({ rd: returnPath });
+  return `/oauth2/start?${params.toString()}`;
+}
+
 export function parseGuestSubmissionDraft(raw) {
   if (typeof raw !== "string" || !raw) return null;
   try {

@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Activity, ArrowRight, Cpu, Database, ListChecks, RefreshCw, ShieldCheck, Waves } from "lucide-react";
+import { Activity, ArrowRight, Cpu, Database, ListChecks, LogIn, RefreshCw, ShieldCheck, Waves } from "lucide-react";
 import { AppShell } from "../../components/AppShell";
 import { MetricCard } from "../../components/MetricCard";
 import { PageHeader } from "../../components/PageHeader";
@@ -11,6 +11,7 @@ import {
   GUEST_SUBMISSION_DRAFT_KEY,
   GUEST_SUBMISSION_DRAFT_VERSION,
   MAX_GUEST_DRAFT_CSV_CHARS,
+  buildAnalysisQueueSignInPath,
   buildSubmissionSignInPath,
   parseGuestSubmissionDraft,
 } from "./guestSubmission.mjs";
@@ -127,6 +128,7 @@ type HomeWorkspace = "new" | "runs";
 type AuthState = "checking" | "guest" | "authenticated";
 
 const SUBMISSION_SIGN_IN_PATH = buildSubmissionSignInPath();
+const ANALYSIS_QUEUE_SIGN_IN_PATH = buildAnalysisQueueSignInPath();
 
 const DESCRIPTOR_LABELS: Record<string, string> = {
   stage_max: "Peak coastal stage",
@@ -2314,11 +2316,15 @@ export default function Page() {
             })}
             {authState === "guest" ? (
               <li className="empty guest-queue-empty">
-                <strong>Your private analysis queue appears after Google sign-in.</strong>
+                <strong>Sign in to review your analyses.</strong>
                 <span>
-                  Configure and validate scenarios without signing in. Authentication begins only when you launch
-                  shared compute.
+                  Access your private queue, open completed results, and download previous artifacts without
+                  configuring a new scenario.
                 </span>
+                <a className="button primary guest-queue-signin" href={ANALYSIS_QUEUE_SIGN_IN_PATH}>
+                  <LogIn size={15} aria-hidden="true" />
+                  Sign in to view analyses
+                </a>
               </li>
             ) : runs.length === 0 ? (
               <li className="empty">No analyses yet. Load a representative scenario or upload a scenario CSV to begin.</li>
@@ -3294,6 +3300,7 @@ export default function Page() {
           justify-items: center;
         }
         .guest-queue-empty strong { color: var(--text); }
+        .guest-queue-signin { gap: 8px; margin-top: 4px; }
         .comparison-tabs { display: flex; gap: 6px; overflow-x: auto; padding: 12px 0 4px; scrollbar-width: thin; }
         .comparison-tabs button {
           white-space: nowrap;
