@@ -33,6 +33,14 @@ flood: &FLOOD
       k_validation: 5
       eval_member_chunk_size: 16
       k_eval: 15
+      # Dispersion pinning (Phase C).  Supervises the WITHIN-PARTICLE channel
+      # against the HEC-RAS reference dispersion E|H-H|, which is information
+      # the pooled proper score cannot see.  Weight 0 disables it and leaves
+      # the objective exactly as before.  Measured headroom: within-particle
+      # E|X1-X2| is 0.1382 m against a 0.1038 m target (shrink ~25%), freeing
+      # 0.0885 m of spread against the ~0.0618 m the epistemic channel needs.
+      dispersion_penalty_weight: 0.0
+      reference_dispersion_path: "/scratch/jrj6wm/GINO_Model/alr_fgno_pilot/phase_c/reference_dispersion_train.pt"
       stage1_checkpoint_dir: "/sfs/gpfs/tardis/home/jrj6wm/GINO_Model/neuraloperator_no_physics_git_main/scripts/runtime/coastal_full_train_wvlike250/coastal_trial0035_wvlike_bs128_r48_det_a100_lr5e4_h128_uqgroup_20260407_110945_3af9ccf/checkpoint"
 
   distributed:

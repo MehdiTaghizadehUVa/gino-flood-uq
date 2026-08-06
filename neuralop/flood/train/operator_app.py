@@ -22,6 +22,11 @@ from neuralop.flood.utils.checkpoint_compat import (
     read_normalizer_fingerprint_sidecar,
     write_normalizer_fingerprint_sidecar,
 )
+from neuralop.flood.data.reference_dispersion import (
+    ReferenceDispersionTable,
+    load_reference_dispersion_artifact,
+    validate_reference_dispersion_artifact,
+)
 from neuralop.flood.data.structural_dry import (
     build_structural_dry_artifact,
     load_structural_dry_artifact,
@@ -1034,6 +1039,35 @@ def main():
             fgn_ar_state_update=fgn_ar_state_update,
         )
         if alr_enabled:
+            # Dispersion pinning supervises the aleatory channel against the
+            # HEC-RAS references, which is information the pooled score cannot
+            # see.  Disabled by default so the objective is unchanged.
+            alr_dispersion_weight = float(
+                _cfg_get(alr_training_cfg, "dispersion_penalty_weight", 0.0)
+            )
+            alr_reference_dispersion = None
+            if alr_dispersion_weight > 0.0:
+                dispersion_path = _cfg_get(
+                    alr_training_cfg, "reference_dispersion_path", None
+                )
+                if not dispersion_path:
+                    raise ValueError(
+                        "training.anchored_low_rank.dispersion_penalty_weight > 0 "
+                        "requires training.anchored_low_rank.reference_dispersion_path."
+                    )
+                dispersion_artifact = load_reference_dispersion_artifact(dispersion_path)
+                dispersion_summary = validate_reference_dispersion_artifact(
+                    dispersion_artifact,
+                    expected_family_ids=alr_family_split.train_family_ids,
+                )
+                alr_reference_dispersion = ReferenceDispersionTable.from_artifact(
+                    dispersion_artifact
+                )
+                logger.info(
+                    "ALR dispersion pinning enabled (weight=%g): %s",
+                    alr_dispersion_weight,
+                    dispersion_summary,
+                )
             trainer = AnchoredLowRankFGNTrainer(
                 num_particles=int(_cfg_get(alr_model_cfg, "num_particles", 4)),
                 family_bootstrap=alr_bootstrap,
@@ -1061,6 +1095,8 @@ def main():
                     )
                 ),
                 target_normalizer=normalizers.get("target"),
+                reference_dispersion=alr_reference_dispersion,
+                dispersion_penalty_weight=alr_dispersion_weight,
                 **trainer_kwargs,
             )
         else:

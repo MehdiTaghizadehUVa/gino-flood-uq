@@ -16,6 +16,11 @@ from neuralop.flood.losses import FloodMaskedCRPSLoss, masked_rmse
 from neuralop.flood.train.fgn import FGNTrainer
 from neuralop.flood.utils.runtime_core import parse_family_id_from_run_id
 from neuralop.losses.probabilistic_losses import CRPSLoss
+from neuralop.flood.data.reference_dispersion import ReferenceDispersionTable
+from neuralop.flood.train.dispersion_pinning import (
+    DEFAULT_WET_THRESHOLDS,
+    dispersion_pinning_penalty,
+)
 
 
 @dataclass(frozen=True)
@@ -378,6 +383,9 @@ class AnchoredLowRankFGNTrainer(FGNTrainer):
         rmse_noninferiority_margin: float = 0.001,
         target_normalizer=None,
         water_depth_index: int = 0,
+        reference_dispersion: ReferenceDispersionTable | None = None,
+        dispersion_penalty_weight: float = 0.0,
+        dispersion_wet_thresholds: tuple[float, float] = DEFAULT_WET_THRESHOLDS,
         **kwargs,
     ) -> None:
         super().__init__(**kwargs)
@@ -409,6 +417,24 @@ class AnchoredLowRankFGNTrainer(FGNTrainer):
             )
         self.target_normalizer = target_normalizer
         self.water_depth_index = int(water_depth_index)
+        self.reference_dispersion = reference_dispersion
+        self.dispersion_penalty_weight = float(dispersion_penalty_weight)
+        self.dispersion_wet_thresholds = (
+            float(dispersion_wet_thresholds[0]),
+            float(dispersion_wet_thresholds[1]),
+        )
+        if self.dispersion_penalty_weight < 0.0:
+            raise ValueError("dispersion_penalty_weight must be nonnegative.")
+        if self.dispersion_penalty_weight > 0.0:
+            if self.reference_dispersion is None:
+                raise ValueError(
+                    "dispersion_penalty_weight > 0 requires a reference_dispersion table."
+                )
+            if self.target_normalizer is None:
+                raise ValueError(
+                    "dispersion pinning compares physical depths and requires a "
+                    "target_normalizer to invert the training normalization."
+                )
         self.rmse_noninferiority_margin = float(rmse_noninferiority_margin)
         if self.rmse_noninferiority_margin < 0:
             raise ValueError("RMSE non-inferiority margin must be nonnegative.")
@@ -642,6 +668,46 @@ class AnchoredLowRankFGNTrainer(FGNTrainer):
     def _anchor_penalty(self):
         return _unwrap_model(self.model).anchored_low_rank_offset_penalty()
 
+    def _to_physical(self, tensor: torch.Tensor) -> torch.Tensor:
+        """Invert the training normalization; dispersion targets are in metres."""
+        if tensor.ndim == 5:
+            p, k, b, n, c = tensor.shape
+            flat = tensor.reshape(p * k * b, n, c)
+            return self.target_normalizer.inverse_transform(flat).reshape(p, k, b, n, c)
+        return self.target_normalizer.inverse_transform(tensor)
+
+    def _dispersion_penalty(self, predictions, target, sample, *, step: int = 0):
+        """Pin the within-particle channel to the HEC-RAS reference dispersion.
+
+        Returns ``None`` when disabled, so the loss graph is untouched and a
+        weight of zero reproduces the unpinned objective exactly.
+        """
+        if self.dispersion_penalty_weight <= 0.0 or self.reference_dispersion is None:
+            return None
+        time_index = sample.get("time_index")
+        if time_index is None:
+            raise KeyError(
+                "dispersion pinning requires time_index metadata on the batch."
+            )
+        reference = self.reference_dispersion.lookup(
+            _batch_family_ids(sample), time_index, step=step
+        )
+        return dispersion_pinning_penalty(
+            self._to_physical(predictions),
+            self._to_physical(target),
+            reference,
+            structural_dry_mask=sample.get("structural_dry_mask"),
+            wet_thresholds=self.dispersion_wet_thresholds,
+            channel=self.water_depth_index,
+        )
+
+    @staticmethod
+    def _dispersion_metrics(result, prefix: str = "alr_dispersion") -> dict:
+        metrics = {f"{prefix}_penalty": result.penalty.detach()}
+        for name, value in result.per_stratum_mean_deviation_m.items():
+            metrics[f"{prefix}_bias_{name}_m"] = value
+        return metrics
+
     @staticmethod
     def _particle_correlation_mean(predictions):
         particle_mean = predictions.mean(dim=1).reshape(predictions.shape[0], -1)
@@ -683,12 +749,17 @@ class AnchoredLowRankFGNTrainer(FGNTrainer):
         result = self._particle_loss(predictions, sample["y"], sample, training_loss)
         penalty = self._anchor_penalty()
         loss = result.mean + self.anchor_penalty_weight * penalty
+        dispersion = self._dispersion_penalty(predictions, sample["y"], sample)
+        if dispersion is not None:
+            loss = loss + self.dispersion_penalty_weight * dispersion.penalty
         metrics = {
             f"alr_particle_crps_{particle}": value.detach()
             for particle, value in enumerate(result.per_particle)
         }
         metrics["alr_anchor_penalty"] = penalty.detach()
         metrics["alr_anchor_displacement_norm"] = penalty.detach().sqrt()
+        if dispersion is not None:
+            metrics.update(self._dispersion_metrics(dispersion))
         if self.rel_l2_loss_fn is not None:
             with torch.no_grad():
                 metrics["rel_l2"] = self.rel_l2_loss_fn(
@@ -729,6 +800,7 @@ class AnchoredLowRankFGNTrainer(FGNTrainer):
         window_loss = None
         total_loss_scalar = 0.0
         last_result = None
+        last_dispersion = None
         last_rel_l2 = None
         penalty = None
 
@@ -743,6 +815,12 @@ class AnchoredLowRankFGNTrainer(FGNTrainer):
             result = self._particle_loss(predictions, target, sample, training_loss)
             penalty = self._anchor_penalty()
             step_loss = result.mean + self.anchor_penalty_weight * penalty
+            dispersion = self._dispersion_penalty(
+                predictions, target, sample, step=step
+            )
+            if dispersion is not None:
+                step_loss = step_loss + self.dispersion_penalty_weight * dispersion.penalty
+                last_dispersion = dispersion
             last_result = result
             total_loss_scalar += float(step_loss.detach())
             if gradient_mode == "truncated":
@@ -790,6 +868,8 @@ class AnchoredLowRankFGNTrainer(FGNTrainer):
         }
         metrics["alr_anchor_penalty"] = penalty.detach()
         metrics["alr_anchor_displacement_norm"] = penalty.detach().sqrt()
+        if last_dispersion is not None:
+            metrics.update(self._dispersion_metrics(last_dispersion))
         if last_rel_l2 is not None:
             metrics["rel_l2"] = last_rel_l2
         if gradient_mode == "truncated":
