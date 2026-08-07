@@ -121,8 +121,16 @@ def render_eval_config(base, output, run_dir, checkpoint_dir, dataset, event_id)
     flood["rollout"]["forecast_artifact_dir"] = str(
         run_dir / "forecast_artifacts" / dataset
     )
-    flood["rollout"]["n_ensemble_samples"] = 60
-    flood["rollout"]["alr_aleatory_samples"] = 15
+    # Derive the member layout from the checkpoint's own configuration instead
+    # of hardcoding the 4x15 pilot shape, so M != 4 evaluates correctly.
+    alr_particles = int(flood["model"]["anchored_low_rank"].get("num_particles", 4))
+    alr_aleatory = int(
+        flood.get("training", {})
+        .get("anchored_low_rank", {})
+        .get("k_eval", 15)
+    )
+    flood["rollout"]["n_ensemble_samples"] = alr_particles * alr_aleatory
+    flood["rollout"]["alr_aleatory_samples"] = alr_aleatory
     flood["rollout"]["write_visualizations"] = False
     flood["rollout"]["forward_timing_path"] = str(
         event_out / "forward_only_timing.json"
@@ -137,9 +145,9 @@ def render_eval_config(base, output, run_dir, checkpoint_dir, dataset, event_id)
         "dataset": dataset,
         "event_id": event_id,
         "checkpoint_dir": str(checkpoint_dir),
-        "members": 60,
-        "particles": 4,
-        "aleatory_per_particle": 15,
+        "members": alr_particles * alr_aleatory,
+        "particles": alr_particles,
+        "aleatory_per_particle": alr_aleatory,
     }
     _dump_compatible(payload, output)
     return output
