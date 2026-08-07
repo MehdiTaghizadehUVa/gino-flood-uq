@@ -209,9 +209,29 @@ def audit_event(path: Path) -> dict:
     crps_flat = float(np.mean(np.concatenate(flat_acc)))
     crps_crossed = float(np.mean(np.concatenate(crossed_acc)))
 
+    # Nested decomposition, on the same active mask and the same RMS reduction
+    # as sigma_ref above, so gate GC compares like with like.
+    particle_mean = nested.mean(axis=1)                       # [M, T, Nv]
+    sigma_epi = float(np.sqrt(np.mean(
+        particle_mean.var(axis=0, ddof=1)[..., active]))) if M > 1 else 0.0
+    sigma_ale = float(np.sqrt(np.mean(
+        nested.var(axis=1, ddof=1).mean(axis=0)[..., active])))
+    rmse_m = float(np.sqrt(np.mean(
+        (pred.mean(axis=0)[..., active] - ref.mean(axis=0)[..., active]) ** 2)))
+
     return {
         "event": event,
         "M": M, "K": K, "R": int(ref.shape[0]), "T": T, "n_active_cells": int(active.sum()),
+        "decomposition": {
+            "epistemic_spread_m": sigma_epi,
+            "aleatory_spread_m": sigma_ale,
+            "aleatory_over_reference": sigma_ale / rms_ref if rms_ref > 0 else float("nan"),
+            "epistemic_variance_fraction": (
+                sigma_epi ** 2 / (sigma_epi ** 2 + sigma_ale ** 2)
+                if (sigma_epi ** 2 + sigma_ale ** 2) > 0 else float("nan")
+            ),
+            "rmse_m": rmse_m,
+        },
         "dispersion": {
             "sigma_pred_m": rms_pred,
             "sigma_ref_m": rms_ref,
@@ -266,6 +286,14 @@ def main() -> int:
             "excess_sigma_m_mean": agg(lambda r: r["dispersion"]["excess_sigma_m"]),
             "excess_vs_deep_ensemble_ratio_mean": agg(
                 lambda r: r["dispersion"]["excess_vs_deep_ensemble_ratio"]),
+        },
+        "decomposition": {
+            "epistemic_spread_m": agg(lambda r: r["decomposition"]["epistemic_spread_m"]),
+            "aleatory_spread_m": agg(lambda r: r["decomposition"]["aleatory_spread_m"]),
+            "aleatory_over_reference": agg(lambda r: r["decomposition"]["aleatory_over_reference"]),
+            "epistemic_variance_fraction": agg(
+                lambda r: r["decomposition"]["epistemic_variance_fraction"]),
+            "rmse_m": agg(lambda r: r["decomposition"]["rmse_m"]),
         },
         "coverage_all_cells": {k: agg(lambda r, k=k: r["coverage_all_cells"][k]) for k in ("50", "80", "90", "95")},
         "coverage_wettable": {k: agg(lambda r, k=k: r["coverage_wettable"][k]) for k in ("50", "80", "90", "95")},

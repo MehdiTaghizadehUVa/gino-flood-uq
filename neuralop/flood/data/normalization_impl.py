@@ -605,8 +605,11 @@ class NormalizedDatasetOnTheFly(Dataset):
         if "structural_dry_mask" in sample and sample["structural_dry_mask"] is not None:
             out["structural_dry_mask"] = sample["structural_dry_mask"]
         # Family-aware research trainers need stable identities after shuffling.
-        # These metadata values are not normalized or moved to the accelerator.
-        for key in ("run_id", "family_id"):
+        # time_index carries the raw HDF frame number, which dispersion pinning
+        # uses to look up the matching reference dispersion (and, for AR steps,
+        # time_index + step).  These metadata values are not normalized or moved
+        # to the accelerator.
+        for key in ("run_id", "family_id", "time_index"):
             if key in sample and sample[key] is not None:
                 out[key] = sample[key]
         # Latent queries must be in the same (normalized) coordinate system as geometry for GNO.

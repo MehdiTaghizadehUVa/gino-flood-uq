@@ -339,3 +339,21 @@ def test_validate_rejects_malformed_artifacts():
         validate_reference_dispersion_artifact({**good, "cell_count": 9})
     with pytest.raises(ValueError, match="missing 1 required families"):
         validate_reference_dispersion_artifact(good, expected_family_ids=["a", "b", "c"])
+
+
+def test_normalized_dataset_passes_time_index_through():
+    """Dispersion pinning is unusable if time_index is dropped by the wrapper.
+
+    NormalizedDatasetOnTheFly whitelists the metadata keys it forwards; the
+    lambda-probe run failed at the first batch because time_index was not on
+    that list, so the lookup had no frame number to index.
+    """
+    import inspect
+
+    from neuralop.flood.data.normalization_impl import NormalizedDatasetOnTheFly
+
+    source = inspect.getsource(NormalizedDatasetOnTheFly.__getitem__)
+    assert '"time_index"' in source, (
+        "NormalizedDatasetOnTheFly must forward time_index; dispersion pinning "
+        "looks up the reference by (family, time_index + ar_step)."
+    )
