@@ -44,6 +44,30 @@ def _load(path: Path) -> dict:
     return payload.get("summary", payload)
 
 
+def contraction_ci_upper(contraction: dict) -> float:
+    """Upper bound of the paired n150-minus-n50 epistemic-spread CI.
+
+    Two schemas exist on disk for the same quantity -- difference_ci95 in the
+    earlier analysis and paired_difference_ci95 in the later one.  Accept
+    both and raise on anything else: silently returning "unmeasured" for a
+    contraction file that WAS supplied would turn a real fail into an
+    indeterminate, which is the one direction this gate must never round.
+    """
+    epi = contraction.get("summary", {}).get("epistemic_spread_m")
+    if not isinstance(epi, dict):
+        raise KeyError(
+            "contraction artifact has no summary.epistemic_spread_m block; "
+            f"top-level keys were {sorted(contraction)}"
+        )
+    for key in ("paired_difference_ci95", "difference_ci95"):
+        if key in epi:
+            return float(epi[key][1])
+    raise KeyError(
+        "contraction artifact has no recognised epistemic difference CI "
+        f"(looked for paired_difference_ci95/difference_ci95, found {sorted(epi)})"
+    )
+
+
 def evaluate(baseline: dict, candidate: dict, contraction: dict | None) -> dict:
     b_dec, c_dec = baseline["decomposition"], candidate["decomposition"]
     b_crps = baseline["crps"]["crossed_fair_crps_m"]
@@ -103,12 +127,12 @@ def evaluate(baseline: dict, candidate: dict, contraction: dict | None) -> dict:
             "passed": None,
         }
     else:
-        upper = contraction.get("ci95_upper", contraction.get("ci_upper"))
         contraction_check = {
             "name": "contraction_negative", "detail": "n50 -> n150 epistemic spread",
-            "value": upper, "threshold": "< 0 (CI upper bound)",
-            "baseline": None, "passed": (upper is not None and upper < 0.0),
+            "value": contraction_ci_upper(contraction), "threshold": "< 0 (CI upper bound)",
+            "baseline": None, "passed": None,
         }
+        contraction_check["passed"] = contraction_check["value"] < 0.0
     checks.append(contraction_check)
 
     core = [c for c in checks if c["name"] != "contraction_negative"]
