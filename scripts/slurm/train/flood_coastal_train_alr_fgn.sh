@@ -23,6 +23,21 @@ git diff --quiet && git diff --cached --quiet || {
 test -f "${ALR_CONFIG_PATH}"
 test -f "${CONTAINER}"
 mkdir -p "${RUN_DIR}"
+# A queued job runs from the live working tree, so it executes whatever HEAD is
+# when it STARTS -- not the commit it was submitted at.  Any commit landing
+# during a long Priority wait silently changes the experiment.  Export
+# ALR_EXPECTED_COMMIT at submission to pin it.
+if [ -n "${ALR_EXPECTED_COMMIT:-}" ]; then
+  ACTUAL_COMMIT="$(git rev-parse HEAD)"
+  case "${ACTUAL_COMMIT}" in
+    "${ALR_EXPECTED_COMMIT}"*) : ;;
+    *)
+      echo "FATAL: expected commit ${ALR_EXPECTED_COMMIT} but HEAD is ${ACTUAL_COMMIT}." >&2
+      echo "The repository moved while this job was queued; refusing to run." >&2
+      exit 78
+      ;;
+  esac
+fi
 git rev-parse HEAD > "${RUN_DIR}/git_head.txt"
 git status --short > "${RUN_DIR}/git_status_at_launch.txt"
 cp "${ALR_CONFIG_PATH}" "${RUN_DIR}/effective_submission_config.yaml"
