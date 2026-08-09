@@ -26,12 +26,18 @@ Design notes
 * At K=2 the model-side estimator ``|X_1 - X_2|`` is *unbiased* for E|X - X'|;
   no variance estimator is involved, which matters because a 1-dof variance
   estimate would be hopeless.
-* The penalty aggregates the signed deviation over a stratum and squares
-  ONCE, rather than squaring per cell.  Squaring per cell would penalise the
-  K=2 sampling noise (which is large and irreducible) instead of the dispersion
-  mismatch.  The deliberate cost is that equal and opposite errors *within one
-  stratum* cancel; stratifying by lead time and wetness regime is what keeps
-  that cancellation from hiding real structure.
+* Within a stratum the signed deviation is aggregated over CELLS and squared
+  once, rather than squared per cell.  Squaring per cell would penalise the
+  K=2 sampling noise (large and irreducible) instead of the dispersion
+  mismatch.  The deliberate cost is that equal and opposite errors across cells
+  in one stratum cancel; the strata are what keep that from hiding structure.
+* The square is taken PER PARTICLE and then averaged over particles.  Pooling
+  the particle axis before squaring would let one particle's over-dispersion
+  cancel another's under-dispersion, so the objective would not actually pin
+  each particle's aleatory law -- and it would fail exactly when the method
+  starts working and the particles diverge.  The cell-axis argument above does
+  not extend to the particle axis: averaging over cells has already removed the
+  K=2 noise, so squaring per particle costs nothing.
 * Penalty units are m^2.  With CRPS ~0.02 m and a starting gap of ~0.034 m, the
   raw penalty is ~1.2e-3, so lambda in the low single digits puts it at the
   intended 10-20% of total loss.
@@ -86,6 +92,7 @@ def dispersion_pinning_penalty(
     structural_dry_mask: torch.Tensor | None = None,
     wet_thresholds: tuple[float, float] = DEFAULT_WET_THRESHOLDS,
     channel: int = 0,
+    stratify_by: torch.Tensor | None = None,
 ) -> DispersionPenaltyResult:
     """Squared per-stratum mismatch between model and reference dispersion.
 
@@ -110,7 +117,11 @@ def dispersion_pinning_penalty(
     ref = reference_dispersion.to(device=x.device, dtype=x.dtype).unsqueeze(0)
     deviation = model_dispersion - ref                              # [M, B, N]
 
-    y = target[..., channel]                                        # [B, N]
+    # Strata come from the reference-ensemble MEAN when it is supplied, which is
+    # what the offline calibration uses.  Falling back to the single sampled
+    # target member would stratify on a noisy draw, so the penalty being tuned
+    # would not be the penalty being optimised.
+    y = target[..., channel] if stratify_by is None else stratify_by
     valid = torch.isfinite(y)
     dry = _normalise_mask(structural_dry_mask, (b, n))
     if dry is not None:
@@ -127,14 +138,16 @@ def dispersion_pinning_penalty(
     means: dict[str, torch.Tensor] = {}
     counts: dict[str, int] = {}
     for name, selector in strata.items():
-        weight = (selector & valid).unsqueeze(0).to(deviation.dtype).expand_as(deviation)
-        count = weight.sum()
-        # Aggregate first, then square: squaring per cell would penalise K=2
-        # sampling noise rather than the dispersion mismatch.
-        mean_deviation = (deviation * weight).sum() / count.clamp_min(1.0)
-        penalty = penalty + mean_deviation.square()
-        means[name] = mean_deviation.detach()
-        counts[name] = int(count.detach().item())
+        cell_weight = (selector & valid).to(deviation.dtype)              # [B, N]
+        weight = cell_weight.unsqueeze(0).expand_as(deviation)            # [M, B, N]
+        # Aggregate over CELLS within each particle, square PER PARTICLE, then
+        # average over particles.  Pooling particles before squaring would let
+        # them cancel each other and would not pin any particle's aleatory law.
+        per_particle_count = weight.sum(dim=(1, 2))                       # [M]
+        per_particle_mean = (deviation * weight).sum(dim=(1, 2)) / per_particle_count.clamp_min(1.0)
+        penalty = penalty + per_particle_mean.square().mean()
+        means[name] = per_particle_mean.mean().detach()
+        counts[name] = int(cell_weight.sum().detach().item())
 
     return DispersionPenaltyResult(
         penalty=penalty,

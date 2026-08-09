@@ -191,13 +191,48 @@ def test_lookup_applies_scale():
     assert torch.allclose(scaled, _table(1.0).lookup(["famA"], torch.tensor([0])) * 0.5)
 
 
-def test_default_scale_corrects_train_to_test_dispersion():
-    t = ReferenceDispersionTable(
-        family_ids=["f"], dispersion=torch.ones(1, 2, 2)
-    )
-    assert float(t.lookup(["f"], torch.tensor([0]))[0, 0]) == pytest.approx(
-        1.0 / TRAIN_OVER_TEST_DISPERSION, rel=1e-6
-    )
+def test_default_scale_does_not_rescale_toward_the_test_population():
+    """Regression guard against reintroducing target leakage.
+
+    An earlier version divided the training target by TRAIN_OVER_TEST_DISPERSION
+    so the pinned scale matched the held-out population.  That lets a property
+    of the evaluation set set a training target, and is wrong on its own terms:
+    the aleatory channel should reproduce the law of the data it models, which
+    for a training family is that family's own reference dispersion.
+    """
+    t = ReferenceDispersionTable(family_ids=["f"], dispersion=torch.ones(1, 2, 2))
+    assert float(t.lookup(["f"], torch.tensor([0]))[0, 0]) == pytest.approx(1.0)
+    assert TRAIN_OVER_TEST_DISPERSION == pytest.approx(1.070), "A5 measurement"
+
+
+def test_particle_errors_do_not_cancel_across_particles():
+    """One particle over-dispersed and another under must BOTH be penalised.
+
+    Pooling the particle axis before squaring returned zero here, so the
+    objective did not pin any individual particle's aleatory law -- and would
+    have failed exactly when the method started working and particles diverged.
+    """
+    ref = torch.full((1, 4), 0.10)
+    depth = torch.full((1, 4), 0.5)
+    d = 0.03
+    preds = torch.stack([
+        torch.stack([-(ref + d) / 2, (ref + d) / 2], dim=0),
+        torch.stack([-(ref - d) / 2, (ref - d) / 2], dim=0),
+    ], dim=0).unsqueeze(-1)
+    out = dispersion_pinning_penalty(preds, depth.unsqueeze(-1), ref)
+    assert float(out.penalty) == pytest.approx(d ** 2, rel=1e-4)
+
+
+def test_strata_can_be_taken_from_the_reference_mean():
+    """Calibration stratifies on the reference mean; training must match."""
+    ref = torch.full((1, 6), 0.10)
+    noisy_target = torch.tensor([[5.0, 5.0, 5.0, 5.0, 5.0, 5.0]])   # all 'deep'
+    reference_mean = torch.tensor([[0.0, 0.0, 0.05, 0.05, 0.5, 0.5]])
+    preds, target = _fixture(ref + 0.02, ref, noisy_target)
+    out = dispersion_pinning_penalty(preds, target, ref, stratify_by=reference_mean)
+    assert out.per_stratum_count == {"dry": 2, "front": 2, "deep": 2}
+    # three populated strata, each off by 0.02
+    assert float(out.penalty) == pytest.approx(3 * 0.02 ** 2, rel=1e-4)
 
 
 def test_lookup_rejects_unknown_family_and_out_of_range_time():

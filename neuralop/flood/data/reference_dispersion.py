@@ -42,9 +42,17 @@ SCHEMA = "flood_reference_dispersion_v1"
 # 0.8862 is wrong by 9% on these skewed, non-negative depths -- do not use it.
 SIGMA_OVER_MEAN_ABS_DIFFERENCE = 0.9705
 
-# Training families carry 1.070x the held-out dispersion (1.087 on wet cells),
-# so a target fitted in-sample lands high at test time.  Applied by default so
-# the pinning target is expressed on the scale the model is finally scored on.
+# Measured in probe A5: training families carry 1.070x the held-out dispersion
+# (1.087 on wet cells).  Recorded as an observation ONLY -- it is deliberately
+# NOT applied by default.
+#
+# An earlier version divided the training target by this ratio so the pinned
+# scale matched the held-out scale.  That is target leakage: it lets a property
+# of the evaluation set determine a training target.  It is also wrong on its
+# own terms -- the aleatory channel should reproduce the aleatory law of the
+# data it is modelling, which for training families is their own dispersion.
+# Any run that needs the held-out scale must pass `scale` explicitly and cannot
+# then be reported as held-out evidence.
 TRAIN_OVER_TEST_DISPERSION = 1.070
 
 
@@ -106,8 +114,10 @@ def validate_reference_dispersion_artifact(
 class ReferenceDispersionTable:
     """Family/time-indexed lookup of ``E|H - H'|``, held on CPU.
 
-    ``scale`` divides the stored (in-sample) dispersion so the pinning target is
-    expressed on the held-out scale; see ``TRAIN_OVER_TEST_DISPERSION``.
+    ``scale`` multiplies the stored dispersion and defaults to 1.0: the target
+    is each training family's OWN reference dispersion.  Rescaling toward the
+    held-out population would be target leakage -- see the note on
+    ``TRAIN_OVER_TEST_DISPERSION``.
     """
 
     def __init__(
@@ -115,7 +125,7 @@ class ReferenceDispersionTable:
         *,
         family_ids: Sequence[str],
         dispersion: torch.Tensor,
-        scale: float = 1.0 / TRAIN_OVER_TEST_DISPERSION,
+        scale: float = 1.0,
     ) -> None:
         self.family_ids = [str(v) for v in family_ids]
         self._index = {f: i for i, f in enumerate(self.family_ids)}
