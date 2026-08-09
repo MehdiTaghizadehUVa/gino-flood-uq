@@ -125,18 +125,32 @@ class ReferenceDispersionTable:
         *,
         family_ids: Sequence[str],
         dispersion: torch.Tensor,
+        reference_mean: torch.Tensor | None = None,
         scale: float = 1.0,
     ) -> None:
         self.family_ids = [str(v) for v in family_ids]
         self._index = {f: i for i, f in enumerate(self.family_ids)}
         self.dispersion = dispersion.to(dtype=torch.float32, device="cpu")
+        # The reference mean defines the wetness strata.  Training must use the
+        # same stratification as the offline calibration, otherwise the penalty
+        # being tuned is not the penalty being optimised; stratifying on the
+        # single sampled target member would use a noisy draw instead.
+        self.reference_mean = (
+            None if reference_mean is None
+            else reference_mean.to(dtype=torch.float32, device="cpu")
+        )
         self.scale = float(scale)
         self.n_time = int(self.dispersion.shape[1])
         self.cell_count = int(self.dispersion.shape[2])
 
     @classmethod
     def from_artifact(cls, artifact: dict[str, Any], **kwargs) -> "ReferenceDispersionTable":
-        return cls(family_ids=artifact["family_ids"], dispersion=artifact["dispersion"], **kwargs)
+        return cls(
+            family_ids=artifact["family_ids"],
+            dispersion=artifact["dispersion"],
+            reference_mean=artifact.get("reference_mean"),
+            **kwargs,
+        )
 
     def lookup(
         self,
@@ -151,6 +165,10 @@ class ReferenceDispersionTable:
         (``__getitem__`` reads ``wd[n_history + s]`` from a slice starting at
         ``target_t - n_history``), so ``step`` indexes AR rollout steps directly.
         """
+        rows, times = self._rows_and_times(family_ids, time_index, step)
+        return self.dispersion[rows, times] * self.scale
+
+    def _rows_and_times(self, family_ids, time_index, step):
         try:
             rows = torch.tensor([self._index[str(v)] for v in family_ids], dtype=torch.long)
         except KeyError as exc:
@@ -164,4 +182,17 @@ class ReferenceDispersionTable:
         if torch.any(times < 0) or torch.any(times >= self.n_time):
             bad = times[(times < 0) | (times >= self.n_time)][:3].tolist()
             raise IndexError(f"time index out of range [0, {self.n_time}) for this table: {bad}")
-        return self.dispersion[rows, times] * self.scale
+        return rows, times
+
+    def lookup_reference_mean(
+        self,
+        family_ids: Sequence[str],
+        time_index: torch.Tensor | Sequence[int],
+        *,
+        step: int = 0,
+    ) -> torch.Tensor | None:
+        """``[B, Nv]`` reference-ensemble mean, for wetness stratification."""
+        if self.reference_mean is None:
+            return None
+        rows, times = self._rows_and_times(family_ids, time_index, step)
+        return self.reference_mean[rows, times]

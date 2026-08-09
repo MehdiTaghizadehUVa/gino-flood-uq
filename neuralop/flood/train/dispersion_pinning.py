@@ -38,9 +38,12 @@ Design notes
   starts working and the particles diverge.  The cell-axis argument above does
   not extend to the particle axis: averaging over cells has already removed the
   K=2 noise, so squaring per particle costs nothing.
-* Penalty units are m^2.  With CRPS ~0.02 m and a starting gap of ~0.034 m, the
-  raw penalty is ~1.2e-3, so lambda in the low single digits puts it at the
-  intended 10-20% of total loss.
+* Penalty units are m^2.  Calibrate lambda; do not reason about it from the
+  CRPS *metric*.  The optimised objective is avg_loss ~1.3e-4, NOT the reported
+  train_err ~2.4e-2 -- confusing the two put an earlier estimate about 190x too
+  high, and at lambda ~1 the penalty would be roughly 200x the objective and
+  would destroy the model on the first step.  Measured penalty is ~5e-3 m^2, so
+  a 10-20% share corresponds to lambda of order 1e-3, not order 1.
 """
 
 from __future__ import annotations

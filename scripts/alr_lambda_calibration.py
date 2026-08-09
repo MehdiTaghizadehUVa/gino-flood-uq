@@ -1,5 +1,13 @@
 """Calibrate the dispersion-pinning weight from saved artifacts (Phase C4).
 
+LEAKAGE WARNING -- DO NOT USE FOR A REPORTED RUN AS INVOKED SO FAR.
+This script computes the penalty from whatever artifact directory it is given.
+It was first run against the 50 HELD-OUT events, which makes any lambda derived
+that way a test-set-informed hyperparameter.  Point it at the fixed 50-family
+ALR validation partition instead; those families are disjoint from both the
+training families and the held-out events.  The reported lambda = 0.003 came
+from the held-out run and must be re-derived before it supports a result.
+
 Reading the penalty out of a training log turned out not to work: the trainer's
 per-batch metrics dict never reaches the epoch summary line, and the validation
 path does not compute the penalty at all.  Rather than iterate on logging, the

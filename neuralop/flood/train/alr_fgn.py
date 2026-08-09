@@ -689,9 +689,16 @@ class AnchoredLowRankFGNTrainer(FGNTrainer):
             raise KeyError(
                 "dispersion pinning requires time_index metadata on the batch."
             )
-        reference = self.reference_dispersion.lookup(
-            _batch_family_ids(sample), time_index, step=step
+        families = _batch_family_ids(sample)
+        reference = self.reference_dispersion.lookup(families, time_index, step=step)
+        # Stratify on the reference-ensemble mean, matching the offline
+        # calibration.  Without this the penalty is tuned against one
+        # stratification and optimised against another.
+        stratify_by = self.reference_dispersion.lookup_reference_mean(
+            families, time_index, step=step
         )
+        if stratify_by is not None:
+            stratify_by = stratify_by.to(device=target.device, dtype=target.dtype)
         return dispersion_pinning_penalty(
             self._to_physical(predictions),
             self._to_physical(target),
@@ -699,6 +706,7 @@ class AnchoredLowRankFGNTrainer(FGNTrainer):
             structural_dry_mask=sample.get("structural_dry_mask"),
             wet_thresholds=self.dispersion_wet_thresholds,
             channel=self.water_depth_index,
+            stratify_by=stratify_by,
         )
 
     @staticmethod
