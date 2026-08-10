@@ -111,6 +111,14 @@ def dispersion_from_members(members: np.ndarray) -> np.ndarray:
     return _pairsum(members, axis=0) / (R * (R - 1))
 
 
+def reference_mean_variance_from_members(members: np.ndarray) -> np.ndarray:
+    """Estimated sampling variance of the finite-ensemble mean, ``s^2/R``."""
+    R = members.shape[0]
+    if R < 2:
+        raise ValueError("reference mean variance needs at least 2 members")
+    return members.var(axis=0, ddof=1) / R
+
+
 def _group_families(run_ids: list[str]) -> dict[str, list[str]]:
     families: dict[str, list[str]] = {}
     for rid in run_ids:
@@ -138,7 +146,7 @@ def build_shard(results_dir: Path, shard: int, num_shards: int, out_dir: Path,
     cell_index = build_cell_point_index(results_dir / f"{families[keys[0]][0]}.hdf", paths)
     Nv = int(len(cell_index))
 
-    disp, mean, ids, T_ref = [], [], [], None
+    disp, mean, mean_variance, ids, T_ref = [], [], [], [], None
     for i, fam in enumerate(mine, 1):
         members = np.stack([_read_depth(results_dir / f"{r}.hdf", cell_index, paths)
                             for r in families[fam]])          # [R, T, Nv]
@@ -149,6 +157,7 @@ def build_shard(results_dir: Path, shard: int, num_shards: int, out_dir: Path,
         m64 = members.astype(np.float64)
         disp.append(dispersion_from_members(m64).astype(np.float32))
         mean.append(m64.mean(axis=0).astype(np.float32))
+        mean_variance.append(reference_mean_variance_from_members(m64).astype(np.float32))
         ids.append(fam)
         if i % 25 == 0 or i == len(mine):
             print(f"  [{i}/{len(mine)}] {fam} R={members.shape[0]} T={members.shape[1]}", flush=True)
@@ -160,6 +169,7 @@ def build_shard(results_dir: Path, shard: int, num_shards: int, out_dir: Path,
         "family_ids": ids,
         "dispersion": torch.from_numpy(np.stack(disp)),   # [F, T, Nv]
         "reference_mean": torch.from_numpy(np.stack(mean)),
+        "reference_mean_variance": torch.from_numpy(np.stack(mean_variance)),
         "cell_count": Nv,
         "n_time": int(T_ref),
         "run_ids": [r for f in ids for r in families[f]],
@@ -202,6 +212,7 @@ def merge(shard_dir: Path, out_path: Path) -> None:
 
     dispersion = torch.empty((F, T, Nv), dtype=torch.float32)
     reference_mean = torch.empty((F, T, Nv), dtype=torch.float32)
+    reference_mean_variance = torch.empty((F, T, Nv), dtype=torch.float32)
 
     # pass 2: scatter each shard's rows into their global positions
     for s, group in zip(shards, per_shard_ids):
@@ -209,6 +220,7 @@ def merge(shard_dir: Path, out_path: Path) -> None:
         rows = torch.tensor([index[f] for f in group], dtype=torch.long)
         dispersion[rows] = p["dispersion"].to(torch.float32)
         reference_mean[rows] = p["reference_mean"].to(torch.float32)
+        reference_mean_variance[rows] = p["reference_mean_variance"].to(torch.float32)
         del p
 
     artifact = {
@@ -217,6 +229,7 @@ def merge(shard_dir: Path, out_path: Path) -> None:
         "family_index": index,
         "dispersion": dispersion,
         "reference_mean": reference_mean,
+        "reference_mean_variance": reference_mean_variance,
         "cell_count": int(Nv),
         "n_time": int(T),
         "n_families": F,
@@ -231,6 +244,8 @@ def merge(shard_dir: Path, out_path: Path) -> None:
     summary["dispersion_mean_m"] = float(artifact["dispersion"].mean())
     summary["dispersion_wet_mean_m"] = float(
         artifact["dispersion"][artifact["reference_mean"] > 0.01].mean())
+    summary["reference_mean_se_rms_m"] = float(
+        artifact["reference_mean_variance"].mean().sqrt())
     summary["n_runs"] = len(artifact["run_ids"])
     with out_path.with_suffix(".summary.json").open("w") as fh:
         json.dump(summary, fh, indent=2)
@@ -261,6 +276,12 @@ def selftest() -> None:
     assert abs(bias) < 4 * se, f"dispersion estimator biased: {bias:+.5f} vs 4*se {4*se:.5f}"
     print(f"[selftest 2] R=10 estimator unbiased for E|H-H'|: target {target:.5f} "
           f"est {np.mean(est):.5f} bias {bias:+.5f} (4*se {4*se:.5f})", flush=True)
+    known = np.array([[0.0], [2.0], [4.0]], dtype=np.float64)
+    np.testing.assert_allclose(
+        reference_mean_variance_from_members(known),
+        np.array([4.0 / 3.0]),
+    )
+    print("[selftest 3] reference mean sampling variance == s^2/R", flush=True)
     print("[selftest] passed", flush=True)
 
 

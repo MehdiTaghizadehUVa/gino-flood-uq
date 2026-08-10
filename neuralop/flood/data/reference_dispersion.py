@@ -66,6 +66,9 @@ def load_reference_dispersion_artifact(path: str | Path) -> dict[str, Any]:
     if str(payload.get("schema", SCHEMA)) != SCHEMA:
         raise ValueError(f"Unexpected artifact schema {payload.get('schema')!r}; expected {SCHEMA!r}.")
     payload["dispersion"] = payload["dispersion"].to(dtype=torch.float32, device="cpu")
+    for key in ("reference_mean", "reference_mean_variance"):
+        if payload.get(key) is not None:
+            payload[key] = payload[key].to(dtype=torch.float32, device="cpu")
     return payload
 
 
@@ -91,6 +94,20 @@ def validate_reference_dispersion_artifact(
         raise ValueError("Reference dispersion must be non-negative.")
     if not torch.isfinite(disp).all():
         raise ValueError("Reference dispersion contains non-finite values.")
+    for key in ("reference_mean", "reference_mean_variance"):
+        value = artifact.get(key)
+        if value is None:
+            continue
+        if tuple(value.shape) != tuple(disp.shape):
+            raise ValueError(
+                f"{key} must match dispersion shape {tuple(disp.shape)}, "
+                f"got {tuple(value.shape)}."
+            )
+        if not torch.isfinite(value).all():
+            raise ValueError(f"{key} contains non-finite values.")
+    mean_variance = artifact.get("reference_mean_variance")
+    if mean_variance is not None and torch.any(mean_variance < 0):
+        raise ValueError("reference_mean_variance must be non-negative.")
     if expected_cell_count is not None and int(artifact["cell_count"]) != int(expected_cell_count):
         raise ValueError(
             f"Reference-dispersion cell_count={artifact['cell_count']} "
@@ -126,6 +143,7 @@ class ReferenceDispersionTable:
         family_ids: Sequence[str],
         dispersion: torch.Tensor,
         reference_mean: torch.Tensor | None = None,
+        reference_mean_variance: torch.Tensor | None = None,
         scale: float = 1.0,
     ) -> None:
         self.family_ids = [str(v) for v in family_ids]
@@ -139,6 +157,10 @@ class ReferenceDispersionTable:
             None if reference_mean is None
             else reference_mean.to(dtype=torch.float32, device="cpu")
         )
+        self.reference_mean_variance = (
+            None if reference_mean_variance is None
+            else reference_mean_variance.to(dtype=torch.float32, device="cpu")
+        )
         self.scale = float(scale)
         self.n_time = int(self.dispersion.shape[1])
         self.cell_count = int(self.dispersion.shape[2])
@@ -149,6 +171,7 @@ class ReferenceDispersionTable:
             family_ids=artifact["family_ids"],
             dispersion=artifact["dispersion"],
             reference_mean=artifact.get("reference_mean"),
+            reference_mean_variance=artifact.get("reference_mean_variance"),
             **kwargs,
         )
 
@@ -196,3 +219,16 @@ class ReferenceDispersionTable:
             return None
         rows, times = self._rows_and_times(family_ids, time_index, step)
         return self.reference_mean[rows, times]
+
+    def lookup_reference_mean_variance(
+        self,
+        family_ids: Sequence[str],
+        time_index: torch.Tensor | Sequence[int],
+        *,
+        step: int = 0,
+    ) -> torch.Tensor | None:
+        """Return the exact sample-mean variance estimate ``s^2/R`` in m2."""
+        if self.reference_mean_variance is None:
+            return None
+        rows, times = self._rows_and_times(family_ids, time_index, step)
+        return self.reference_mean_variance[rows, times]

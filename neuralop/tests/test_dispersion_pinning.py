@@ -186,6 +186,22 @@ def test_lookup_step_offsets_time_for_ar_rollout():
     assert torch.allclose(stepped, base + 6.0)     # two rows of 3 cells
 
 
+def test_lookup_reference_mean_variance_indexes_family_time_and_step():
+    variance = torch.arange(2 * 5 * 3, dtype=torch.float32).reshape(2, 5, 3) / 100.0
+    table = ReferenceDispersionTable(
+        family_ids=["famA", "famB"],
+        dispersion=torch.ones(2, 5, 3),
+        reference_mean_variance=variance,
+    )
+
+    got = table.lookup_reference_mean_variance(
+        ["famB", "famA"], torch.tensor([1, 2]), step=1
+    )
+
+    torch.testing.assert_close(got[0], variance[1, 2])
+    torch.testing.assert_close(got[1], variance[0, 3])
+
+
 def test_lookup_applies_scale():
     scaled = _table(scale=0.5).lookup(["famA"], torch.tensor([0]))
     assert torch.allclose(scaled, _table(1.0).lookup(["famA"], torch.tensor([0])) * 0.5)
