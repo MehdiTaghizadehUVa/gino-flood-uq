@@ -18,6 +18,14 @@ _RUNS = {
         "k_eval": 3,
     },
     "pilot50": {"train_families": 50, "validation_families": 50},
+    "residual50_epoch1": {
+        "train_families": 50,
+        "validation_families": 50,
+        "warmup_epochs": 1,
+        "joint_epochs": 0,
+        "batch_size": 16,
+        "k_eval": 5,
+    },
     "n150": {"train_families": 150, "validation_families": 50},
     "full450": {"train_families": 450, "validation_families": 50},
 }
@@ -54,7 +62,7 @@ def render_config(*, base: Path, output: Path, run_dir: Path, run_kind: str) -> 
     training["train_family_limit"] = int(spec["train_families"])
     training["validation_family_count"] = int(spec["validation_families"])
     training["adapter_warmup_epochs"] = int(spec.get("warmup_epochs", 5))
-    training["joint_finetune_epochs"] = int(spec.get("joint_epochs", 25))
+    training["joint_finetune_epochs"] = int(spec.get("joint_epochs", 0))
     training["k_eval"] = int(spec.get("k_eval", 15))
     flood["data"]["batch_size"] = int(spec.get("batch_size", 16))
     flood["checkpoint"]["save_dir"] = str(run_dir / "checkpoints")

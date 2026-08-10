@@ -2,11 +2,11 @@
 set -euo pipefail
 
 if [[ $# -lt 1 || $# -gt 2 ]]; then
-  echo "Usage: $0 {smoke|pilot50|n150|full450} [--prepare-only]" >&2
+  echo "Usage: $0 {smoke|pilot50|residual50_epoch1|n150|full450} [--prepare-only]" >&2
   exit 2
 fi
 RUN_KIND="$1"
-[[ " smoke pilot50 n150 full450 " == *" ${RUN_KIND} "* ]] || {
+[[ " smoke pilot50 residual50_epoch1 n150 full450 " == *" ${RUN_KIND} "* ]] || {
   echo "Unknown run kind: ${RUN_KIND}" >&2
   exit 2
 }
@@ -18,7 +18,8 @@ BASE_CONFIG="${BASE_CONFIG:-${PROJECT_DIR}/config/flood/coastal/gino_pluvial_flo
 RUN_ROOT="${RUN_ROOT:-/scratch/$USER/GINO_Model/alr_fgno_pilot}"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 STAMP="$(date +%Y%m%d_%H%M%S)"
-SHA="$(git -C "${PROJECT_DIR}" rev-parse --short HEAD)"
+FULL_SHA="$(git -C "${PROJECT_DIR}" rev-parse HEAD)"
+SHA="${FULL_SHA:0:7}"
 RUN_DIR="${RUN_ROOT}/${RUN_KIND}_${STAMP}_${SHA}"
 CONFIG_PATH="${RUN_DIR}/config/${RUN_KIND}.yaml"
 mkdir -p "${RUN_DIR}/config"
@@ -37,8 +38,11 @@ if ${PREPARE_ONLY}; then
   exit 0
 fi
 
+WALLTIME="24:00:00"
+if [[ "${RUN_KIND}" == "residual50_epoch1" ]]; then WALLTIME="10:00:00"; fi
 JOB_ID="$(sbatch --parsable \
-  --export=ALL,PROJECT_DIR="${PROJECT_DIR}",ALR_CONFIG_PATH="${CONFIG_PATH}",ALR_RUN_DIR="${RUN_DIR}" \
+  --time="${WALLTIME}" \
+  --export=ALL,PROJECT_DIR="${PROJECT_DIR}",ALR_CONFIG_PATH="${CONFIG_PATH}",ALR_RUN_DIR="${RUN_DIR}",ALR_EXPECTED_COMMIT="${FULL_SHA}" \
   "${PROJECT_DIR}/scripts/slurm/train/flood_coastal_train_alr_fgn.sh")"
 printf '%s\n' "${JOB_ID}" > "${RUN_DIR}/job_id.txt"
 echo "Submitted ${JOB_ID}"
