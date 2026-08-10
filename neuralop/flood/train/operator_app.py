@@ -160,6 +160,26 @@ def _resolve_alr_config(config):
     )
     if rmse_margin < 0:
         raise ValueError("rmse_noninferiority_margin must be nonnegative.")
+    residual_cfg = _cfg_get(training_cfg, "residual_decomposition", None)
+    if bool(_cfg_get(residual_cfg, "enabled", False)):
+        if not _cfg_get(training_cfg, "reference_dispersion_path", None):
+            raise ValueError(
+                "Residual decomposition requires reference_dispersion_path."
+            )
+        if float(_cfg_get(training_cfg, "dispersion_penalty_weight", 0.0)) != 0.0:
+            raise ValueError(
+                "Residual decomposition cannot be combined with dispersion pinning."
+            )
+        if float(_cfg_get(residual_cfg, "pooled_crps_weight", 0.0)) != 0.0:
+            raise ValueError(
+                "pooled_crps_weight must remain zero in the residual pilot."
+            )
+        if float(_cfg_get(residual_cfg, "mean_loss_weight", 1.0)) < 0.0:
+            raise ValueError("mean_loss_weight must be nonnegative.")
+        if float(_cfg_get(residual_cfg, "residual_crps_weight", 1.0)) < 0.0:
+            raise ValueError("residual_crps_weight must be nonnegative.")
+        if int(_cfg_get(residual_cfg, "monitor_samples", 32)) < 2:
+            raise ValueError("Residual monitoring requires at least two samples.")
     model_cfg_payload = _to_builtin(model_cfg)
     if not isinstance(model_cfg_payload, dict):
         raise TypeError("model.anchored_low_rank must resolve to a mapping.")
@@ -1045,27 +1065,38 @@ def main():
             alr_dispersion_weight = float(
                 _cfg_get(alr_training_cfg, "dispersion_penalty_weight", 0.0)
             )
+            alr_residual_cfg = _cfg_get(
+                alr_training_cfg, "residual_decomposition", None
+            )
+            alr_residual_enabled = bool(
+                _cfg_get(alr_residual_cfg, "enabled", False)
+            )
             alr_reference_dispersion = None
-            if alr_dispersion_weight > 0.0:
+            if alr_dispersion_weight > 0.0 or alr_residual_enabled:
                 dispersion_path = _cfg_get(
                     alr_training_cfg, "reference_dispersion_path", None
                 )
                 if not dispersion_path:
                     raise ValueError(
-                        "training.anchored_low_rank.dispersion_penalty_weight > 0 "
-                        "requires training.anchored_low_rank.reference_dispersion_path."
+                        "ALR reference supervision requires "
+                        "training.anchored_low_rank.reference_dispersion_path."
                     )
                 dispersion_artifact = load_reference_dispersion_artifact(dispersion_path)
                 dispersion_summary = validate_reference_dispersion_artifact(
                     dispersion_artifact,
-                    expected_family_ids=alr_family_split.train_family_ids,
+                    expected_family_ids=(
+                        alr_family_split.train_family_ids
+                        + alr_family_split.validation_family_ids
+                    ),
                 )
                 alr_reference_dispersion = ReferenceDispersionTable.from_artifact(
                     dispersion_artifact
                 )
                 logger.info(
-                    "ALR dispersion pinning enabled (weight=%g): %s",
+                    "ALR reference supervision loaded (dispersion_weight=%g, "
+                    "residual_decomposition=%s): %s",
                     alr_dispersion_weight,
+                    alr_residual_enabled,
                     dispersion_summary,
                 )
             trainer = AnchoredLowRankFGNTrainer(
@@ -1097,6 +1128,22 @@ def main():
                 target_normalizer=normalizers.get("target"),
                 reference_dispersion=alr_reference_dispersion,
                 dispersion_penalty_weight=alr_dispersion_weight,
+                residual_decomposition_enabled=alr_residual_enabled,
+                mean_loss_weight=float(
+                    _cfg_get(alr_residual_cfg, "mean_loss_weight", 1.0)
+                ),
+                residual_crps_weight=float(
+                    _cfg_get(alr_residual_cfg, "residual_crps_weight", 1.0)
+                ),
+                residual_monitor_samples=int(
+                    _cfg_get(alr_residual_cfg, "monitor_samples", 32)
+                ),
+                residual_monitor_seed=int(
+                    _cfg_get(alr_residual_cfg, "monitor_seed", 20260809)
+                ),
+                residual_gradient_probe_batches=int(
+                    _cfg_get(alr_residual_cfg, "gradient_probe_batches", 0)
+                ),
                 **trainer_kwargs,
             )
         else:

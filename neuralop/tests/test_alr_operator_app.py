@@ -167,3 +167,40 @@ def test_alr_config_supports_adapter_only_schedule():
 
     assert enabled is True
     assert config.opt.n_epochs == 15
+
+
+def test_alr_config_resolves_residual_decomposition_without_pooled_crps():
+    config = _config()
+    config.training.anchored_low_rank.k_train = 4
+    config.training.anchored_low_rank.residual_decomposition = SimpleNamespace(
+        enabled=True,
+        mean_loss_weight=1.0,
+        residual_crps_weight=1.0,
+        pooled_crps_weight=0.0,
+        monitor_samples=32,
+        monitor_seed=20260809,
+    )
+    config.training.anchored_low_rank.reference_dispersion_path = "/tmp/reference.pt"
+    config.training.anchored_low_rank.dispersion_penalty_weight = 0.0
+
+    enabled, _, training_cfg = _resolve_alr_config(config)
+
+    assert enabled is True
+    assert training_cfg.residual_decomposition.enabled is True
+    assert config.opt.crps_n_samples == 4
+
+
+def test_alr_config_rejects_pooled_crps_in_the_residual_pilot():
+    config = _config()
+    config.training.anchored_low_rank.k_train = 4
+    config.training.anchored_low_rank.residual_decomposition = SimpleNamespace(
+        enabled=True,
+        mean_loss_weight=1.0,
+        residual_crps_weight=1.0,
+        pooled_crps_weight=0.1,
+        monitor_samples=32,
+    )
+    config.training.anchored_low_rank.reference_dispersion_path = "/tmp/reference.pt"
+
+    with pytest.raises(ValueError, match="pooled_crps_weight must remain zero"):
+        _resolve_alr_config(config)

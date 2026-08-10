@@ -25,22 +25,24 @@ flood: &FLOOD
       validation_family_count: 50
       train_family_limit: 450
       adapter_warmup_epochs: 5
-      joint_finetune_epochs: 25
+      joint_finetune_epochs: 0
       adapter_learning_rate: 1.0e-4
       backbone_learning_rate: 1.0e-5
       rmse_noninferiority_margin: 0.001
-      k_train: 2
+      k_train: 4
       k_validation: 5
       eval_member_chunk_size: 16
       k_eval: 15
-      # Dispersion pinning (Phase C).  Supervises the WITHIN-PARTICLE channel
-      # against the HEC-RAS reference dispersion E|H-H|, which is information
-      # the pooled proper score cannot see.  Weight 0 disables it and leaves
-      # the objective exactly as before.  Measured headroom: within-particle
-      # E|X1-X2| is 0.1382 m against a 0.1038 m target (shrink ~25%), freeing
-      # 0.0885 m of spread against the ~0.0618 m the epistemic channel needs.
       dispersion_penalty_weight: 0.0
-      reference_dispersion_path: "/scratch/jrj6wm/GINO_Model/alr_fgno_pilot/phase_c/reference_dispersion_train.pt"
+      reference_dispersion_path: "/scratch/jrj6wm/GINO_Model/alr_fgno_pilot/residual_pilot/reference_statistics_train.pt"
+      residual_decomposition:
+        enabled: true
+        mean_loss_weight: 1.0
+        residual_crps_weight: 1.0
+        pooled_crps_weight: 0.0
+        monitor_samples: 32
+        monitor_seed: 20260809
+        gradient_probe_batches: 3
       stage1_checkpoint_dir: "/sfs/gpfs/tardis/home/jrj6wm/GINO_Model/neuraloperator_no_physics_git_main/scripts/runtime/coastal_full_train_wvlike250/coastal_trial0035_wvlike_bs128_r48_det_a100_lr5e4_h128_uqgroup_20260407_110945_3af9ccf/checkpoint"
 
   distributed:
@@ -211,7 +213,7 @@ flood: &FLOOD
     ar_truncation_steps: 1
     training_loss: 'crps'
     fgn_ar_state_update: 'member_feedback'
-    crps_n_samples: 2
+    crps_n_samples: 4
     crps_sample_chunk_size: 1
     crps_l2_weight: 0.0
     crps_channel_weights: [1.0]

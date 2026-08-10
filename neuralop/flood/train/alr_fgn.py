@@ -41,6 +41,170 @@ class ParticleCRPSResult:
     per_particle: torch.Tensor
 
 
+@dataclass(frozen=True)
+class ResidualDecompositionComponents:
+    """Signed model and reference residuals around their respective means."""
+
+    model_residuals: torch.Tensor
+    reference_residual: torch.Tensor
+
+
+@dataclass(frozen=True)
+class ParticleMeanLossResult:
+    """Bootstrap-weighted conditional-mean MSE for each particle."""
+
+    mean: torch.Tensor
+    per_particle: torch.Tensor
+
+
+@dataclass(frozen=True)
+class ResidualCenteringMonitor:
+    """Fixed-bank discrepancy between stochastic and operational mean paths."""
+
+    discrepancy_rms: torch.Tensor
+    mc_se_rms: torch.Tensor
+    exceeds_two_se_fraction: torch.Tensor
+
+
+def residual_decomposition_components(
+    stochastic_predictions: torch.Tensor,
+    mean_predictions: torch.Tensor,
+    target: torch.Tensor,
+    reference_mean: torch.Tensor,
+) -> ResidualDecompositionComponents:
+    """Build the two residual laws without clamping either residual field.
+
+    Shapes are ``[M,K,B,N,C]``, ``[M,B,N,C]``, and ``[B,N,C]`` for the
+    final two arguments.  The same depth shift applied to predictions and
+    references cancels exactly, which is the required location/dispersion
+    separation for the pilot objective.
+    """
+    if stochastic_predictions.ndim != 5:
+        raise ValueError("stochastic_predictions must have shape [M, K, B, N, C].")
+    expected_mean_shape = (
+        stochastic_predictions.shape[0],
+        *stochastic_predictions.shape[2:],
+    )
+    if mean_predictions.shape != expected_mean_shape:
+        raise ValueError(
+            f"mean_predictions must have shape {expected_mean_shape}, "
+            f"got {tuple(mean_predictions.shape)}."
+        )
+    expected_target_shape = tuple(stochastic_predictions.shape[2:])
+    if target.shape != expected_target_shape or reference_mean.shape != expected_target_shape:
+        raise ValueError(
+            f"target and reference_mean must have shape {expected_target_shape}."
+        )
+    return ResidualDecompositionComponents(
+        model_residuals=stochastic_predictions - mean_predictions.unsqueeze(1),
+        reference_residual=target - reference_mean,
+    )
+
+
+def particle_bootstrap_mean_mse(
+    predictions: torch.Tensor,
+    reference_mean: torch.Tensor,
+    *,
+    family_weights: torch.Tensor,
+    structural_dry_mask: torch.Tensor | None = None,
+) -> ParticleMeanLossResult:
+    """Compute family-bootstrap-weighted physical-space mean-field MSE."""
+    if predictions.ndim != 4:
+        raise ValueError("predictions must have shape [M, B, N, C].")
+    particles, batch_size, n_cells, channels = predictions.shape
+    if reference_mean.shape != (batch_size, n_cells, channels):
+        raise ValueError("reference_mean must have shape [B, N, C].")
+    if family_weights.shape != (particles, batch_size):
+        raise ValueError(
+            f"family_weights must have shape {(particles, batch_size)}, "
+            f"got {tuple(family_weights.shape)}."
+        )
+    active = torch.ones(
+        batch_size, n_cells, channels,
+        device=predictions.device,
+        dtype=predictions.dtype,
+    )
+    if structural_dry_mask is not None:
+        dry = torch.as_tensor(
+            structural_dry_mask, device=predictions.device, dtype=torch.bool
+        )
+        while dry.ndim > 2 and dry.shape[-1] == 1:
+            dry = dry.squeeze(-1)
+        if dry.ndim == 1:
+            dry = dry.unsqueeze(0).expand(batch_size, n_cells)
+        if dry.shape != (batch_size, n_cells):
+            raise ValueError(
+                f"structural_dry_mask must have shape {(batch_size, n_cells)}, "
+                f"got {tuple(dry.shape)}."
+            )
+        active = active * (~dry).unsqueeze(-1).to(dtype=active.dtype)
+
+    squared_error = (predictions - reference_mean.unsqueeze(0)).square()
+    weights = family_weights.to(
+        device=predictions.device, dtype=predictions.dtype
+    ).view(particles, batch_size, 1, 1) * active.unsqueeze(0)
+    denominator = weights.sum(dim=(1, 2, 3)).clamp_min(
+        torch.finfo(predictions.dtype).eps
+    )
+    per_particle = (squared_error * weights).sum(dim=(1, 2, 3)) / denominator
+    return ParticleMeanLossResult(
+        mean=per_particle.mean(),
+        per_particle=per_particle,
+    )
+
+
+def residual_centering_monitor(
+    stochastic_predictions: torch.Tensor,
+    mean_predictions: torch.Tensor,
+    *,
+    structural_dry_mask: torch.Tensor | None = None,
+) -> ResidualCenteringMonitor:
+    """Compare a fixed Monte Carlo bank mean with the zero-latent mean path."""
+    if stochastic_predictions.ndim != 5 or stochastic_predictions.shape[1] < 2:
+        raise ValueError(
+            "stochastic_predictions must have shape [M, K>=2, B, N, C]."
+        )
+    expected_mean_shape = (
+        stochastic_predictions.shape[0],
+        *stochastic_predictions.shape[2:],
+    )
+    if mean_predictions.shape != expected_mean_shape:
+        raise ValueError(
+            f"mean_predictions must have shape {expected_mean_shape}."
+        )
+    particles, samples, batch_size, n_cells, channels = stochastic_predictions.shape
+    discrepancy = (
+        stochastic_predictions.mean(dim=1) - mean_predictions
+    ).abs()
+    mc_se = stochastic_predictions.std(dim=1, unbiased=True) / samples**0.5
+    active = torch.ones_like(discrepancy, dtype=torch.bool)
+    if structural_dry_mask is not None:
+        dry = torch.as_tensor(
+            structural_dry_mask, device=discrepancy.device, dtype=torch.bool
+        )
+        while dry.ndim > 2 and dry.shape[-1] == 1:
+            dry = dry.squeeze(-1)
+        if dry.ndim == 1:
+            dry = dry.unsqueeze(0).expand(batch_size, n_cells)
+        if dry.shape != (batch_size, n_cells):
+            raise ValueError("structural_dry_mask shape does not match predictions.")
+        active = (~dry).view(1, batch_size, n_cells, 1).expand(
+            particles, batch_size, n_cells, channels
+        )
+    discrepancy_values = discrepancy[active]
+    mc_se_values = mc_se[active]
+    if discrepancy_values.numel() == 0:
+        zero = discrepancy.new_zeros(())
+        return ResidualCenteringMonitor(zero, zero, zero)
+    return ResidualCenteringMonitor(
+        discrepancy_rms=discrepancy_values.square().mean().sqrt(),
+        mc_se_rms=mc_se_values.square().mean().sqrt(),
+        exceeds_two_se_fraction=(
+            discrepancy_values > 2.0 * mc_se_values
+        ).to(dtype=discrepancy.dtype).mean(),
+    )
+
+
 class PhysicalRMSE:
     """Wettable-domain RMSE for postprocessed physical predictions."""
 
@@ -386,6 +550,12 @@ class AnchoredLowRankFGNTrainer(FGNTrainer):
         reference_dispersion: ReferenceDispersionTable | None = None,
         dispersion_penalty_weight: float = 0.0,
         dispersion_wet_thresholds: tuple[float, float] = DEFAULT_WET_THRESHOLDS,
+        residual_decomposition_enabled: bool = False,
+        mean_loss_weight: float = 1.0,
+        residual_crps_weight: float = 1.0,
+        residual_monitor_samples: int = 32,
+        residual_monitor_seed: int = 20260809,
+        residual_gradient_probe_batches: int = 0,
         **kwargs,
     ) -> None:
         super().__init__(**kwargs)
@@ -418,6 +588,28 @@ class AnchoredLowRankFGNTrainer(FGNTrainer):
         self.target_normalizer = target_normalizer
         self.water_depth_index = int(water_depth_index)
         self.reference_dispersion = reference_dispersion
+        self.residual_decomposition_enabled = bool(residual_decomposition_enabled)
+        self.mean_loss_weight = float(mean_loss_weight)
+        self.residual_crps_weight = float(residual_crps_weight)
+        self.residual_monitor_samples = int(residual_monitor_samples)
+        self.residual_monitor_seed = int(residual_monitor_seed)
+        if self.residual_monitor_samples < 2:
+            raise ValueError("residual_monitor_samples must be at least two.")
+        monitor_generator = torch.Generator(device="cpu")
+        monitor_generator.manual_seed(self.residual_monitor_seed)
+        self._residual_monitor_latents_cpu = torch.randn(
+            self.residual_monitor_samples,
+            int(self.fgn_noise_dim),
+            generator=monitor_generator,
+            dtype=torch.float32,
+        )
+        self._residual_monitor_active = False
+        self.residual_gradient_probe_batches = max(
+            0, int(residual_gradient_probe_batches)
+        )
+        self._residual_gradient_probes_done = 0
+        self._residual_epoch_metric_sums = {}
+        self._residual_epoch_metric_counts = {}
         self.dispersion_penalty_weight = float(dispersion_penalty_weight)
         self.dispersion_wet_thresholds = (
             float(dispersion_wet_thresholds[0]),
@@ -425,6 +617,30 @@ class AnchoredLowRankFGNTrainer(FGNTrainer):
         )
         if self.dispersion_penalty_weight < 0.0:
             raise ValueError("dispersion_penalty_weight must be nonnegative.")
+        if self.mean_loss_weight < 0.0 or self.residual_crps_weight < 0.0:
+            raise ValueError("Residual-decomposition loss weights must be nonnegative.")
+        if self.residual_decomposition_enabled:
+            if self.reference_dispersion is None:
+                raise ValueError(
+                    "Residual decomposition requires a reference-dispersion table."
+                )
+            if self.reference_dispersion.reference_mean is None:
+                raise ValueError(
+                    "Residual decomposition requires reference_mean in the artifact."
+                )
+            if self.reference_dispersion.reference_mean_variance is None:
+                raise ValueError(
+                    "Residual decomposition requires reference_mean_variance in the artifact."
+                )
+            if self.target_normalizer is None:
+                raise ValueError(
+                    "Residual decomposition is scored in physical space and requires "
+                    "the target normalizer."
+                )
+            if self.dispersion_penalty_weight > 0.0:
+                raise ValueError(
+                    "Residual decomposition and dispersion pinning cannot be enabled together."
+                )
         if self.dispersion_penalty_weight > 0.0:
             if self.reference_dispersion is None:
                 raise ValueError(
@@ -499,6 +715,10 @@ class AnchoredLowRankFGNTrainer(FGNTrainer):
 
     def evaluate_all(self, epoch, eval_losses, test_loaders):
         all_metrics = {}
+        self._residual_monitor_active = bool(
+            self.residual_decomposition_enabled
+            and (int(epoch) == 0 or int(epoch) + 1 == int(self.n_epochs))
+        )
         base_rmse = self._selection_base_rmse()
         if not torch.isfinite(torch.tensor(base_rmse)):
             raise RuntimeError(
@@ -524,12 +744,17 @@ class AnchoredLowRankFGNTrainer(FGNTrainer):
             if not gate_passed:
                 loader_metrics[crps_key] = float("inf")
             all_metrics.update(loader_metrics)
+        for name, total in self._residual_epoch_metric_sums.items():
+            count = self._residual_epoch_metric_counts[name]
+            all_metrics[f"train_{name}"] = total / max(1, count)
         if self.verbose:
             self.log_eval(epoch=epoch, eval_metrics=all_metrics)
         return all_metrics
 
     def on_epoch_start(self, epoch):
         super().on_epoch_start(epoch)
+        self._residual_epoch_metric_sums = {}
+        self._residual_epoch_metric_counts = {}
         _unwrap_model(self.model).set_anchored_low_rank_training_phase(
             adapters_only=int(epoch) < self.adapter_warmup_epochs
         )
@@ -551,13 +776,20 @@ class AnchoredLowRankFGNTrainer(FGNTrainer):
             dtype=dtype,
         )
 
-    def _forward_nested_x(self, sample, *, aleatory_samples):
+    def _forward_nested_x(self, sample, *, aleatory_samples, latent_bank=None):
         batch_size = int(sample["x"].shape[0])
-        latent_bank = self._sample_common_latents(
-            count=aleatory_samples,
-            batch_size=batch_size,
-            dtype=sample["x"].dtype,
-        )
+        if latent_bank is None:
+            latent_bank = self._sample_common_latents(
+                count=aleatory_samples,
+                batch_size=batch_size,
+                dtype=sample["x"].dtype,
+            )
+        if latent_bank.shape != (
+            int(aleatory_samples), batch_size, int(self.fgn_noise_dim)
+        ):
+            raise ValueError(
+                "latent_bank must match [aleatory_samples, batch_size, fgn_noise_dim]."
+            )
         nested = make_nested_particle_batch(
             sample["x"],
             latent_bank=latent_bank,
@@ -665,8 +897,178 @@ class AnchoredLowRankFGNTrainer(FGNTrainer):
             structural_dry_mask=sample.get("structural_dry_mask"),
         )
 
+    def _zero_latent_bank(self, *, batch_size: int, dtype: torch.dtype) -> torch.Tensor:
+        return torch.zeros(
+            1,
+            int(batch_size),
+            int(self.fgn_noise_dim),
+            device=self.device,
+            dtype=dtype,
+        )
+
+    def _residual_monitor_latent_bank(
+        self, *, batch_size: int, dtype: torch.dtype
+    ) -> torch.Tensor:
+        base = self._residual_monitor_latents_cpu.to(
+            device=self.device, dtype=dtype
+        )
+        return base.unsqueeze(1).expand(
+            self.residual_monitor_samples,
+            int(batch_size),
+            int(self.fgn_noise_dim),
+        )
+
+    def _reference_mean_fields(self, sample, target, *, step: int = 0):
+        time_index = sample.get("time_index")
+        if time_index is None:
+            raise KeyError("Residual decomposition requires time_index metadata.")
+        family_ids = _batch_family_ids(sample)
+        mean = self.reference_dispersion.lookup_reference_mean(
+            family_ids, time_index, step=step
+        )
+        mean_variance = self.reference_dispersion.lookup_reference_mean_variance(
+            family_ids, time_index, step=step
+        )
+        if mean is None or mean_variance is None:
+            raise RuntimeError(
+                "Residual-decomposition artifact is missing mean or mean variance fields."
+            )
+        if target.shape[-1] != 1:
+            raise ValueError("The coastal residual pilot currently supports depth-only targets.")
+        return (
+            mean.to(device=target.device, dtype=target.dtype).unsqueeze(-1),
+            mean_variance.to(device=target.device, dtype=target.dtype).unsqueeze(-1),
+        )
+
+    @staticmethod
+    def _weighted_field_mean(field, family_weights, structural_dry_mask=None):
+        batch_size, n_cells, channels = field.shape
+        particles = family_weights.shape[0]
+        active = torch.ones_like(field)
+        if structural_dry_mask is not None:
+            dry = torch.as_tensor(
+                structural_dry_mask, device=field.device, dtype=torch.bool
+            )
+            while dry.ndim > 2 and dry.shape[-1] == 1:
+                dry = dry.squeeze(-1)
+            if dry.ndim == 1:
+                dry = dry.unsqueeze(0).expand(batch_size, n_cells)
+            if dry.shape != (batch_size, n_cells):
+                raise ValueError("structural_dry_mask shape does not match field.")
+            active = active * (~dry).unsqueeze(-1).to(dtype=field.dtype)
+        weights = family_weights.to(device=field.device, dtype=field.dtype).view(
+            particles, batch_size, 1, 1
+        ) * active.unsqueeze(0)
+        denominator = weights.sum(dim=(1, 2, 3)).clamp_min(
+            torch.finfo(field.dtype).eps
+        )
+        per_particle = (field.unsqueeze(0) * weights).sum(dim=(1, 2, 3)) / denominator
+        return per_particle.mean()
+
+    def _residual_decomposition_loss(
+        self,
+        predictions,
+        mean_predictions,
+        target,
+        sample,
+        training_loss,
+        *,
+        step: int = 0,
+    ):
+        prediction_physical = self._to_physical(predictions)
+        mean_physical = self._to_physical(mean_predictions)
+        target_physical = self._to_physical(target)
+        reference_mean, reference_mean_variance = self._reference_mean_fields(
+            sample, target_physical, step=step
+        )
+        components = residual_decomposition_components(
+            prediction_physical,
+            mean_physical,
+            target_physical,
+            reference_mean,
+        )
+        family_weights = self.family_bootstrap.weights_for(_batch_family_ids(sample))
+        mean_result = particle_bootstrap_mean_mse(
+            mean_physical,
+            reference_mean,
+            family_weights=family_weights,
+            structural_dry_mask=sample.get("structural_dry_mask"),
+        )
+        residual_result = particle_bootstrap_crps(
+            components.model_residuals,
+            components.reference_residual,
+            family_weights=family_weights,
+            loss_fn=training_loss,
+            structural_dry_mask=sample.get("structural_dry_mask"),
+        )
+        reference_mean_variance_average = self._weighted_field_mean(
+            reference_mean_variance,
+            family_weights,
+            sample.get("structural_dry_mask"),
+        )
+        data_loss = (
+            self.mean_loss_weight * mean_result.mean
+            + self.residual_crps_weight * residual_result.mean
+        )
+        return data_loss, mean_result, residual_result, reference_mean_variance_average
+
     def _anchor_penalty(self):
         return _unwrap_model(self.model).anchored_low_rank_offset_penalty()
+
+    def _mean_residual_gradient_cosine(self, mean_loss, residual_loss):
+        parameters = [
+            parameter
+            for parameter in self.model.parameters()
+            if parameter.requires_grad
+        ]
+        mean_gradients = torch.autograd.grad(
+            mean_loss,
+            parameters,
+            retain_graph=True,
+            allow_unused=True,
+        )
+        residual_gradients = torch.autograd.grad(
+            residual_loss,
+            parameters,
+            retain_graph=True,
+            allow_unused=True,
+        )
+        dot = mean_loss.new_zeros(())
+        mean_norm = mean_loss.new_zeros(())
+        residual_norm = mean_loss.new_zeros(())
+        for mean_gradient, residual_gradient in zip(
+            mean_gradients, residual_gradients
+        ):
+            if mean_gradient is not None:
+                mean_norm = mean_norm + mean_gradient.detach().square().sum()
+            if residual_gradient is not None:
+                residual_norm = residual_norm + residual_gradient.detach().square().sum()
+            if mean_gradient is not None and residual_gradient is not None:
+                dot = dot + (
+                    mean_gradient.detach() * residual_gradient.detach()
+                ).sum()
+        denominator = (mean_norm * residual_norm).sqrt()
+        if float(denominator) == 0.0:
+            return dot
+        return dot / denominator
+
+    def _record_residual_training_metrics(self, metrics):
+        for name in (
+            "alr_mean_mse_m2",
+            "alr_mean_rmse_m",
+            "alr_residual_crps_m",
+            "alr_reference_mean_se_rms_m",
+            "alr_mean_residual_gradient_cosine",
+        ):
+            if name not in metrics:
+                continue
+            value = float(torch.as_tensor(metrics[name]).detach().cpu())
+            self._residual_epoch_metric_sums[name] = (
+                self._residual_epoch_metric_sums.get(name, 0.0) + value
+            )
+            self._residual_epoch_metric_counts[name] = (
+                self._residual_epoch_metric_counts.get(name, 0) + 1
+            )
 
     def _to_physical(self, tensor: torch.Tensor) -> torch.Tensor:
         """Invert the training normalization; dispersion targets are in metres."""
@@ -754,9 +1156,27 @@ class AnchoredLowRankFGNTrainer(FGNTrainer):
             sample,
             aleatory_samples=self.crps_n_samples,
         )
-        result = self._particle_loss(predictions, sample["y"], sample, training_loss)
+        if self.residual_decomposition_enabled:
+            zero_latent = self._zero_latent_bank(
+                batch_size=int(sample["x"].shape[0]), dtype=sample["x"].dtype
+            )
+            mean_predictions = self._forward_nested_x(
+                sample, aleatory_samples=1, latent_bank=zero_latent
+            ).squeeze(1)
+            data_loss, mean_result, result, mean_variance = (
+                self._residual_decomposition_loss(
+                    predictions,
+                    mean_predictions,
+                    sample["y"],
+                    sample,
+                    training_loss,
+                )
+            )
+        else:
+            result = self._particle_loss(predictions, sample["y"], sample, training_loss)
+            data_loss = result.mean
         penalty = self._anchor_penalty()
-        loss = result.mean + self.anchor_penalty_weight * penalty
+        loss = data_loss + self.anchor_penalty_weight * penalty
         dispersion = self._dispersion_penalty(predictions, sample["y"], sample)
         if dispersion is not None:
             loss = loss + self.dispersion_penalty_weight * dispersion.penalty
@@ -766,6 +1186,22 @@ class AnchoredLowRankFGNTrainer(FGNTrainer):
         }
         metrics["alr_anchor_penalty"] = penalty.detach()
         metrics["alr_anchor_displacement_norm"] = penalty.detach().sqrt()
+        if self.residual_decomposition_enabled:
+            metrics["alr_mean_mse_m2"] = mean_result.mean.detach()
+            metrics["alr_mean_rmse_m"] = mean_result.mean.detach().sqrt()
+            metrics["alr_residual_crps_m"] = result.mean.detach()
+            metrics["alr_reference_mean_se_rms_m"] = mean_variance.detach().sqrt()
+            if (
+                self._residual_gradient_probes_done
+                < self.residual_gradient_probe_batches
+            ):
+                metrics["alr_mean_residual_gradient_cosine"] = (
+                    self._mean_residual_gradient_cosine(
+                        self.mean_loss_weight * mean_result.mean,
+                        self.residual_crps_weight * result.mean,
+                    )
+                )
+                self._residual_gradient_probes_done += 1
         if dispersion is not None:
             metrics.update(self._dispersion_metrics(dispersion))
         if self.rel_l2_loss_fn is not None:
@@ -775,6 +1211,7 @@ class AnchoredLowRankFGNTrainer(FGNTrainer):
                     sample["y"],
                     structural_dry_mask=sample.get("structural_dry_mask"),
                 )
+        self._record_residual_training_metrics(metrics)
         return loss, metrics
 
     def _train_one_batch_ar(self, idx, sample, training_loss):
@@ -793,6 +1230,17 @@ class AnchoredLowRankFGNTrainer(FGNTrainer):
             aleatory,
             *sample["dynamic"].shape,
         ).clone()
+        mean_histories = None
+        zero_latent_bank = None
+        if self.residual_decomposition_enabled:
+            mean_histories = sample["dynamic"].unsqueeze(0).unsqueeze(0).expand(
+                self.num_particles,
+                1,
+                *sample["dynamic"].shape,
+            ).clone()
+            zero_latent_bank = self._zero_latent_bank(
+                batch_size=batch_size, dtype=sample["dynamic"].dtype
+            )
         boundary = sample["boundary"].clone()
         latent_bank = self._sample_common_latents(
             count=aleatory,
@@ -808,6 +1256,8 @@ class AnchoredLowRankFGNTrainer(FGNTrainer):
         window_loss = None
         total_loss_scalar = 0.0
         last_result = None
+        last_mean_result = None
+        last_mean_variance = None
         last_dispersion = None
         last_rel_l2 = None
         penalty = None
@@ -820,9 +1270,30 @@ class AnchoredLowRankFGNTrainer(FGNTrainer):
                 boundary=boundary,
                 latent_bank=latent_bank,
             )
-            result = self._particle_loss(predictions, target, sample, training_loss)
+            if self.residual_decomposition_enabled:
+                mean_predictions = self._forward_nested_ar_step(
+                    sample,
+                    histories=mean_histories,
+                    boundary=boundary,
+                    latent_bank=zero_latent_bank,
+                ).squeeze(1)
+                data_loss, mean_result, result, mean_variance = (
+                    self._residual_decomposition_loss(
+                        predictions,
+                        mean_predictions,
+                        target,
+                        sample,
+                        training_loss,
+                        step=step,
+                    )
+                )
+                last_mean_result = mean_result
+                last_mean_variance = mean_variance
+            else:
+                result = self._particle_loss(predictions, target, sample, training_loss)
+                data_loss = result.mean
             penalty = self._anchor_penalty()
-            step_loss = result.mean + self.anchor_penalty_weight * penalty
+            step_loss = data_loss + self.anchor_penalty_weight * penalty
             dispersion = self._dispersion_penalty(
                 predictions, target, sample, step=step
             )
@@ -851,6 +1322,14 @@ class AnchoredLowRankFGNTrainer(FGNTrainer):
                 water_depth_index=self.water_depth_index,
             )
             histories = update_nested_history(histories, feedback)
+            if self.residual_decomposition_enabled:
+                mean_feedback = clamp_nested_feedback(
+                    mean_predictions.unsqueeze(1),
+                    structural_dry_mask=sample.get("structural_dry_mask"),
+                    target_normalizer=self.target_normalizer,
+                    water_depth_index=self.water_depth_index,
+                )
+                mean_histories = update_nested_history(mean_histories, mean_feedback)
 
             next_boundary = boundary_sequence[:, step : step + 1]
             boundary = torch.cat([boundary[:, 1:], next_boundary], dim=1)
@@ -861,6 +1340,8 @@ class AnchoredLowRankFGNTrainer(FGNTrainer):
                 self._backward_ar_window(window_loss, n_ar_steps=n_ar_steps)
                 window_loss = None
                 histories = histories.detach()
+                if mean_histories is not None:
+                    mean_histories = mean_histories.detach()
 
         if gradient_mode == "truncated":
             loss = torch.tensor(
@@ -876,12 +1357,20 @@ class AnchoredLowRankFGNTrainer(FGNTrainer):
         }
         metrics["alr_anchor_penalty"] = penalty.detach()
         metrics["alr_anchor_displacement_norm"] = penalty.detach().sqrt()
+        if self.residual_decomposition_enabled:
+            metrics["alr_mean_mse_m2"] = last_mean_result.mean.detach()
+            metrics["alr_mean_rmse_m"] = last_mean_result.mean.detach().sqrt()
+            metrics["alr_residual_crps_m"] = last_result.mean.detach()
+            metrics["alr_reference_mean_se_rms_m"] = (
+                last_mean_variance.detach().sqrt()
+            )
         if last_dispersion is not None:
             metrics.update(self._dispersion_metrics(last_dispersion))
         if last_rel_l2 is not None:
             metrics["rel_l2"] = last_rel_l2
         if gradient_mode == "truncated":
             metrics["_backward_done"] = True
+        self._record_residual_training_metrics(metrics)
         return loss, metrics
 
     def train_one_batch(self, idx, sample, training_loss):
@@ -914,6 +1403,82 @@ class AnchoredLowRankFGNTrainer(FGNTrainer):
             aleatory_samples=self.eval_aleatory_samples,
         )
         target = sample["y"]
+        monitor_losses = {}
+        if self.residual_decomposition_enabled and self._residual_monitor_active:
+            zero_latent = self._zero_latent_bank(
+                batch_size=batch_size, dtype=sample["x"].dtype
+            )
+            mean_predictions = self._forward_nested_x(
+                sample, aleatory_samples=1, latent_bank=zero_latent
+            ).squeeze(1)
+            monitor_latents = self._residual_monitor_latent_bank(
+                batch_size=batch_size, dtype=sample["x"].dtype
+            )
+            monitor_predictions = self._forward_nested_x(
+                sample,
+                aleatory_samples=self.residual_monitor_samples,
+                latent_bank=monitor_latents,
+            )
+            mean_physical = self._to_physical(mean_predictions)
+            monitor_physical = self._to_physical(monitor_predictions)
+            target_physical = self._to_physical(target)
+            reference_mean, reference_mean_variance = self._reference_mean_fields(
+                sample, target_physical
+            )
+            unit_family_weights = torch.ones(
+                self.num_particles,
+                batch_size,
+                device=target_physical.device,
+                dtype=target_physical.dtype,
+            )
+            mean_result = particle_bootstrap_mean_mse(
+                mean_physical,
+                reference_mean,
+                family_weights=unit_family_weights,
+                structural_dry_mask=sample.get("structural_dry_mask"),
+            )
+            components = residual_decomposition_components(
+                monitor_physical,
+                mean_physical,
+                target_physical,
+                reference_mean,
+            )
+            crps_loss = self._particle_crps_loss(
+                eval_losses.get("crps"), self.residual_monitor_samples
+            )
+            if crps_loss is None:
+                raise TypeError(
+                    "Residual monitoring requires a CRPS loss in eval_losses."
+                )
+            residual_result = particle_bootstrap_crps(
+                components.model_residuals,
+                components.reference_residual,
+                family_weights=unit_family_weights,
+                loss_fn=crps_loss,
+                structural_dry_mask=sample.get("structural_dry_mask"),
+            )
+            centering = residual_centering_monitor(
+                monitor_physical,
+                mean_physical,
+                structural_dry_mask=sample.get("structural_dry_mask"),
+            )
+            mean_variance_average = self._weighted_field_mean(
+                reference_mean_variance,
+                unit_family_weights,
+                sample.get("structural_dry_mask"),
+            )
+            monitor_losses = {
+                "alr_monitor_mean_rmse_m": mean_result.mean.sqrt(),
+                "alr_monitor_residual_crps_m": residual_result.mean,
+                "alr_monitor_centering_discrepancy_rms_m": centering.discrepancy_rms,
+                "alr_monitor_centering_mc_se_rms_m": centering.mc_se_rms,
+                "alr_monitor_centering_exceeds_2se_fraction": (
+                    centering.exceeds_two_se_fraction
+                ),
+                "alr_monitor_reference_mean_se_rms_m": (
+                    mean_variance_average.sqrt()
+                ),
+            }
         if self.data_processor is not None:
             flat = predictions.reshape(
                 self.num_particles * self.eval_aleatory_samples * batch_size,
@@ -966,6 +1531,7 @@ class AnchoredLowRankFGNTrainer(FGNTrainer):
         losses["alr_particle_correlation_mean"] = self._particle_correlation_mean(
             predictions
         )
+        losses.update(monitor_losses)
         penalty = self._anchor_penalty()
         losses["alr_anchor_displacement_norm"] = penalty.sqrt()
         return losses, mean_prediction if return_output else None

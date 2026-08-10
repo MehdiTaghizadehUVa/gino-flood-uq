@@ -2,6 +2,7 @@ import torch
 from torch.utils.data import Dataset
 
 from neuralop.flood.data.normalization_impl import NormalizedDatasetOnTheFly
+from neuralop.flood.data.reference_dispersion import ReferenceDispersionTable
 from neuralop.flood.losses import FloodMaskedCRPSLoss
 from neuralop.flood.train.alr_fgn import (
     DirichletFamilyBootstrap,
@@ -9,8 +10,12 @@ from neuralop.flood.train.alr_fgn import (
     clamp_nested_feedback,
     make_nested_particle_batch,
     particle_bootstrap_crps,
+    particle_bootstrap_mean_mse,
     split_alr_family_indices,
     update_nested_history,
+    residual_decomposition_components,
+    residual_centering_monitor,
+    PhysicalRMSE,
 )
 from neuralop.losses.probabilistic_losses import CRPSLoss
 
@@ -156,6 +161,72 @@ def test_nested_feedback_is_clamped_before_each_particle_member_history_update()
     assert not torch.equal(updated[0, 0], updated[1, 1])
 
 
+def test_residual_decomposition_is_signed_and_invariant_to_common_depth_shift():
+    stochastic = torch.tensor(
+        [[[[[1.0]], [[4.0]]], [[[3.0]], [[0.0]]]]]
+    )  # [M=1,K=2,B=2,N=1,C=1]
+    mean = torch.tensor([[[[2.0]], [[2.0]]]])
+    target = torch.tensor([[[1.0]], [[5.0]]])
+    reference_mean = torch.tensor([[[3.0]], [[4.0]]])
+
+    original = residual_decomposition_components(
+        stochastic, mean, target, reference_mean
+    )
+    shifted = residual_decomposition_components(
+        stochastic + 7.0,
+        mean + 7.0,
+        target + 7.0,
+        reference_mean + 7.0,
+    )
+
+    torch.testing.assert_close(original.model_residuals, shifted.model_residuals)
+    torch.testing.assert_close(original.reference_residual, shifted.reference_residual)
+    assert torch.any(original.model_residuals < 0)
+    assert torch.any(original.reference_residual < 0)
+
+
+def test_particle_mean_mse_uses_particle_family_weights_and_excludes_dry_cells():
+    predictions = torch.tensor(
+        [
+            [[[[1.0], [99.0]]], [[[3.0], [99.0]]]],
+            [[[[3.0], [99.0]]], [[[1.0], [99.0]]]],
+        ]
+    ).reshape(2, 2, 2, 1)
+    reference_mean = torch.zeros(2, 2, 1)
+    family_weights = torch.tensor([[3.0, 1.0], [1.0, 3.0]])
+
+    result = particle_bootstrap_mean_mse(
+        predictions,
+        reference_mean,
+        family_weights=family_weights,
+        structural_dry_mask=torch.tensor([[False, True], [False, True]]),
+    )
+
+    torch.testing.assert_close(result.per_particle, torch.tensor([3.0, 3.0]))
+    torch.testing.assert_close(result.mean, torch.tensor(3.0))
+
+
+def test_residual_centering_monitor_reports_rms_mc_error_and_exceedance_fraction():
+    stochastic = torch.tensor(
+        [[
+            [[[-1.0], [2.0]]],
+            [[[1.0], [2.0]]],
+            [[[-1.0], [2.0]]],
+            [[[1.0], [2.0]]],
+        ]]
+    )
+    mean = torch.zeros(1, 1, 2, 1)
+
+    monitor = residual_centering_monitor(stochastic, mean)
+
+    torch.testing.assert_close(
+        monitor.discrepancy_rms,
+        torch.tensor(2.0).sqrt(),
+    )
+    torch.testing.assert_close(monitor.exceeds_two_se_fraction, torch.tensor(0.5))
+    assert monitor.mc_se_rms > 0
+
+
 class _RecordingALRModel(torch.nn.Module):
     def __init__(self):
         super().__init__()
@@ -167,11 +238,13 @@ class _RecordingALRModel(torch.nn.Module):
         self.adapters_only = None
         self.anchored_low_rank_active = True
         self.x_calls = []
+        self.latent_calls = []
 
     def forward(self, *, x, ada_in, particle_ids, **kwargs):
         del kwargs
         self.last_particle_ids = particle_ids.detach().clone()
         self.last_latents = ada_in.detach().clone()
+        self.latent_calls.append(ada_in.detach().clone())
         self.x_calls.append(x.detach().clone())
         particle_delta = particle_ids[:, None, None] * 0.2 if self.anchored_low_rank_active else 0.0
         return x[..., :1] + self.shared + particle_delta + ada_in[:, None, :1]
@@ -254,6 +327,107 @@ def test_alr_trainer_vectorizes_particles_and_keeps_common_aleatory_bank():
     assert output.shape == sample["y"].shape
 
 
+def test_residual_decomposition_trainer_uses_an_explicit_zero_latent_mean_path():
+    model = _RecordingALRModel()
+    bootstrap = DirichletFamilyBootstrap(
+        family_ids=["F001"], num_particles=2, seed=23
+    )
+    table = ReferenceDispersionTable(
+        family_ids=["F001"],
+        dispersion=torch.ones(1, 2, 1),
+        reference_mean=torch.zeros(1, 2, 1),
+        reference_mean_variance=torch.full((1, 2, 1), 0.01),
+    )
+    trainer = AnchoredLowRankFGNTrainer(
+        model=model,
+        n_epochs=1,
+        device="cpu",
+        fgn_noise_dim=1,
+        crps_n_samples=2,
+        num_particles=2,
+        family_bootstrap=bootstrap,
+        anchor_penalty_weight=0.0,
+        adapter_warmup_epochs=1,
+        target_normalizer=_IdentityNormalizer(),
+        reference_dispersion=table,
+        residual_decomposition_enabled=True,
+        mean_loss_weight=1.0,
+        residual_crps_weight=1.0,
+        residual_gradient_probe_batches=1,
+        use_progress_bar=False,
+    )
+    trainer.optimizer = torch.optim.Adam(model.parameters(), lr=1.0e-3)
+    trainer.regularizer = None
+    trainer.epoch = 0
+    trainer._sample_common_latents = lambda **kwargs: torch.tensor(
+        [[[0.5]], [[-0.5]]], dtype=kwargs["dtype"]
+    )
+    sample = {
+        "x": torch.zeros(1, 1, 1),
+        "y": torch.zeros(1, 1, 1),
+        "input_geom": torch.zeros(1, 1, 2),
+        "latent_queries": torch.zeros(1, 1, 1, 2),
+        "output_queries": torch.zeros(1, 1, 2),
+        "family_id": ["F001"],
+        "time_index": torch.tensor([0]),
+    }
+    loss_fn = FloodMaskedCRPSLoss(
+        policy="legacy_full_domain",
+        base_loss=CRPSLoss(n_samples=2, reduction="mean"),
+    )
+
+    loss, metrics = trainer.train_one_batch(0, sample, loss_fn)
+
+    assert torch.isfinite(loss)
+    assert any(torch.count_nonzero(latent) == 0 for latent in model.latent_calls)
+    assert set(metrics) >= {
+        "alr_mean_mse_m2",
+        "alr_residual_crps_m",
+        "alr_reference_mean_se_rms_m",
+        "alr_mean_residual_gradient_cosine",
+    }
+
+    first_bank = trainer._residual_monitor_latent_bank(
+        batch_size=2, dtype=torch.float32
+    )
+    second_bank = trainer._residual_monitor_latent_bank(
+        batch_size=2, dtype=torch.float32
+    )
+    torch.testing.assert_close(first_bank, second_bank)
+    torch.testing.assert_close(first_bank[:, 0], first_bank[:, 1])
+
+    trainer._residual_monitor_active = True
+    eval_losses, _ = trainer.eval_one_batch(
+        sample,
+        {
+            "crps": FloodMaskedCRPSLoss(
+                policy="legacy_full_domain",
+                base_loss=CRPSLoss(n_samples=4, reduction="mean"),
+            )
+        },
+    )
+    assert set(eval_losses) >= {
+        "alr_monitor_mean_rmse_m",
+        "alr_monitor_residual_crps_m",
+        "alr_monitor_centering_discrepancy_rms_m",
+        "alr_monitor_centering_mc_se_rms_m",
+        "alr_monitor_centering_exceeds_2se_fraction",
+    }
+
+    trainer.configure_selection_contract(base_rmse=10.0)
+    epoch_crps = FloodMaskedCRPSLoss(
+        policy="legacy_full_domain",
+        base_loss=CRPSLoss(n_samples=4, reduction="mean"),
+    )
+    epoch_metrics = trainer.evaluate_all(
+        0,
+        {"crps": epoch_crps, "rmse": PhysicalRMSE()},
+        {"test": [sample]},
+    )
+    assert "train_alr_mean_mse_m2" in epoch_metrics
+    assert "train_alr_mean_residual_gradient_cosine" in epoch_metrics
+
+
 class _IdentityNormalizer:
     def transform(self, values):
         return values
@@ -313,6 +487,72 @@ def test_alr_autoregressive_training_feeds_back_each_nested_trajectory():
     assert len(model.x_calls) == 2
     second_step_dynamic = model.x_calls[1][..., -1]
     assert torch.unique(second_step_dynamic).numel() > 1
+
+
+def test_residual_decomposition_ar_rollout_keeps_a_separate_mean_history():
+    model = _RecordingALRModel()
+    bootstrap = DirichletFamilyBootstrap(
+        family_ids=["F001"], num_particles=2, seed=29
+    )
+    table = ReferenceDispersionTable(
+        family_ids=["F001"],
+        dispersion=torch.ones(1, 3, 1),
+        reference_mean=torch.zeros(1, 3, 1),
+        reference_mean_variance=torch.full((1, 3, 1), 0.01),
+    )
+    trainer = AnchoredLowRankFGNTrainer(
+        model=model,
+        n_epochs=1,
+        device="cpu",
+        fgn_noise_dim=1,
+        crps_n_samples=2,
+        num_particles=2,
+        family_bootstrap=bootstrap,
+        anchor_penalty_weight=0.0,
+        adapter_warmup_epochs=1,
+        target_normalizer=_IdentityNormalizer(),
+        reference_dispersion=table,
+        residual_decomposition_enabled=True,
+        ar_rollout_steps=2,
+        ar_finetune_start_epoch=0,
+        use_progress_bar=False,
+    )
+    trainer.optimizer = torch.optim.Adam(model.parameters(), lr=1.0e-3)
+    trainer.regularizer = None
+    trainer.epoch = 0
+    trainer._sample_common_latents = lambda **kwargs: torch.tensor(
+        [[[0.5]], [[-0.5]]], dtype=kwargs["dtype"]
+    )
+    sample = {
+        "x": torch.zeros(1, 1, 3),
+        "y": torch.zeros(1, 1, 1),
+        "static": torch.zeros(1, 1, 1),
+        "boundary": torch.zeros(1, 1, 1, 1),
+        "dynamic": torch.zeros(1, 1, 1, 1),
+        "target_sequence": torch.zeros(1, 2, 1, 1),
+        "boundary_sequence": torch.zeros(1, 2, 1, 1),
+        "structural_dry_mask": torch.zeros(1, 1, dtype=torch.bool),
+        "input_geom": torch.zeros(1, 1, 2),
+        "latent_queries": torch.zeros(1, 1, 1, 2),
+        "output_queries": torch.zeros(1, 1, 2),
+        "family_id": ["F001"],
+        "time_index": torch.tensor([0]),
+    }
+    loss_fn = FloodMaskedCRPSLoss(
+        policy="legacy_full_domain",
+        base_loss=CRPSLoss(n_samples=2, reduction="mean"),
+    )
+
+    loss, metrics = trainer.train_one_batch(0, sample, loss_fn)
+
+    assert torch.isfinite(loss)
+    assert len(model.x_calls) == 4
+    assert model.x_calls[1].shape[0] == 2
+    assert model.x_calls[3].shape[0] == 2
+    torch.testing.assert_close(
+        model.x_calls[3][..., -1].reshape(-1), torch.tensor([0.1, 0.3])
+    )
+    assert "alr_mean_mse_m2" in metrics
 
 
 class _IndexedFamilies:
