@@ -15,6 +15,7 @@ from neuralop.flood.train.alr_fgn import (
     update_nested_history,
     residual_decomposition_components,
     residual_centering_monitor,
+    stable_gradient_cosine,
     PhysicalRMSE,
 )
 from neuralop.losses.probabilistic_losses import CRPSLoss
@@ -579,6 +580,33 @@ def test_alr_family_split_has_no_member_leakage_and_nested_training_subsets():
     for index in full.train_indices:
         run_id, _ = _IndexedFamilies.sample_index[index]
         assert run_id.rpartition("_sim")[0] in full.train_family_ids
+
+
+def test_alr_family_split_can_bound_windows_per_family_for_smoke_tests():
+    limited = split_alr_family_indices(
+        _IndexedFamilies(),
+        validation_family_count=1,
+        seed=31,
+        train_family_limit=2,
+        max_windows_per_family=1,
+    )
+
+    assert len(limited.train_indices) == 2
+    assert len(limited.validation_indices) == 1
+    assert {
+        _IndexedFamilies.sample_index[index][0].rpartition("_sim")[0]
+        for index in limited.train_indices
+    } == set(limited.train_family_ids)
+
+
+def test_gradient_cosine_is_stable_when_float32_squared_norms_overflow():
+    large = torch.tensor([1.0e20], dtype=torch.float32)
+
+    aligned = stable_gradient_cosine([large], [large], reference=large)
+    opposed = stable_gradient_cosine([large], [-large], reference=large)
+
+    torch.testing.assert_close(aligned, torch.tensor(1.0))
+    torch.testing.assert_close(opposed, torch.tensor(-1.0))
 
 
 def test_alr_validation_selection_enforces_physical_rmse_noninferiority():

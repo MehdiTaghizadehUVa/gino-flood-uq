@@ -66,6 +66,33 @@ class ResidualCenteringMonitor:
     exceeds_two_se_fraction: torch.Tensor
 
 
+def stable_gradient_cosine(
+    first_gradients,
+    second_gradients,
+    *,
+    reference: torch.Tensor,
+) -> torch.Tensor:
+    """Cosine similarity with float64 reductions to avoid float32 norm overflow."""
+    if len(first_gradients) != len(second_gradients):
+        raise ValueError("Gradient collections must have the same length.")
+    dot = torch.zeros((), device=reference.device, dtype=torch.float64)
+    first_norm_sq = torch.zeros_like(dot)
+    second_norm_sq = torch.zeros_like(dot)
+    for first, second in zip(first_gradients, second_gradients):
+        if first is not None:
+            first64 = first.detach().to(dtype=torch.float64)
+            first_norm_sq = first_norm_sq + first64.square().sum()
+        if second is not None:
+            second64 = second.detach().to(dtype=torch.float64)
+            second_norm_sq = second_norm_sq + second64.square().sum()
+        if first is not None and second is not None:
+            dot = dot + (first64 * second64).sum()
+    denominator = (first_norm_sq * second_norm_sq).sqrt()
+    if denominator.item() == 0.0:
+        return reference.new_zeros(())
+    return (dot / denominator).clamp(-1.0, 1.0).to(dtype=reference.dtype)
+
+
 def residual_decomposition_components(
     stochastic_predictions: torch.Tensor,
     mean_predictions: torch.Tensor,
@@ -234,6 +261,7 @@ def split_alr_family_indices(
     validation_family_count: int,
     seed: int,
     train_family_limit: int | None = None,
+    max_windows_per_family: int | None = None,
 ) -> ALRFamilySplit:
     """Create deterministic member-safe family splits from a flood dataset."""
 
@@ -264,15 +292,28 @@ def split_alr_family_indices(
         fit_pool = fit_pool[:limit]
     train_set = set(fit_pool)
     validation_set = set(validation_families)
+
+    window_limit = None
+    if max_windows_per_family is not None:
+        window_limit = int(max_windows_per_family)
+        if window_limit <= 0:
+            raise ValueError("max_windows_per_family must be positive when set.")
+
+    def selected_indices(selected_families):
+        counts = {family: 0 for family in selected_families}
+        selected = []
+        for index, family in enumerate(family_by_index):
+            if family not in selected_families:
+                continue
+            if window_limit is not None and counts[family] >= window_limit:
+                continue
+            selected.append(index)
+            counts[family] += 1
+        return selected
+
     return ALRFamilySplit(
-        train_indices=[
-            index for index, family in enumerate(family_by_index) if family in train_set
-        ],
-        validation_indices=[
-            index
-            for index, family in enumerate(family_by_index)
-            if family in validation_set
-        ],
+        train_indices=selected_indices(train_set),
+        validation_indices=selected_indices(validation_set),
         train_family_ids=list(fit_pool),
         validation_family_ids=list(validation_families),
     )
@@ -1033,24 +1074,11 @@ class AnchoredLowRankFGNTrainer(FGNTrainer):
             retain_graph=True,
             allow_unused=True,
         )
-        dot = mean_loss.new_zeros(())
-        mean_norm = mean_loss.new_zeros(())
-        residual_norm = mean_loss.new_zeros(())
-        for mean_gradient, residual_gradient in zip(
-            mean_gradients, residual_gradients
-        ):
-            if mean_gradient is not None:
-                mean_norm = mean_norm + mean_gradient.detach().square().sum()
-            if residual_gradient is not None:
-                residual_norm = residual_norm + residual_gradient.detach().square().sum()
-            if mean_gradient is not None and residual_gradient is not None:
-                dot = dot + (
-                    mean_gradient.detach() * residual_gradient.detach()
-                ).sum()
-        denominator = (mean_norm * residual_norm).sqrt()
-        if float(denominator) == 0.0:
-            return dot
-        return dot / denominator
+        return stable_gradient_cosine(
+            mean_gradients,
+            residual_gradients,
+            reference=mean_loss,
+        )
 
     def _record_residual_training_metrics(self, metrics):
         for name in (

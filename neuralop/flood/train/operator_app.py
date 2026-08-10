@@ -456,6 +456,9 @@ def main():
             train_family_limit=_cfg_get(
                 alr_training_cfg, "train_family_limit", None
             ),
+            max_windows_per_family=_cfg_get(
+                alr_training_cfg, "max_windows_per_family", None
+            ),
         )
         train_data_raw = Subset(full_dataset, alr_family_split.train_indices)
         test_data_raw_temp = Subset(

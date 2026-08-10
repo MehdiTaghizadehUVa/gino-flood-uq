@@ -16,6 +16,7 @@ _RUNS = {
         "joint_epochs": 0,
         "batch_size": 1,
         "k_eval": 3,
+        "max_windows_per_family": 2,
     },
     "pilot50": {"train_families": 50, "validation_families": 50},
     "residual50_epoch1": {
@@ -64,6 +65,12 @@ def render_config(*, base: Path, output: Path, run_dir: Path, run_kind: str) -> 
     training["adapter_warmup_epochs"] = int(spec.get("warmup_epochs", 5))
     training["joint_finetune_epochs"] = int(spec.get("joint_epochs", 0))
     training["k_eval"] = int(spec.get("k_eval", 15))
+    if spec.get("max_windows_per_family") is None:
+        training.pop("max_windows_per_family", None)
+    else:
+        training["max_windows_per_family"] = int(
+            spec["max_windows_per_family"]
+        )
     flood["data"]["batch_size"] = int(spec.get("batch_size", 16))
     flood["checkpoint"]["save_dir"] = str(run_dir / "checkpoints")
     flood["checkpoint"]["resume_from_dir"] = None
