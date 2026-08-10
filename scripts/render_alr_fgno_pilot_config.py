@@ -13,7 +13,7 @@ _RUNS = {
         "train_families": 2,
         "validation_families": 2,
         "warmup_epochs": 1,
-        "joint_epochs": 1,
+        "joint_epochs": 0,
         "batch_size": 1,
         "k_eval": 3,
     },

@@ -39,6 +39,7 @@ if ${PREPARE_ONLY}; then
 fi
 
 WALLTIME="24:00:00"
+if [[ "${RUN_KIND}" == "smoke" ]]; then WALLTIME="02:00:00"; fi
 if [[ "${RUN_KIND}" == "residual50_epoch1" ]]; then WALLTIME="10:00:00"; fi
 JOB_ID="$(sbatch --parsable \
   --time="${WALLTIME}" \
