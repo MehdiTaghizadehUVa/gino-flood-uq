@@ -72,7 +72,11 @@ def stable_gradient_cosine(
     *,
     reference: torch.Tensor,
 ) -> torch.Tensor:
-    """Cosine similarity with float64 reductions to avoid float32 norm overflow."""
+    """Cosine similarity in real parameter space with float64 reductions.
+
+    Complex spectral parameters contribute both real and imaginary coordinates.
+    Viewing them as real pairs avoids silently discarding half of the gradient.
+    """
     if len(first_gradients) != len(second_gradients):
         raise ValueError("Gradient collections must have the same length.")
     dot = torch.zeros((), device=reference.device, dtype=torch.float64)
@@ -80,10 +84,16 @@ def stable_gradient_cosine(
     second_norm_sq = torch.zeros_like(dot)
     for first, second in zip(first_gradients, second_gradients):
         if first is not None:
-            first64 = first.detach().to(dtype=torch.float64)
+            first64 = first.detach()
+            if torch.is_complex(first64):
+                first64 = torch.view_as_real(first64)
+            first64 = first64.to(dtype=torch.float64)
             first_norm_sq = first_norm_sq + first64.square().sum()
         if second is not None:
-            second64 = second.detach().to(dtype=torch.float64)
+            second64 = second.detach()
+            if torch.is_complex(second64):
+                second64 = torch.view_as_real(second64)
+            second64 = second64.to(dtype=torch.float64)
             second_norm_sq = second_norm_sq + second64.square().sum()
         if first is not None and second is not None:
             dot = dot + (first64 * second64).sum()

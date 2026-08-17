@@ -609,6 +609,17 @@ def test_gradient_cosine_is_stable_when_float32_squared_norms_overflow():
     torch.testing.assert_close(opposed, torch.tensor(-1.0))
 
 
+def test_gradient_cosine_preserves_complex_spectral_components():
+    first = torch.tensor([1.0 + 1.0j], dtype=torch.complex64)
+    second = torch.tensor([1.0 - 1.0j], dtype=torch.complex64)
+
+    cosine = stable_gradient_cosine([first], [second], reference=first.real)
+
+    # Treat complex parameters as pairs of real coordinates. These vectors are
+    # orthogonal: (1, 1) dot (1, -1) = 0.
+    torch.testing.assert_close(cosine, torch.tensor(0.0))
+
+
 def test_alr_validation_selection_enforces_physical_rmse_noninferiority():
     from neuralop.flood.train.alr_fgn import PhysicalRMSE
 
