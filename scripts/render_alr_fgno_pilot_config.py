@@ -24,7 +24,9 @@ _RUNS = {
         "validation_families": 50,
         "warmup_epochs": 1,
         "joint_epochs": 0,
-        "batch_size": 16,
+        "batch_size": 8,
+        "grad_accum_steps": 2,
+        "eval_member_chunk_size": 4,
         "k_eval": 5,
     },
     "n150": {"train_families": 150, "validation_families": 50},
@@ -72,6 +74,10 @@ def render_config(*, base: Path, output: Path, run_dir: Path, run_kind: str) -> 
             spec["max_windows_per_family"]
         )
     flood["data"]["batch_size"] = int(spec.get("batch_size", 16))
+    flood["opt"]["grad_accum_steps"] = int(spec.get("grad_accum_steps", 1))
+    training["eval_member_chunk_size"] = int(
+        spec.get("eval_member_chunk_size", training.get("eval_member_chunk_size", 4))
+    )
     flood["checkpoint"]["save_dir"] = str(run_dir / "checkpoints")
     flood["checkpoint"]["resume_from_dir"] = None
     flood["rollout"]["out_dir"] = str(run_dir / "rollout")
